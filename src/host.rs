@@ -113,7 +113,7 @@ impl<T: 'static> Host<T> {
         }
     }
 
-    pub(crate) fn tick(&self) {
+    pub(crate) fn tick(&self, config: &Config) {
         match self {
             Host::Simulated(Simulated {
                 rt,
@@ -124,9 +124,9 @@ impl<T: 'static> Host<T> {
             }) => rt.block_on(async {
                 local
                     .run_until(async {
-                        tokio::time::sleep(Duration::from_millis(1)).await;
+                        tokio::time::sleep(config.tick).await;
 
-                        if epoch.elapsed() > Duration::from_secs(10) {
+                        if epoch.elapsed() > config.duration {
                             panic!("Ran for 10 seconds without completing");
                         }
 

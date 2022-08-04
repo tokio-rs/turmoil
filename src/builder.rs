@@ -1,12 +1,15 @@
-use crate::{Dns, Sim};
+use crate::{Config, Dns, Sim};
 
 use rand::{RngCore, SeedableRng};
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::time::Duration;
 
 /// Configure the simulation
 pub struct Builder {
     rng: Option<Box<dyn RngCore>>,
+
+    config: Config,
 
     /// How often any given link should fail (on a per-message basis).
     fail_rate: f64,
@@ -19,9 +22,22 @@ impl Builder {
     pub fn new() -> Builder {
         Builder {
             rng: None,
+            config: Config::default(),
             fail_rate: 0.0,
             repair_rate: 0.0,
         }
+    }
+
+    /// How long the test should run for in simulated time
+    pub fn simulation_duration(&mut self, value: Duration) -> &mut Self {
+        self.config.duration = value;
+        self
+    }
+
+    /// How much simulated time should elapse each tick.
+    pub fn tick_duration(&mut self, value: Duration) -> &mut Self {
+        self.config.tick = value;
+        self
     }
 
     /// Set the random number generator used to fuzz
@@ -40,21 +56,21 @@ impl Builder {
         self
     }
 
-    pub fn build<T: 'static>(&mut self) -> Sim<T> {
+    pub fn build<T: 'static>(&self) -> Sim<T> {
+        self.build_with_rng(Box::new(rand::rngs::SmallRng::from_entropy()))
+    }
+
+    pub fn build_with_rng<T: 'static>(&self, rng: Box<dyn RngCore>) -> Sim<T> {
         use crate::{Inner, Topology};
 
         let topology = Topology::new(self.fail_rate, self.repair_rate);
 
-        let rand = self
-            .rng
-            .take()
-            .unwrap_or_else(|| Box::new(rand::rngs::SmallRng::from_entropy()));
-
         Sim {
             inner: Rc::new(Inner {
+                config: self.config.clone(),
                 hosts: Default::default(),
                 topology: RefCell::new(topology),
-                rand: RefCell::new(rand),
+                rand: RefCell::new(rng),
             }),
             dns: Dns::new(),
         }

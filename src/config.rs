@@ -1,16 +1,19 @@
-pub(crate) struct Config {
-    /// How often any given link should fail (on a per-message basis).
-    fail_rate: f64,
+use std::time::Duration;
 
-    /// How often any given link should be repaired (on a per-message basis);
-    repair_rate: f64,
+#[derive(Clone)]
+pub(crate) struct Config {
+    /// How long the test should run for
+    pub(crate) duration: Duration,
+
+    /// How much simulated time should elapse each tick
+    pub(crate) tick: Duration,
 }
 
 impl Default for Config {
     fn default() -> Config {
         Config {
-            fail_rate: 0.0,
-            repair_rate: 0.0,
+            duration: Duration::from_secs(10),
+            tick: Duration::from_millis(1),
         }
     }
 }

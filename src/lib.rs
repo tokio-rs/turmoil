@@ -1,6 +1,9 @@
 mod builder;
 pub use builder::Builder;
 
+mod config;
+use config::Config;
+
 mod dns;
 use dns::Dns;
 pub use dns::ToSocketAddr;
@@ -33,6 +36,9 @@ pub struct Sim<T: 'static> {
 }
 
 struct Inner<T: 'static> {
+    /// Configuration settings
+    config: Config,
+
     /// Map of socket address to host
     hosts: RefCell<IndexMap<SocketAddr, Host<T>>>,
 
@@ -86,7 +92,7 @@ impl<T: 'static> Sim<T> {
             let hosts = self.inner.hosts.borrow();
 
             for host in hosts.values() {
-                host.tick();
+                host.tick(&self.inner.config);
             }
         }
     }
