@@ -22,12 +22,13 @@ use top::Topology;
 use indexmap::IndexMap;
 use rand::RngCore;
 use std::cell::RefCell;
+use std::fmt::Debug;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::rc::Rc;
 
 /// Network simulation
-pub struct Sim<T: 'static> {
+pub struct Sim<T: Debug + 'static> {
     /// Strong reference to shared simulation state
     inner: Rc<Inner<T>>,
 
@@ -35,7 +36,7 @@ pub struct Sim<T: 'static> {
     dns: Dns,
 }
 
-struct Inner<T: 'static> {
+struct Inner<T: Debug + 'static> {
     /// Configuration settings
     config: Config,
 
@@ -48,7 +49,7 @@ struct Inner<T: 'static> {
     rand: RefCell<Box<dyn RngCore>>,
 }
 
-impl<T: 'static> Sim<T> {
+impl<T: Debug + 'static> Sim<T> {
     /// Register a host with the simulation
     pub fn register<F, R>(&mut self, addr: impl ToSocketAddr, host: F)
     where

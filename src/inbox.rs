@@ -1,20 +1,21 @@
 use indexmap::IndexMap;
 use std::cell::RefCell;
 use std::collections::VecDeque;
+use std::fmt::Debug;
 use std::net::SocketAddr;
 use std::rc::Rc;
 use tokio::sync::Notify;
 use tokio::time::Instant;
 
-pub(crate) struct Sender<T> {
+pub(crate) struct Sender<T: Debug> {
     inner: Rc<Inner<T>>,
 }
 
-pub(crate) struct Receiver<T> {
+pub(crate) struct Receiver<T: Debug> {
     inner: Rc<Inner<T>>,
 }
 
-pub(crate) fn channel<T>() -> (Sender<T>, Receiver<T>) {
+pub(crate) fn channel<T: Debug>() -> (Sender<T>, Receiver<T>) {
     let inner = Rc::new(Inner {
         messages: Default::default(),
         notify: Default::default(),
@@ -47,7 +48,7 @@ struct Message<T> {
     value: T,
 }
 
-impl<T> Sender<T> {
+impl<T: Debug> Sender<T> {
     /// Send a message
     pub(crate) fn send(&self, src: SocketAddr, deliver_at: Instant, message: T) {
         self.inner
@@ -78,7 +79,7 @@ impl<T> Sender<T> {
     }
 }
 
-impl<T> Receiver<T> {
+impl<T: Debug> Receiver<T> {
     /// Receive a message
     pub(crate) async fn recv(&self, mut now: impl FnMut() -> Instant) -> (T, SocketAddr) {
         loop {
@@ -129,7 +130,7 @@ impl<T> Receiver<T> {
     }
 }
 
-impl<T> Clone for Receiver<T> {
+impl<T: Debug> Clone for Receiver<T> {
     fn clone(&self) -> Receiver<T> {
         Receiver {
             inner: self.inner.clone(),

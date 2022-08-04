@@ -4,11 +4,12 @@ use tokio::runtime::Runtime;
 use tokio::task::LocalSet;
 use tokio::time::{Duration, Instant};
 
+use std::fmt::Debug;
 use std::net::SocketAddr;
 use std::rc::Rc;
 
 /// A host in the simulated network.
-pub(crate) enum Host<T: 'static> {
+pub(crate) enum Host<T: Debug + 'static> {
     /// A simulated host may have its clock skewed, experience partitions, or
     /// become isolated.
     Simulated(Simulated<T>),
@@ -22,7 +23,7 @@ pub(crate) enum Host<T: 'static> {
 }
 
 /// A simulated host
-pub(crate) struct Simulated<T> {
+pub(crate) struct Simulated<T: Debug> {
     /// Handle to the Tokio runtime driving this host. Each runtime may have a
     /// different sense of "now" which simulates clock skew.
     pub(crate) rt: Runtime,
@@ -37,7 +38,7 @@ pub(crate) struct Simulated<T> {
     pub(crate) epoch: Instant,
 }
 
-impl<T: 'static> Host<T> {
+impl<T: Debug + 'static> Host<T> {
     /// Create a new simulated host in the simulated network
     pub(crate) fn new_simulated(
         addr: SocketAddr,
