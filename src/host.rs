@@ -40,11 +40,7 @@ pub(crate) struct Simulated<T: Debug> {
 
 impl<T: Debug + 'static> Host<T> {
     /// Create a new simulated host in the simulated network
-    pub(crate) fn new_simulated(
-        addr: SocketAddr,
-        dns: Dns,
-        inner: &Rc<super::Inner<T>>,
-    ) -> (Host<T>, Io<T>) {
+    pub(crate) fn new_simulated(addr: SocketAddr, inner: &Rc<super::Inner<T>>) -> (Host<T>, Io<T>) {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_time()
             .start_paused(true)
@@ -73,17 +69,12 @@ impl<T: Debug + 'static> Host<T> {
             inner: Rc::downgrade(inner),
             addr,
             inbox: rx,
-            dns,
         };
 
         (host, stream)
     }
 
-    pub(crate) fn new_client(
-        addr: SocketAddr,
-        dns: Dns,
-        inner: &Rc<super::Inner<T>>,
-    ) -> (Host<T>, Io<T>) {
+    pub(crate) fn new_client(addr: SocketAddr, inner: &Rc<super::Inner<T>>) -> (Host<T>, Io<T>) {
         let (tx, rx) = inbox::channel();
 
         let host = Host::Client {
@@ -95,7 +86,6 @@ impl<T: Debug + 'static> Host<T> {
             inner: Rc::downgrade(&inner),
             addr,
             inbox: rx,
-            dns,
         };
 
         (host, stream)

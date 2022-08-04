@@ -15,9 +15,6 @@ pub struct Io<T: Debug + 'static> {
 
     /// Inbox receiver
     pub(crate) inbox: inbox::Receiver<T>,
-
-    /// Handle to the hostname lookup
-    pub(crate) dns: Dns,
 }
 
 impl<T: Debug + 'static> Io<T> {
@@ -25,7 +22,7 @@ impl<T: Debug + 'static> Io<T> {
     pub fn send(&self, dst: impl dns::ToSocketAddr, message: T) {
         let inner = self.inner.upgrade().unwrap();
 
-        let dst = self.dns.lookup(dst);
+        let dst = inner.dns.lookup(dst);
         let hosts = inner.hosts.borrow();
         let mut topology = inner.topology.borrow_mut();
         let mut rand = inner.rand.borrow_mut();
@@ -44,12 +41,14 @@ impl<T: Debug + 'static> Io<T> {
 
     /// Receive a message from a specific address
     pub async fn recv_from(&self, src: impl dns::ToSocketAddr) -> T {
-        let src = self.dns.lookup(src);
+        let inner = self.inner.upgrade().unwrap();
+        let src = inner.dns.lookup(src);
         self.inbox.recv_from(src, || self.now()).await
     }
 
     pub fn lookup(&self, addr: impl crate::dns::ToSocketAddr) -> SocketAddr {
-        self.dns.lookup(addr)
+        let inner = self.inner.upgrade().unwrap();
+        inner.dns.lookup(addr)
     }
 
     fn now(&self) -> Instant {
@@ -65,7 +64,6 @@ impl<T: Debug + 'static> Clone for Io<T> {
             inner: self.inner.clone(),
             addr: self.addr,
             inbox: self.inbox.clone(),
-            dns: self.dns.clone(),
         }
     }
 }
