@@ -127,7 +127,7 @@ impl<T: 'static> Host<T> {
                         tokio::time::sleep(config.tick).await;
 
                         if epoch.elapsed() > config.duration {
-                            panic!("Ran for 10 seconds without completing");
+                            panic!("Ran for {:?} without completing", config.duration);
                         }
 
                         inbox.tick(Instant::now());
