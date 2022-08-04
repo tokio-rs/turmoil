@@ -1,11 +1,9 @@
 use indexmap::IndexMap;
 use std::cell::RefCell;
 use std::net::SocketAddr;
-use std::rc::Rc;
 
-#[derive(Clone)]
 pub struct Dns {
-    inner: Rc<RefCell<Inner>>,
+    inner: RefCell<Inner>,
 }
 
 struct Inner {
@@ -20,10 +18,10 @@ pub trait ToSocketAddr {
 impl Dns {
     pub(crate) fn new() -> Dns {
         Dns {
-            inner: Rc::new(RefCell::new(Inner {
+            inner: RefCell::new(Inner {
                 next: 1,
                 names: IndexMap::new(),
-            })),
+            }),
         }
     }
 

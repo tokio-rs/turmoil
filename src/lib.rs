@@ -31,14 +31,14 @@ use std::rc::Rc;
 pub struct Sim<T: Debug + 'static> {
     /// Strong reference to shared simulation state
     inner: Rc<Inner<T>>,
-
-    /// Handle to the hostname lookup
-    dns: Dns,
 }
 
 struct Inner<T: Debug + 'static> {
     /// Configuration settings
     config: Config,
+
+    /// Hostname lookup
+    dns: Dns,
 
     /// Map of socket address to host
     hosts: RefCell<IndexMap<SocketAddr, Host<T>>>,
@@ -56,7 +56,7 @@ impl<T: Debug + 'static> Sim<T> {
         F: FnOnce(Io<T>) -> R,
         R: Future<Output = ()> + 'static,
     {
-        let addr = self.dns.lookup(addr);
+        let addr = self.inner.dns.lookup(addr);
         let mut hosts = self.inner.hosts.borrow_mut();
 
         assert!(
@@ -65,7 +65,7 @@ impl<T: Debug + 'static> Sim<T> {
         );
 
         // Create the node with its paired inbound channel
-        let (node, stream) = Host::new_simulated(addr, self.dns.clone(), &self.inner);
+        let (node, stream) = Host::new_simulated(addr, &self.inner);
 
         match &node {
             Host::Simulated(crate::host::Simulated { rt, local, .. }) => {
@@ -100,13 +100,13 @@ impl<T: Debug + 'static> Sim<T> {
 
     pub fn client(&self, addr: impl dns::ToSocketAddr) -> Io<T> {
         let addr = self.lookup(addr);
-        let (host, stream) = Host::new_client(addr, self.dns.clone(), &self.inner);
+        let (host, stream) = Host::new_client(addr, &self.inner);
         self.inner.hosts.borrow_mut().insert(addr, host);
         stream
     }
 
     pub fn lookup(&self, addr: impl dns::ToSocketAddr) -> SocketAddr {
-        self.dns.lookup(addr)
+        self.inner.dns.lookup(addr)
     }
 
     // Introduce a full network partition between two hosts

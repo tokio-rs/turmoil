@@ -69,11 +69,11 @@ impl Builder {
         Sim {
             inner: Rc::new(Inner {
                 config: self.config.clone(),
+                dns: Dns::new(),
                 hosts: Default::default(),
                 topology: RefCell::new(topology),
                 rand: RefCell::new(rng),
             }),
-            dns: Dns::new(),
         }
     }
 }
