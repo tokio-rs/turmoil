@@ -1,8 +1,9 @@
 use crate::{Config, Dns, Sim};
-
 use rand::{RngCore, SeedableRng};
 use std::cell::RefCell;
+use std::fmt::Debug;
 use std::rc::Rc;
+
 use std::time::Duration;
 
 /// Configure the simulation
@@ -56,11 +57,11 @@ impl Builder {
         self
     }
 
-    pub fn build<T: 'static>(&self) -> Sim<T> {
+    pub fn build<T: Debug + 'static>(&self) -> Sim<T> {
         self.build_with_rng(Box::new(rand::rngs::SmallRng::from_entropy()))
     }
 
-    pub fn build_with_rng<T: 'static>(&self, rng: Box<dyn RngCore>) -> Sim<T> {
+    pub fn build_with_rng<T: Debug + 'static>(&self, rng: Box<dyn RngCore>) -> Sim<T> {
         use crate::{Inner, Topology};
 
         let topology = Topology::new(self.fail_rate, self.repair_rate);
