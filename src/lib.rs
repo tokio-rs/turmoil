@@ -1,3 +1,6 @@
+mod builder;
+pub use builder::Builder;
+
 mod dns;
 use dns::Dns;
 pub use dns::ToSocketAddr;
@@ -18,7 +21,7 @@ use rand::RngCore;
 use std::cell::RefCell;
 use std::future::Future;
 use std::net::SocketAddr;
-use std::rc::{self, Rc};
+use std::rc::Rc;
 
 /// Network simulation
 pub struct Sim<T: 'static> {
@@ -27,23 +30,6 @@ pub struct Sim<T: 'static> {
 
     /// Handle to the hostname lookup
     dns: Dns,
-}
-
-/// Network builder
-pub struct Net<T: 'static> {
-    /// Shared state
-    inner: rc::Weak<Inner<T>>,
-
-    dns: Dns,
-
-    /// Hosts in the simulated network
-    hosts: IndexMap<SocketAddr, Host<T>>,
-
-    /// How often any given link should fail (on a per-message basis).
-    fail_rate: f64,
-
-    /// How often any given link should be repaired (on a per-message basis);
-    repair_rate: f64,
 }
 
 struct Inner<T: 'static> {
@@ -57,28 +43,34 @@ struct Inner<T: 'static> {
 }
 
 impl<T: 'static> Sim<T> {
-    pub fn build(rng: Box<dyn RngCore>, builder: impl FnOnce(&mut Net<T>)) -> Sim<T> {
-        let dns = Dns::new();
+    /// Register a host with the simulation
+    pub fn register<F, R>(&mut self, addr: impl ToSocketAddr, host: F)
+    where
+        F: FnOnce(Io<T>) -> R,
+        R: Future<Output = ()> + 'static,
+    {
+        let addr = self.dns.lookup(addr);
+        let mut hosts = self.inner.hosts.borrow_mut();
 
-        let inner = Rc::new_cyclic(|inner| {
-            let mut net = Net {
-                inner: inner.clone(),
-                dns: dns.clone(),
-                hosts: IndexMap::new(),
-                fail_rate: 0.0,
-                repair_rate: 0.0,
-            };
+        assert!(
+            !hosts.contains_key(&addr),
+            "already registered host for the given socket address"
+        );
 
-            builder(&mut net);
+        // Create the node with its paired inbound channel
+        let (node, stream) = Host::new_simulated(addr, self.dns.clone(), &self.inner);
 
-            Inner {
-                hosts: RefCell::new(net.hosts),
-                topology: RefCell::new(Topology::new(net.fail_rate, net.repair_rate)),
-                rand: RefCell::new(rng),
+        match &node {
+            Host::Simulated(crate::host::Simulated { rt, local, .. }) => {
+                // Initialize the host
+                let _guard = rt.enter();
+                let host_task = host(stream);
+                local.spawn_local(host_task);
             }
-        });
+            _ => unreachable!(),
+        }
 
-        Sim { inner, dns }
+        hosts.insert(addr, node);
     }
 
     pub fn run_until<R>(&self, until: impl Future<Output = R>) -> R {
@@ -124,46 +116,5 @@ impl<T: 'static> Sim<T> {
         let b = self.lookup(b);
 
         self.inner.topology.borrow_mut().repair(a, b);
-    }
-}
-
-impl<T: 'static> Net<T> {
-    pub fn set_fail_rate(&mut self, value: f64) {
-        self.fail_rate = value;
-    }
-
-    pub fn set_repair_rate(&mut self, value: f64) {
-        self.repair_rate = value;
-    }
-
-    pub fn register<F, R>(&mut self, addr: impl dns::ToSocketAddr, host: F)
-    where
-        F: FnOnce(Io<T>) -> R,
-        R: Future<Output = ()> + 'static,
-    {
-        let addr = self.dns.lookup(addr);
-        assert!(
-            !self.hosts.contains_key(&addr),
-            "already registered host for the given socket address"
-        );
-
-        // Create the node with its paired inbound channel
-        let (node, stream) = Host::new_simulated(addr, self.dns.clone(), &self.inner);
-
-        match &node {
-            Host::Simulated(host::Simulated { rt, local, .. }) => {
-                // Initialize the host
-                let _guard = rt.enter();
-                let host_task = host(stream);
-                local.spawn_local(host_task);
-            }
-            _ => unreachable!(),
-        }
-
-        self.hosts.insert(addr, node);
-    }
-
-    pub fn lookup(&self, addr: impl dns::ToSocketAddr) -> SocketAddr {
-        self.dns.lookup(addr)
     }
 }

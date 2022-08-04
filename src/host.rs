@@ -5,7 +5,7 @@ use tokio::task::LocalSet;
 use tokio::time::{Duration, Instant};
 
 use std::net::SocketAddr;
-use std::rc::{self, Rc};
+use std::rc::Rc;
 
 /// A host in the simulated network.
 pub(crate) enum Host<T: 'static> {
@@ -42,7 +42,7 @@ impl<T: 'static> Host<T> {
     pub(crate) fn new_simulated(
         addr: SocketAddr,
         dns: Dns,
-        inner: &rc::Weak<super::Inner<T>>,
+        inner: &Rc<super::Inner<T>>,
     ) -> (Host<T>, Io<T>) {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_time()
@@ -69,7 +69,7 @@ impl<T: 'static> Host<T> {
             epoch,
         });
         let stream = Io {
-            inner: inner.clone(),
+            inner: Rc::downgrade(inner),
             addr,
             inbox: rx,
             dns,
