@@ -17,7 +17,11 @@ pub(crate) struct Topology {
 struct Pair(SocketAddr, SocketAddr);
 
 pub(crate) enum Link {
-    Partition,
+    /// The link was explicitly partitioned.
+    ExplicitPartition,
+
+    /// The link was randomly partitioned.
+    RandPartition,
 }
 
 pub(crate) struct Latency {
@@ -63,14 +67,17 @@ impl Topology {
                 // Should the link be broken?
                 if !client && self.latency.fail_rate > 0.0 {
                     if rand.gen_bool(self.latency.fail_rate) {
-                        self.links.insert(pair, Link::Partition);
+                        self.links.insert(pair, Link::RandPartition);
                         return None;
                     }
                 }
 
                 Some(self.latency.send_delay(rand))
             }
-            Some(Link::Partition) => {
+            Some(Link::ExplicitPartition) => {
+                None
+            }
+            Some(Link::RandPartition) => {
                 // Should the link be repaired?
                 if !client && self.latency.repair_rate > 0.0 {
                     if rand.gen_bool(self.latency.repair_rate) {
@@ -87,7 +94,7 @@ impl Topology {
     pub(crate) fn partition(&mut self, a: SocketAddr, b: SocketAddr) {
         let pair = Pair::new(a, b);
 
-        self.links.insert(pair, Link::Partition);
+        self.links.insert(pair, Link::ExplicitPartition);
     }
 
     pub(crate) fn repair(&mut self, a: SocketAddr, b: SocketAddr) {
