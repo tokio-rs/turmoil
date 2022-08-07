@@ -28,12 +28,12 @@ use std::net::SocketAddr;
 use std::rc::Rc;
 
 /// Network simulation
-pub struct Sim<T: Debug + 'static> {
+pub struct Sim {
     /// Strong reference to shared simulation state
-    inner: Rc<Inner<T>>,
+    inner: Rc<Inner>,
 }
 
-struct Inner<T: Debug + 'static> {
+struct Inner {
     /// Configuration settings
     config: Config,
 
@@ -41,7 +41,7 @@ struct Inner<T: Debug + 'static> {
     dns: Dns,
 
     /// Map of socket address to host
-    hosts: RefCell<IndexMap<SocketAddr, Host<T>>>,
+    hosts: RefCell<IndexMap<SocketAddr, Host>>,
 
     /// Tracks the state of links between node pairs.
     topology: RefCell<Topology>,
@@ -49,11 +49,12 @@ struct Inner<T: Debug + 'static> {
     rand: RefCell<Box<dyn RngCore>>,
 }
 
-impl<T: Debug + 'static> Sim<T> {
+impl Sim {
     /// Register a host with the simulation
-    pub fn register<F, R>(&mut self, addr: impl ToSocketAddr, host: F)
+    pub fn register<F, M, R>(&mut self, addr: impl ToSocketAddr, host: F)
     where
-        F: FnOnce(Io<T>) -> R,
+        F: FnOnce(Io<M>) -> R,
+        M: Debug + 'static,
         R: Future<Output = ()> + 'static,
     {
         let addr = self.inner.dns.lookup(addr);
@@ -98,7 +99,7 @@ impl<T: Debug + 'static> Sim<T> {
         }
     }
 
-    pub fn client(&self, addr: impl dns::ToSocketAddr) -> Io<T> {
+    pub fn client<M: Debug + 'static>(&self, addr: impl dns::ToSocketAddr) -> Io<M> {
         let addr = self.lookup(addr);
         let (host, stream) = Host::new_client(addr, &self.inner);
         self.inner.hosts.borrow_mut().insert(addr, host);

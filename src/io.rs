@@ -1,25 +1,29 @@
 use crate::*;
 
 use std::fmt::Debug;
+use std::marker::PhantomData;
 use std::net::SocketAddr;
 use std::rc;
 use tokio::time::Instant;
 
 /// Bi-directional stream for the node.
-pub struct Io<T: Debug + 'static> {
+pub struct Io<M: Debug + 'static> {
     /// Handle to shared state
-    pub(crate) inner: rc::Weak<super::Inner<T>>,
+    pub(crate) inner: rc::Weak<super::Inner>,
 
     /// Socket address of the host owning the message stream
     pub addr: SocketAddr,
 
     /// Inbox receiver
-    pub(crate) inbox: inbox::Receiver<T>,
+    pub(crate) inbox: inbox::Receiver,
+
+    /// Io message typing
+    pub(crate) _p: PhantomData<M>,
 }
 
-impl<T: Debug + 'static> Io<T> {
+impl<M: Debug + 'static> Io<M> {
     /// Send a message to a remote host
-    pub fn send(&self, dst: impl dns::ToSocketAddr, message: T) {
+    pub fn send(&self, dst: impl dns::ToSocketAddr, message: M) {
         let inner = self.inner.upgrade().unwrap();
 
         let dst = inner.dns.lookup(dst);
@@ -30,20 +34,23 @@ impl<T: Debug + 'static> Io<T> {
         let client = hosts[&dst].is_client() || hosts[&self.addr].is_client();
 
         if let Some(delay) = topology.send_delay(&mut *rand, self.addr, dst, client) {
-            hosts[&dst].send(self.addr, delay, message);
+            hosts[&dst].send(self.addr, delay, Box::new(message));
         }
     }
 
     /// Receive a message
-    pub async fn recv(&self) -> (T, SocketAddr) {
-        self.inbox.recv(|| self.now()).await
+    pub async fn recv(&self) -> (M, SocketAddr) {
+        let (msg, addr) = self.inbox.recv(|| self.now()).await;
+        let typed = msg.downcast::<M>().unwrap();
+        (*typed, addr)
     }
 
     /// Receive a message from a specific address
-    pub async fn recv_from(&self, src: impl dns::ToSocketAddr) -> T {
+    pub async fn recv_from(&self, src: impl dns::ToSocketAddr) -> M {
         let inner = self.inner.upgrade().unwrap();
         let src = inner.dns.lookup(src);
-        self.inbox.recv_from(src, || self.now()).await
+        let msg = self.inbox.recv_from(src, || self.now()).await;
+        *msg.downcast::<M>().unwrap()
     }
 
     pub fn lookup(&self, addr: impl crate::dns::ToSocketAddr) -> SocketAddr {
@@ -58,12 +65,13 @@ impl<T: Debug + 'static> Io<T> {
     }
 }
 
-impl<T: Debug + 'static> Clone for Io<T> {
-    fn clone(&self) -> Io<T> {
+impl<M: Debug + 'static> Clone for Io<M> {
+    fn clone(&self) -> Io<M> {
         Io {
             inner: self.inner.clone(),
             addr: self.addr,
             inbox: self.inbox.clone(),
+            _p: PhantomData,
         }
     }
 }

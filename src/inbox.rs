@@ -1,21 +1,21 @@
 use indexmap::IndexMap;
+use std::any::Any;
 use std::cell::RefCell;
 use std::collections::VecDeque;
-use std::fmt::Debug;
 use std::net::SocketAddr;
 use std::rc::Rc;
 use tokio::sync::Notify;
 use tokio::time::Instant;
 
-pub(crate) struct Sender<T: Debug> {
-    inner: Rc<Inner<T>>,
+pub(crate) struct Sender {
+    inner: Rc<Inner>,
 }
 
-pub(crate) struct Receiver<T: Debug> {
-    inner: Rc<Inner<T>>,
+pub(crate) struct Receiver {
+    inner: Rc<Inner>,
 }
 
-pub(crate) fn channel<T: Debug>() -> (Sender<T>, Receiver<T>) {
+pub(crate) fn channel() -> (Sender, Receiver) {
     let inner = Rc::new(Inner {
         messages: Default::default(),
         notify: Default::default(),
@@ -29,15 +29,15 @@ pub(crate) fn channel<T: Debug>() -> (Sender<T>, Receiver<T>) {
     (tx, rx)
 }
 
-struct Inner<T> {
+struct Inner {
     /// Received messages
-    messages: RefCell<IndexMap<SocketAddr, VecDeque<Message<T>>>>,
+    messages: RefCell<IndexMap<SocketAddr, VecDeque<Message>>>,
 
     /// Notify that a message has been sent.
     notify: Notify,
 }
 
-struct Message<T> {
+struct Message {
     /// Who sent the message
     src: SocketAddr,
 
@@ -45,12 +45,12 @@ struct Message<T> {
     deliver_at: Instant,
 
     /// Message value
-    value: T,
+    value: Box<dyn Any>,
 }
 
-impl<T: Debug> Sender<T> {
+impl Sender {
     /// Send a message
-    pub(crate) fn send(&self, src: SocketAddr, deliver_at: Instant, message: T) {
+    pub(crate) fn send(&self, src: SocketAddr, deliver_at: Instant, message: Box<dyn Any>) {
         self.inner
             .messages
             .borrow_mut()
@@ -79,9 +79,12 @@ impl<T: Debug> Sender<T> {
     }
 }
 
-impl<T: Debug> Receiver<T> {
+impl Receiver {
     /// Receive a message
-    pub(crate) async fn recv(&self, mut now: impl FnMut() -> Instant) -> (T, SocketAddr) {
+    pub(crate) async fn recv(
+        &self,
+        mut now: impl FnMut() -> Instant,
+    ) -> (Box<dyn Any>, SocketAddr) {
         loop {
             {
                 let now = now();
@@ -105,7 +108,11 @@ impl<T: Debug> Receiver<T> {
         }
     }
 
-    pub(crate) async fn recv_from(&self, src: SocketAddr, mut now: impl FnMut() -> Instant) -> T {
+    pub(crate) async fn recv_from(
+        &self,
+        src: SocketAddr,
+        mut now: impl FnMut() -> Instant,
+    ) -> Box<dyn Any> {
         loop {
             {
                 let now = now();
@@ -130,8 +137,8 @@ impl<T: Debug> Receiver<T> {
     }
 }
 
-impl<T: Debug> Clone for Receiver<T> {
-    fn clone(&self) -> Receiver<T> {
+impl Clone for Receiver {
+    fn clone(&self) -> Receiver {
         Receiver {
             inner: self.inner.clone(),
         }

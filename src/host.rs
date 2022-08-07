@@ -4,18 +4,19 @@ use tokio::runtime::Runtime;
 use tokio::task::LocalSet;
 use tokio::time::{Duration, Instant};
 
-use std::fmt::Debug;
+use std::any::Any;
+use std::marker::PhantomData;
 use std::net::SocketAddr;
 use std::rc::Rc;
 
 /// A host in the simulated network.
-pub(crate) enum Host<T: Debug + 'static> {
+pub(crate) enum Host {
     /// A simulated host may have its clock skewed, experience partitions, or
     /// become isolated.
-    Simulated(Simulated<T>),
+    Simulated(Simulated),
     Client {
         /// Sends messages to the client
-        inbox: inbox::Sender<T>,
+        inbox: inbox::Sender,
 
         /// Instant at which the client was created.
         epoch: Instant,
@@ -23,7 +24,7 @@ pub(crate) enum Host<T: Debug + 'static> {
 }
 
 /// A simulated host
-pub(crate) struct Simulated<T: Debug> {
+pub(crate) struct Simulated {
     /// Handle to the Tokio runtime driving this host. Each runtime may have a
     /// different sense of "now" which simulates clock skew.
     pub(crate) rt: Runtime,
@@ -32,15 +33,18 @@ pub(crate) struct Simulated<T: Debug> {
     pub(crate) local: LocalSet,
 
     /// Send messages to the host's inbox
-    pub(crate) inbox: inbox::Sender<T>,
+    pub(crate) inbox: inbox::Sender,
 
     /// Instant at which the host began
     pub(crate) epoch: Instant,
 }
 
-impl<T: Debug + 'static> Host<T> {
+impl Host {
     /// Create a new simulated host in the simulated network
-    pub(crate) fn new_simulated(addr: SocketAddr, inner: &Rc<super::Inner<T>>) -> (Host<T>, Io<T>) {
+    pub(crate) fn new_simulated<M: Debug + 'static>(
+        addr: SocketAddr,
+        inner: &Rc<super::Inner>,
+    ) -> (Host, Io<M>) {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_time()
             .start_paused(true)
@@ -69,12 +73,16 @@ impl<T: Debug + 'static> Host<T> {
             inner: Rc::downgrade(inner),
             addr,
             inbox: rx,
+            _p: PhantomData,
         };
 
         (host, stream)
     }
 
-    pub(crate) fn new_client(addr: SocketAddr, inner: &Rc<super::Inner<T>>) -> (Host<T>, Io<T>) {
+    pub(crate) fn new_client<M: Debug + 'static>(
+        addr: SocketAddr,
+        inner: &Rc<super::Inner>,
+    ) -> (Host, Io<M>) {
         let (tx, rx) = inbox::channel();
 
         let host = Host::Client {
@@ -86,12 +94,13 @@ impl<T: Debug + 'static> Host<T> {
             inner: Rc::downgrade(&inner),
             addr,
             inbox: rx,
+            _p: PhantomData,
         };
 
         (host, stream)
     }
 
-    pub(crate) fn send(&self, self_addr: SocketAddr, delay: Duration, message: T) {
+    pub(crate) fn send(&self, self_addr: SocketAddr, delay: Duration, message: Box<dyn Any>) {
         match self {
             Host::Simulated(Simulated { inbox, .. }) => {
                 let now = self.now();

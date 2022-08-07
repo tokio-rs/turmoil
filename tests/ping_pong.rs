@@ -9,7 +9,7 @@ enum Message {
 
 #[test]
 fn ping_pong() {
-    let mut sim = Builder::new().build::<Message>();
+    let mut sim = Builder::new().build();
 
     let client = sim.client("client");
 
