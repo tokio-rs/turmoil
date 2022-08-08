@@ -12,11 +12,7 @@ pub struct Builder {
 
     config: Config,
 
-    /// How often any given link should fail (on a per-message basis).
-    fail_rate: f64,
-
-    /// How often any given link should be repaired (on a per-message basis);
-    repair_rate: f64,
+    link_config: top::Latency,
 }
 
 impl Builder {
@@ -24,8 +20,7 @@ impl Builder {
         Builder {
             rng: None,
             config: Config::default(),
-            fail_rate: 0.0,
-            repair_rate: 0.0,
+            link_config: top::Latency::default(),
         }
     }
 
@@ -47,13 +42,23 @@ impl Builder {
         self
     }
 
+    pub fn min_message_latency(&mut self, value: Duration) -> &mut Self {
+        self.link_config.min_message_latency = value;
+        self
+    }
+
+    pub fn max_message_latency(&mut self, value: Duration) -> &mut Self {
+        self.link_config.max_message_latency = value;
+        self
+    }
+
     pub fn fail_rate(&mut self, value: f64) -> &mut Self {
-        self.fail_rate = value;
+        self.link_config.fail_rate = value;
         self
     }
 
     pub fn repair_rate(&mut self, value: f64) -> &mut Self {
-        self.repair_rate = value;
+        self.link_config.repair_rate = value;
         self
     }
 
@@ -62,7 +67,7 @@ impl Builder {
     }
 
     pub fn build_with_rng(&self, rng: Box<dyn RngCore>) -> Sim {
-        let topology = Topology::new(self.fail_rate, self.repair_rate);
+        let topology = Topology::new(self.link_config.clone());
 
         Sim {
             inner: Rc::new(Inner {

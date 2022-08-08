@@ -11,6 +11,9 @@ pub(crate) struct Topology {
 
     /// Specific configuration overrides between specific hosts.
     links: IndexMap<Pair, Link>,
+
+    /// Current number of partitioned links
+    num_partitioned: usize,
 }
 
 #[derive(Debug, Hash, Eq, PartialEq)]
@@ -24,32 +27,34 @@ pub(crate) enum Link {
     RandPartition,
 }
 
+// TODO: this should be renamed. It tracks more than just link latency now.
+#[derive(Clone)]
 pub(crate) struct Latency {
     /// Minimum latency
-    min: Duration,
+    pub(crate) min_message_latency: Duration,
 
     /// Maximum latency
-    max: Duration,
+    pub(crate) max_message_latency: Duration,
 
     /// Value distribution
     distribution: Exp<f64>,
 
     /// Probability of a link failing
-    fail_rate: f64,
+    pub(crate) fail_rate: f64,
 
     /// Probability of a failed link returning
-    repair_rate: f64,
+    pub(crate) repair_rate: f64,
+
+    /// Max number of links to partition
+    max_partitions: Option<usize>,
 }
 
 impl Topology {
-    pub(crate) fn new(fail_rate: f64, repair_rate: f64) -> Topology {
+    pub(crate) fn new(config: Latency) -> Topology {
         Topology {
-            latency: Latency {
-                fail_rate,
-                repair_rate,
-                ..Latency::default()
-            },
+            latency: config,
             links: IndexMap::new(),
+            num_partitioned: 0,
         }
     }
 
@@ -66,7 +71,8 @@ impl Topology {
             None => {
                 // Should the link be broken?
                 if !client && self.latency.fail_rate > 0.0 {
-                    if rand.gen_bool(self.latency.fail_rate) {
+                    if self.can_partition() && rand.gen_bool(self.latency.fail_rate) {
+                        self.num_partitioned += 1;
                         self.links.insert(pair, Link::RandPartition);
                         return None;
                     }
@@ -74,13 +80,12 @@ impl Topology {
 
                 Some(self.latency.send_delay(rand))
             }
-            Some(Link::ExplicitPartition) => {
-                None
-            }
+            Some(Link::ExplicitPartition) => None,
             Some(Link::RandPartition) => {
                 // Should the link be repaired?
                 if !client && self.latency.repair_rate > 0.0 {
                     if rand.gen_bool(self.latency.repair_rate) {
+                        self.num_partitioned -= 1;
                         self.links.remove(&pair);
                         return Some(self.latency.send_delay(rand));
                     }
@@ -94,12 +99,24 @@ impl Topology {
     pub(crate) fn partition(&mut self, a: SocketAddr, b: SocketAddr) {
         let pair = Pair::new(a, b);
 
-        self.links.insert(pair, Link::ExplicitPartition);
+        match self.links.insert(pair, Link::ExplicitPartition) {
+            Some(Link::RandPartition | Link::ExplicitPartition) => {}
+            _ => self.num_partitioned += 1,
+        }
     }
 
     pub(crate) fn repair(&mut self, a: SocketAddr, b: SocketAddr) {
         let pair = Pair::new(a, b);
-        self.links.remove(&pair);
+        match self.links.remove(&pair) {
+            Some(Link::RandPartition | Link::ExplicitPartition) => self.num_partitioned += 1,
+            _ => {}
+        }
+    }
+
+    /// Returns `true` if a new link can be partitioned without exceeding the
+    /// max partitions.
+    fn can_partition(&self) -> bool {
+        self.num_partitioned < self.latency.max_partitions.unwrap_or(usize::MAX)
     }
 }
 
@@ -118,11 +135,12 @@ impl Pair {
 impl Default for Latency {
     fn default() -> Latency {
         Latency {
-            min: Duration::from_millis(0),
-            max: Duration::from_millis(100),
+            min_message_latency: Duration::from_millis(0),
+            max_message_latency: Duration::from_millis(100),
             distribution: Exp::new(5.0).unwrap(),
             fail_rate: 0.0,
             repair_rate: 1.0,
+            max_partitions: None,
         }
     }
 }
@@ -130,8 +148,8 @@ impl Default for Latency {
 impl Latency {
     fn send_delay(&self, rand: &mut dyn RngCore) -> Duration {
         let mult = self.distribution.sample(rand);
-        let range = (self.max - self.min).as_millis() as f64;
-        let delay = self.min + Duration::from_millis((range * mult) as _);
-        std::cmp::min(delay, self.max)
+        let range = (self.max_message_latency - self.min_message_latency).as_millis() as f64;
+        let delay = self.min_message_latency + Duration::from_millis((range * mult) as _);
+        std::cmp::min(delay, self.max_message_latency)
     }
 }
