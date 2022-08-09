@@ -31,9 +31,10 @@ impl<M: Debug + 'static> Io<M> {
         let mut topology = inner.topology.borrow_mut();
         let mut rand = inner.rand.borrow_mut();
 
-        let client = hosts[&dst].is_client() || hosts[&self.addr].is_client();
-
-        if let Some(delay) = topology.send_delay(&mut *rand, self.addr, dst, client) {
+        // Don't delay messages to or from clients.
+        if hosts[&dst].is_client() || hosts[&self.addr].is_client() {
+            hosts[&dst].send(self.addr, Duration::default(), Box::new(message));
+        } else if let Some(delay) = topology.send_delay(&mut *rand, self.addr, dst) {
             hosts[&dst].send(self.addr, delay, Box::new(message));
         }
     }

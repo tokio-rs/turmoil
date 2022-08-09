@@ -26,6 +26,7 @@ use std::fmt::Debug;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::rc::Rc;
+use std::time::Duration;
 
 /// Network simulation
 pub struct Sim {
@@ -124,5 +125,24 @@ impl Sim {
         let b = self.lookup(b);
 
         self.inner.topology.borrow_mut().repair(a, b);
+    }
+
+    /// Set the max message latency
+    pub fn set_max_message_latency(&self, value: Duration) {
+        self.inner
+            .topology
+            .borrow_mut()
+            .set_max_message_latency(value);
+    }
+
+    /// Set the message latency distribution curve.
+    ///
+    /// Message latency follows an exponential distribution curve. The `value`
+    /// is the lambda argument to the probability function.
+    pub fn set_message_latency_curve(&self, value: f64) {
+        self.inner
+            .topology
+            .borrow_mut()
+            .set_message_latency_curve(value);
     }
 }

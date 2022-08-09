@@ -58,19 +58,26 @@ impl Topology {
         }
     }
 
+    pub(crate) fn set_max_message_latency(&mut self, value: Duration) {
+        self.latency.max_message_latency = value;
+    }
+
+    pub(crate) fn set_message_latency_curve(&mut self, value: f64) {
+        self.latency.distribution = Exp::new(value).unwrap();
+    }
+
     pub(crate) fn send_delay(
         &mut self,
         rand: &mut dyn RngCore,
         src: SocketAddr,
         dst: SocketAddr,
-        client: bool,
     ) -> Option<Duration> {
         let pair = Pair::new(src, dst);
 
         match self.links.get(&pair) {
             None => {
                 // Should the link be broken?
-                if !client && self.latency.fail_rate > 0.0 {
+                if self.latency.fail_rate > 0.0 {
                     if self.can_partition() && rand.gen_bool(self.latency.fail_rate) {
                         self.num_partitioned += 1;
                         self.links.insert(pair, Link::RandPartition);
@@ -83,7 +90,7 @@ impl Topology {
             Some(Link::ExplicitPartition) => None,
             Some(Link::RandPartition) => {
                 // Should the link be repaired?
-                if !client && self.latency.repair_rate > 0.0 {
+                if self.latency.repair_rate > 0.0 {
                     if rand.gen_bool(self.latency.repair_rate) {
                         self.num_partitioned -= 1;
                         self.links.remove(&pair);
