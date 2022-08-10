@@ -1,13 +1,12 @@
 use crate::*;
 
-use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::net::SocketAddr;
 use std::rc;
 use tokio::time::Instant;
 
 /// Bi-directional stream for the node.
-pub struct Io<M: Debug + 'static> {
+pub struct Io<M: Message> {
     /// Handle to shared state
     pub(crate) inner: rc::Weak<super::Inner>,
 
@@ -21,7 +20,7 @@ pub struct Io<M: Debug + 'static> {
     pub(crate) _p: PhantomData<M>,
 }
 
-impl<M: Debug + 'static> Io<M> {
+impl<M: Message> Io<M> {
     /// Send a message to a remote host
     pub fn send(&self, dst: impl dns::ToSocketAddr, message: M) {
         let inner = self.inner.upgrade().unwrap();
@@ -66,7 +65,7 @@ impl<M: Debug + 'static> Io<M> {
     }
 }
 
-impl<M: Debug + 'static> Clone for Io<M> {
+impl<M: Message> Clone for Io<M> {
     fn clone(&self) -> Io<M> {
         Io {
             inner: self.inner.clone(),

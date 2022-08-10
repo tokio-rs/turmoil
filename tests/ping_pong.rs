@@ -29,3 +29,9 @@ fn ping_pong() {
         assert!(matches!(pong, Message::Pong));
     });
 }
+
+impl turmoil::Message for Message {
+    fn write_json(&self, dst: &mut dyn std::io::Write) {
+        unimplemented!()
+    }
+}

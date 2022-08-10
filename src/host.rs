@@ -41,7 +41,7 @@ pub(crate) struct Simulated {
 
 impl Host {
     /// Create a new simulated host in the simulated network
-    pub(crate) fn new_simulated<M: Debug + 'static>(
+    pub(crate) fn new_simulated<M: Message>(
         addr: SocketAddr,
         inner: &Rc<super::Inner>,
     ) -> (Host, Io<M>) {
@@ -79,7 +79,7 @@ impl Host {
         (host, stream)
     }
 
-    pub(crate) fn new_client<M: Debug + 'static>(
+    pub(crate) fn new_client<M: Message>(
         addr: SocketAddr,
         inner: &Rc<super::Inner>,
     ) -> (Host, Io<M>) {

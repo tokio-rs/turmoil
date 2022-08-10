@@ -16,13 +16,15 @@ pub use io::Io;
 mod host;
 use host::Host;
 
+mod message;
+pub use message::Message;
+
 mod top;
 use top::Topology;
 
 use indexmap::IndexMap;
 use rand::RngCore;
 use std::cell::RefCell;
-use std::fmt::Debug;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::rc::Rc;
@@ -55,7 +57,7 @@ impl Sim {
     pub fn register<F, M, R>(&mut self, addr: impl ToSocketAddr, host: F)
     where
         F: FnOnce(Io<M>) -> R,
-        M: Debug + 'static,
+        M: Message,
         R: Future<Output = ()> + 'static,
     {
         let addr = self.inner.dns.lookup(addr);
@@ -100,7 +102,7 @@ impl Sim {
         }
     }
 
-    pub fn client<M: Debug + 'static>(&self, addr: impl dns::ToSocketAddr) -> Io<M> {
+    pub fn client<M: Message>(&self, addr: impl dns::ToSocketAddr) -> Io<M> {
         let addr = self.lookup(addr);
         let (host, stream) = Host::new_client(addr, &self.inner);
         self.inner.hosts.borrow_mut().insert(addr, host);
