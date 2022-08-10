@@ -30,27 +30,31 @@ impl<M: Message> Io<M> {
         let mut topology = inner.topology.borrow_mut();
         let mut rand = inner.rand.borrow_mut();
 
+        let (src, _elapsed) = version::get_current();
+
         // Don't delay messages to or from clients.
         if hosts[&dst].is_client() || hosts[&self.addr].is_client() {
-            hosts[&dst].send(self.addr, Duration::default(), Box::new(message));
+            hosts[&dst].send(src, Duration::default(), Box::new(message));
         } else if let Some(delay) = topology.send_delay(&mut *rand, self.addr, dst) {
-            hosts[&dst].send(self.addr, delay, Box::new(message));
+            hosts[&dst].send(src, delay, Box::new(message));
         }
     }
 
     /// Receive a message
     pub async fn recv(&self) -> (M, SocketAddr) {
-        let (msg, addr) = self.inbox.recv(|| self.now()).await;
-        let typed = msg.downcast::<M>().unwrap();
-        (*typed, addr)
+        let inbox::Envelope { message: value, src, .. } = self.inbox.recv(|| self.now()).await;
+        version::inc_current();
+        let typed = value.downcast::<M>().unwrap();
+        (*typed, src.host)
     }
 
     /// Receive a message from a specific address
     pub async fn recv_from(&self, src: impl dns::ToSocketAddr) -> M {
         let inner = self.inner.upgrade().unwrap();
         let src = inner.dns.lookup(src);
-        let msg = self.inbox.recv_from(src, || self.now()).await;
-        *msg.downcast::<M>().unwrap()
+        let inbox::Envelope { message: value, src, .. } = self.inbox.recv_from(src, || self.now()).await;
+        version::inc_current();
+        *value.downcast::<M>().unwrap()
     }
 
     pub fn lookup(&self, addr: impl crate::dns::ToSocketAddr) -> SocketAddr {

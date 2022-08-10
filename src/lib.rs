@@ -16,11 +16,16 @@ pub use io::Io;
 mod host;
 use host::Host;
 
+mod log;
+use log::Log;
+
 mod message;
 pub use message::Message;
 
 mod top;
 use top::Topology;
+
+mod version;
 
 use indexmap::IndexMap;
 use rand::RngCore;
@@ -62,11 +67,17 @@ impl Sim {
     {
         let addr = self.inner.dns.lookup(addr);
         let mut hosts = self.inner.hosts.borrow_mut();
+        let mut topology = self.inner.topology.borrow_mut();
 
         assert!(
             !hosts.contains_key(&addr),
             "already registered host for the given socket address"
         );
+
+        // Register links between the new host and all existing hosts
+        for existing in hosts.keys() {
+            topology.register(*existing, addr);
+        }
 
         // Create the node with its paired inbound channel
         let (node, stream) = Host::new_simulated(addr, &self.inner);

@@ -5,6 +5,7 @@ use tokio::task::LocalSet;
 use tokio::time::{Duration, Instant};
 
 use std::any::Any;
+use std::cell::Cell;
 use std::marker::PhantomData;
 use std::net::SocketAddr;
 use std::rc::Rc;
@@ -25,6 +26,9 @@ pub(crate) enum Host {
 
 /// A simulated host
 pub(crate) struct Simulated {
+    /// Address
+    pub(crate) addr: SocketAddr,
+
     /// Handle to the Tokio runtime driving this host. Each runtime may have a
     /// different sense of "now" which simulates clock skew.
     pub(crate) rt: Runtime,
@@ -37,6 +41,9 @@ pub(crate) struct Simulated {
 
     /// Instant at which the host began
     pub(crate) epoch: Instant,
+
+    /// Current host version
+    pub(crate) version: Cell<u64>,
 }
 
 impl Host {
@@ -64,10 +71,12 @@ impl Host {
         let (tx, rx) = inbox::channel();
 
         let host = Host::Simulated(Simulated {
+            addr,
             rt,
             local,
             inbox: tx,
             epoch,
+            version: Cell::new(0),
         });
         let stream = Io {
             inner: Rc::downgrade(inner),
@@ -100,15 +109,23 @@ impl Host {
         (host, stream)
     }
 
-    pub(crate) fn send(&self, self_addr: SocketAddr, delay: Duration, message: Box<dyn Any>) {
+    pub(crate) fn send(&self, src: version::Dot, delay: Duration, message: Box<dyn Any>) {
         match self {
             Host::Simulated(Simulated { inbox, .. }) => {
                 let now = self.now();
-                inbox.send(self_addr, now + delay, message);
+                inbox.send(inbox::Envelope {
+                    src,
+                    deliver_at: now + delay,
+                    message,
+                });
             }
             Host::Client { inbox, epoch, .. } => {
                 // Just send the message
-                inbox.send(self_addr, *epoch, message);
+                inbox.send(inbox::Envelope {
+                    src,
+                    deliver_at: *epoch,
+                    message,
+                });
             }
         }
     }
@@ -116,23 +133,33 @@ impl Host {
     pub(crate) fn tick(&self, config: &Config) {
         match self {
             Host::Simulated(Simulated {
+                addr,
                 rt,
                 local,
                 epoch,
                 inbox,
+                version,
                 ..
             }) => rt.block_on(async {
+                version::set_current(version::Dot {
+                    host: *addr,
+                    version: version.get(),
+                }, epoch.elapsed());
+
                 local
                     .run_until(async {
+                        inbox.tick(Instant::now());
+
                         tokio::time::sleep(config.tick).await;
 
                         if epoch.elapsed() > config.duration {
                             panic!("Ran for {:?} without completing", config.duration);
                         }
-
-                        inbox.tick(Instant::now());
                     })
                     .await;
+
+                let dot = version::take_current();
+                version.set(dot.version);
             }),
             _ => {}
         }

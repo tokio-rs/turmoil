@@ -1,3 +1,5 @@
+use crate::{version, Log};
+
 use indexmap::IndexMap;
 use std::any::Any;
 use std::cell::RefCell;
@@ -31,36 +33,32 @@ pub(crate) fn channel() -> (Sender, Receiver) {
 
 struct Inner {
     /// Received messages
-    messages: RefCell<IndexMap<SocketAddr, VecDeque<Message>>>,
+    messages: RefCell<IndexMap<SocketAddr, VecDeque<Envelope>>>,
 
     /// Notify that a message has been sent.
     notify: Notify,
 }
 
-struct Message {
+pub(crate) struct Envelope {
     /// Who sent the message
-    src: SocketAddr,
+    pub(crate) src: version::Dot,
 
     /// When to deliver the message
-    deliver_at: Instant,
+    pub(crate) deliver_at: Instant,
 
     /// Message value
-    value: Box<dyn Any>,
+    pub(crate) message: Box<dyn Any>,
 }
 
 impl Sender {
     /// Send a message
-    pub(crate) fn send(&self, src: SocketAddr, deliver_at: Instant, message: Box<dyn Any>) {
+    pub(crate) fn send(&self, envelope: Envelope) {
         self.inner
             .messages
             .borrow_mut()
-            .entry(src)
+            .entry(envelope.src.host)
             .or_default()
-            .push_back(Message {
-                src,
-                deliver_at,
-                value: message,
-            });
+            .push_back(envelope);
 
         self.inner.notify.notify_one();
     }
@@ -69,7 +67,7 @@ impl Sender {
         let messages = self.inner.messages.borrow();
 
         for queue in messages.values() {
-            if let Some(Message { deliver_at, .. }) = queue.front() {
+            if let Some(Envelope { deliver_at, .. }) = queue.front() {
                 if *deliver_at <= now {
                     self.inner.notify.notify_one();
                     return;
@@ -84,7 +82,7 @@ impl Receiver {
     pub(crate) async fn recv(
         &self,
         mut now: impl FnMut() -> Instant,
-    ) -> (Box<dyn Any>, SocketAddr) {
+    ) -> Envelope {
         loop {
             {
                 let now = now();
@@ -93,9 +91,8 @@ impl Receiver {
 
                 for per_host_messages in messages.values_mut() {
                     match per_host_messages.front() {
-                        Some(Message { deliver_at, .. }) if *deliver_at <= now => {
-                            let Message { value, src, .. } = per_host_messages.pop_front().unwrap();
-                            return (value, src);
+                        Some(Envelope { deliver_at, .. }) if *deliver_at <= now => {
+                            return per_host_messages.pop_front().unwrap();
                         }
                         _ => {
                             // Fall through to the notify
@@ -112,7 +109,7 @@ impl Receiver {
         &self,
         src: SocketAddr,
         mut now: impl FnMut() -> Instant,
-    ) -> Box<dyn Any> {
+    ) -> Envelope {
         loop {
             {
                 let now = now();
@@ -122,9 +119,8 @@ impl Receiver {
                 let messages = messages.entry(src).or_default();
 
                 match messages.front() {
-                    Some(Message { deliver_at, .. }) if *deliver_at <= now => {
-                        let message = messages.pop_front().unwrap();
-                        return message.value;
+                    Some(Envelope { deliver_at, .. }) if *deliver_at <= now => {
+                        return messages.pop_front().unwrap();
                     }
                     _ => {
                         // Fall through to the notify

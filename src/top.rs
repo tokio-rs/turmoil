@@ -20,6 +20,9 @@ pub(crate) struct Topology {
 struct Pair(SocketAddr, SocketAddr);
 
 pub(crate) enum Link {
+    /// The link is healthy
+    Healthy,
+
     /// The link was explicitly partitioned.
     ExplicitPartition,
 
@@ -58,6 +61,12 @@ impl Topology {
         }
     }
 
+    /// Register a link between two hosts
+    pub(crate) fn register(&mut self, a: SocketAddr, b: SocketAddr) {
+        let pair = Pair::new(a, b);
+        assert!(self.links.insert(pair, Link::Healthy).is_none());
+    }
+
     pub(crate) fn set_max_message_latency(&mut self, value: Duration) {
         self.latency.max_message_latency = value;
     }
@@ -74,8 +83,8 @@ impl Topology {
     ) -> Option<Duration> {
         let pair = Pair::new(src, dst);
 
-        match self.links.get(&pair) {
-            None => {
+        match self.links[&pair] {
+            Link::Healthy => {
                 // Should the link be broken?
                 if self.latency.fail_rate > 0.0 {
                     if self.can_partition() && rand.gen_bool(self.latency.fail_rate) {
@@ -87,8 +96,8 @@ impl Topology {
 
                 Some(self.latency.send_delay(rand))
             }
-            Some(Link::ExplicitPartition) => None,
-            Some(Link::RandPartition) => {
+            Link::ExplicitPartition => None,
+            Link::RandPartition => {
                 // Should the link be repaired?
                 if self.latency.repair_rate > 0.0 {
                     if rand.gen_bool(self.latency.repair_rate) {
