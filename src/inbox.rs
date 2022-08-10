@@ -1,4 +1,4 @@
-use crate::{version, Log};
+use crate::{version};
 
 use indexmap::IndexMap;
 use std::any::Any;
@@ -15,6 +15,24 @@ pub(crate) struct Sender {
 
 pub(crate) struct Receiver {
     inner: Rc<Inner>,
+}
+
+pub(crate) struct Inbox {
+    messages: IndexMap<SocketAddr, VecDeque<Envelope>>,
+
+    /// Used to signal tasks on the runtime
+    /// 
+    /// TODO: this will probably need to be switched to `Arc`.
+    notify: Notify,
+}
+
+impl Inbox {
+    pub(crate) fn new() -> Inbox {
+        Inbox {
+            messages: IndexMap::new(),
+            notify: Notify::new(),
+        }
+    }
 }
 
 pub(crate) fn channel() -> (Sender, Receiver) {

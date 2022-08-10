@@ -67,8 +67,11 @@ impl Builder {
     }
 
     pub fn build_with_rng(&self, rng: Box<dyn RngCore>) -> Sim {
-        let topology = Topology::new(self.link_config.clone());
+        let world = World::new(self.link_config.clone(), rng);
+        // let topology = Topology::new(self.link_config.clone());
 
+        Sim::new(world)
+        /*
         Sim {
             inner: Rc::new(Inner {
                 config: self.config.clone(),
@@ -78,5 +81,6 @@ impl Builder {
                 rand: RefCell::new(rng),
             }),
         }
+        */
     }
 }

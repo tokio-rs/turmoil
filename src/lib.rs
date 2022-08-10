@@ -10,22 +10,35 @@ pub use dns::ToSocketAddr;
 
 mod inbox;
 
+/*
 mod io;
 pub use io::Io;
 
 mod host;
 use host::Host;
+*/
 
+/*
 mod log;
 use log::Log;
+*/
 
 mod message;
 pub use message::Message;
+
+mod sim;
+pub use sim::{Sim, Io};
+
+mod rt;
+use rt::Rt;
 
 mod top;
 use top::Topology;
 
 mod version;
+
+mod world;
+use world::World;
 
 use indexmap::IndexMap;
 use rand::RngCore;
@@ -35,6 +48,7 @@ use std::net::SocketAddr;
 use std::rc::Rc;
 use std::time::Duration;
 
+/*
 /// Network simulation
 pub struct Sim {
     /// Strong reference to shared simulation state
@@ -159,3 +173,4 @@ impl Sim {
             .set_message_latency_curve(value);
     }
 }
+*/
