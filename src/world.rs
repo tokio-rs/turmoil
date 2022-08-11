@@ -1,9 +1,8 @@
-use crate::{config, version, Dns, Host, ToSocketAddr, Topology};
+use crate::{config, Dns, Envelope, Host, Log, Message, ToSocketAddr, Topology};
 
 use indexmap::IndexMap;
 use rand::RngCore;
 use scoped_tls::scoped_thread_local;
-use std::any::Any;
 use std::cell::RefCell;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -24,6 +23,9 @@ pub(crate) struct World {
     /// If set, this is the current host being executed.
     pub(crate) current: Option<SocketAddr>,
 
+    /// Handle to the logger
+    pub(crate) log: Log,
+
     /// Random number generator used for all decisions. To make execution
     /// determinstic, reuse the same seed.
     rng: Box<dyn RngCore>,
@@ -33,12 +35,13 @@ scoped_thread_local!(static CURRENT: RefCell<World>);
 
 impl World {
     /// Initialize a new world
-    pub(crate) fn new(link: config::Link, rng: Box<dyn RngCore>) -> World {
+    pub(crate) fn new(link: config::Link, log: Log, rng: Box<dyn RngCore>) -> World {
         World {
             hosts: IndexMap::new(),
             topology: Topology::new(link),
             dns: Dns::new(),
             current: None,
+            log,
             rng,
         }
     }
@@ -58,10 +61,6 @@ impl World {
     /// Return a reference to the host
     pub(crate) fn host(&self, addr: SocketAddr) -> &Host {
         self.hosts.get(&addr).expect("host missing")
-    }
-
-    pub(crate) fn host_mut(&mut self, addr: SocketAddr) -> &mut Host {
-        self.hosts.get_mut(&addr).expect("host missing")
     }
 
     pub(crate) fn lookup(&mut self, host: impl ToSocketAddr) -> SocketAddr {
@@ -89,19 +88,42 @@ impl World {
         }
 
         // Initialize host state
-        self.hosts.insert(addr, Host::new(epoch, notify));
+        self.hosts.insert(addr, Host::new(addr, epoch, notify));
     }
 
     /// Send a message between two hosts
-    pub(crate) fn send(&mut self, src: SocketAddr, dst: SocketAddr, message: Box<dyn Any>) {
-        if let Some(delay) = self.topology.send_delay(&mut self.rng, src, dst) {
-            let src = version::Dot {
-                host: src,
-                version: self.hosts[&src].version,
-            };
+    pub(crate) fn send(&mut self, host: SocketAddr, dst: SocketAddr, message: Box<dyn Message>) {
+        if let Some(delay) = self.topology.send_delay(&mut self.rng, host, dst) {
+            let host = &self.hosts[&host];
+            let dot = host.dot();
 
-            self.hosts[&dst].send(src, delay, message);
+            self.log.send(dot, host.elapsed(), dst, &*message);
+
+            self.hosts[&dst].send(dot, delay, message);
         }
+    }
+
+    /// Receive a message
+    pub(crate) fn recv(&mut self, host: SocketAddr) -> Option<Envelope> {
+        let host = &mut self.hosts[&host];
+        let ret = host.recv();
+
+        if let Some(Envelope { src, message, .. }) = &ret {
+            self.log.recv(host.dot(), host.elapsed(), *src, &**message);
+        }
+
+        ret
+    }
+
+    pub(crate) fn recv_from(&mut self, host: SocketAddr, peer: SocketAddr) -> Option<Envelope> {
+        let host = &mut self.hosts[&host];
+        let ret = host.recv_from(peer);
+
+        if let Some(Envelope { src, message, .. }) = &ret {
+            self.log.recv(host.dot(), host.elapsed(), *src, &**message);
+        }
+
+        ret
     }
 
     /// Tick a host

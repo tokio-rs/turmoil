@@ -1,6 +1,5 @@
-use crate::version;
+use crate::{version, Message};
 
-use std::any::Any;
 use tokio::time::Instant;
 
 pub(crate) struct Envelope {
@@ -11,5 +10,5 @@ pub(crate) struct Envelope {
     pub(crate) deliver_at: Instant,
 
     /// Message value
-    pub(crate) message: Box<dyn Any>,
+    pub(crate) message: Box<dyn Message>,
 }
