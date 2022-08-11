@@ -1,7 +1,20 @@
 [package]
 name = "turmoil"
+# When releasing to crates.io:
+# - Update version number
+#   - README.md
+# - Update CHANGELOG.md
+# - Create git tag
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
+authors = ["Carl Lerche <me@carllerche.com>"]
+description = "Simulation testing framework for distributed systems"
+homepage = "https://github.com/tokio-rs/turmoil"
+repository = "https://github.com/tokio-rs/turmoil"
+readme = "README.md"
+keywords = ["Deterministic", "Simulation", "Testing"]
+categories = ["Asynchronous", "Network programming", "Simulation"]
 
 [dependencies]
 indexmap = "1.9"
