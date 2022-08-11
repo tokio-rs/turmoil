@@ -27,7 +27,7 @@ mod message;
 pub use message::Message;
 
 mod sim;
-pub use sim::{Sim, Io};
+pub use sim::{Io, Sim};
 
 mod rt;
 use rt::Rt;

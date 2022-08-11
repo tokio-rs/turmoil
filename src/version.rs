@@ -33,9 +33,7 @@ pub(crate) fn get_current() -> (Dot, Duration) {
 }
 
 pub(crate) fn take_current() -> Dot {
-    CURRENT.with(|current| {
-        current.borrow_mut().take().unwrap().dot
-    })
+    CURRENT.with(|current| current.borrow_mut().take().unwrap().dot)
 }
 
 pub(crate) fn inc_current() -> (Dot, Duration) {

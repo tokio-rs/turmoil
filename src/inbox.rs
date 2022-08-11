@@ -1,4 +1,4 @@
-use crate::{version};
+use crate::version;
 
 use indexmap::IndexMap;
 use std::any::Any;
@@ -21,7 +21,7 @@ pub(crate) struct Inbox {
     messages: IndexMap<SocketAddr, VecDeque<Envelope>>,
 
     /// Used to signal tasks on the runtime
-    /// 
+    ///
     /// TODO: this will probably need to be switched to `Arc`.
     notify: Notify,
 }
@@ -97,10 +97,7 @@ impl Sender {
 
 impl Receiver {
     /// Receive a message
-    pub(crate) async fn recv(
-        &self,
-        mut now: impl FnMut() -> Instant,
-    ) -> Envelope {
+    pub(crate) async fn recv(&self, mut now: impl FnMut() -> Instant) -> Envelope {
         loop {
             {
                 let now = now();

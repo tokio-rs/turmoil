@@ -1,4 +1,4 @@
-use crate::{Message, ToSocketAddr, Rt, World};
+use crate::{Message, Rt, ToSocketAddr, World};
 
 use indexmap::IndexMap;
 use std::cell::RefCell;
@@ -11,12 +11,12 @@ use tokio::time::{Duration, Instant};
 /// Network simulation
 pub struct Sim {
     /// Tracks the simulated world state.
-    /// 
+    ///
     /// This is what is stored in the thread-local
     world: RefCell<World>,
 
     /// Per simulated host Tokio runtimes
-    /// 
+    ///
     /// When `None`, this signifies the host is a "client"
     rts: IndexMap<SocketAddr, Option<Rt>>,
 }
@@ -36,20 +36,24 @@ impl Sim {
         M: Message,
         R: Future<Output = ()> + 'static,
     {
-        let world = RefCell::get_mut(&mut self.world);
-        let addr = world.lookup(addr);
-
         let rt = Rt::new();
         let epoch = rt.now();
-        let notify = Arc::new(Notify::new());
+        let addr = self.lookup(addr);
 
-        // Register host state with the world
-        world.register(addr, epoch, notify.clone());
+        let io = {
+            let world = RefCell::get_mut(&mut self.world);
+            let notify = Arc::new(Notify::new());
 
-        let io = Io::new(addr, notify);
+            // Register host state with the world
+            world.register(addr, epoch, notify.clone());
 
-        rt.with(|| {
-            tokio::task::spawn_local(host(io));
+            Io::new(addr, notify)
+        };
+
+        World::enter(&self.world, || {
+            rt.with(|| {
+                tokio::task::spawn_local(host(io));
+            });
         });
 
         self.rts.insert(addr, Some(rt));
@@ -82,19 +86,28 @@ impl Sim {
         let tick = Duration::from_millis(1);
 
         loop {
-            if let Poll::Ready(ret) = task.poll() {
+            let res = World::enter(&self.world, || task.poll());
+
+            if let Poll::Ready(ret) = res {
                 return ret;
             }
 
-            for (addr, maybe_rt) in self.rts.iter() {
+            for (&addr, maybe_rt) in self.rts.iter() {
                 if let Some(rt) = maybe_rt {
-                    let now = rt.tick(tick);
+                    // Set the current host
+                    self.world.borrow_mut().current = Some(addr);
 
-                    let world = self.world.borrow_mut();
-                    world.tick(addr, Some(now));
+                    let now = World::enter(&self.world, || rt.tick(tick));
+
+                    // Unset the current host
+                    self.world.borrow_mut().current = None;
+
+                    let mut world = self.world.borrow_mut();
+                    world.tick(addr, now);
                 } else {
-                    let world = self.world.borrow_mut();
-                    world.tick(addr, None);
+                    let mut world = self.world.borrow_mut();
+                    let now = world.host(addr).now;
+                    world.tick(addr, now + tick);
                 }
             }
 
@@ -137,9 +150,11 @@ impl<M: Message> Io<M> {
     pub async fn recv(&self) -> (M, SocketAddr) {
         loop {
             let maybe_envelope = World::current(|world| {
-                let host = world.current_mut();
+                if let Some(current) = world.current {
+                    assert_eq!(current, self.addr);
+                }
 
-                assert_eq!(self.addr, host.addr);
+                let host = world.host_mut(self.addr);
 
                 host.recv()
             });
@@ -159,9 +174,11 @@ impl<M: Message> Io<M> {
 
         loop {
             let maybe_envelope = World::current(|world| {
-                let host = world.current_mut();
+                if let Some(current) = world.current {
+                    assert_eq!(current, self.addr);
+                }
 
-                assert_eq!(self.addr, host.addr);
+                let host = world.host_mut(self.addr);
 
                 host.recv_from(src)
             });

@@ -1,5 +1,5 @@
-use crate::{inbox, version, Dns, Topology, ToSocketAddr};
 use crate::top::Latency;
+use crate::{inbox, version, Dns, ToSocketAddr, Topology};
 
 use indexmap::IndexMap;
 use rand::RngCore;
@@ -24,8 +24,8 @@ pub(crate) struct World {
     dns: Dns,
 
     /// If set, this is the current host being executed.
-    current: Option<SocketAddr>,
-    
+    pub(crate) current: Option<SocketAddr>,
+
     /// Random number generator used for all decisions. To make execution
     /// determinstic, reuse the same seed.
     rng: Box<dyn RngCore>,
@@ -57,10 +57,19 @@ impl World {
         CURRENT.set(world, f)
     }
 
+    /// Return a reference to the host
+    pub(crate) fn host(&self, addr: SocketAddr) -> &Host {
+        self.hosts.get(&addr).expect("host missing")
+    }
+
+    pub(crate) fn host_mut(&mut self, addr: SocketAddr) -> &mut Host {
+        self.hosts.get_mut(&addr).expect("host missing")
+    }
+
     /// Return a mutable reference to the currently running host state
-    pub(crate) fn current_mut(&mut self) -> &mut Host {
+    pub(crate) fn current_mut(&mut self) -> Option<&mut Host> {
         let addr = self.current.expect("no current host");
-        self.hosts.get_mut(&addr).expect("no host for address")
+        self.hosts.get_mut(&addr)
     }
 
     pub(crate) fn lookup(&mut self, host: impl ToSocketAddr) -> SocketAddr {
@@ -88,11 +97,16 @@ impl World {
         if let Some(delay) = self.topology.send_delay(&mut self.rng, src, dst) {
             let src = version::Dot {
                 host: src,
-                version: self.hosts[&src].version
+                version: self.hosts[&src].version,
             };
 
             self.hosts[&dst].send(src, delay, message);
         }
+    }
+
+    /// Tick a host
+    pub(crate) fn tick(&mut self, addr: SocketAddr, now: Instant) {
+        self.hosts.get_mut(&addr).expect("missing host").tick(now);
     }
 }
 
@@ -111,7 +125,7 @@ pub(crate) struct Host {
     notify: Arc<Notify>,
 
     /// Current instant at the host
-    now: Instant,
+    pub(crate) now: Instant,
 
     /// Instant at which the host began
     epoch: Instant,
@@ -135,11 +149,14 @@ impl Host {
     pub(crate) fn send(&mut self, src: version::Dot, delay: Duration, message: Box<dyn Any>) {
         let deliver_at = self.now + delay;
 
-        self.inbox.entry(src.host).or_default().push_back(inbox::Envelope {
-            src,
-            deliver_at,
-            message,
-        });
+        self.inbox
+            .entry(src.host)
+            .or_default()
+            .push_back(inbox::Envelope {
+                src,
+                deliver_at,
+                message,
+            });
 
         self.notify.notify_one();
     }
@@ -172,6 +189,19 @@ impl Host {
                 deque.pop_front()
             }
             _ => None,
+        }
+    }
+
+    pub(crate) fn tick(&mut self, now: Instant) {
+        self.now = now;
+
+        for deque in self.inbox.values() {
+            if let Some(inbox::Envelope { deliver_at, .. }) = deque.front() {
+                if *deliver_at <= now {
+                    self.notify.notify_one();
+                    return;
+                }
+            }
         }
     }
 }

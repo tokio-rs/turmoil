@@ -32,18 +32,12 @@ impl Rt {
         let mut local = LocalSet::new();
         local.unhandled_panic(tokio::runtime::UnhandledPanic::ShutdownRuntime);
 
-        Rt {
-            tokio,
-            local,
-        }
+        Rt { tokio, local }
     }
 
     pub(crate) fn with<R>(&self, f: impl FnOnce() -> R) -> R {
-        self.tokio.block_on(async {
-            self.local.run_until(async {
-                f()
-            }).await
-        })
+        self.tokio
+            .block_on(async { self.local.run_until(async { f() }).await })
     }
 
     pub(crate) fn now(&self) -> Instant {
@@ -53,11 +47,13 @@ impl Rt {
 
     pub(crate) fn tick(&self, duration: Duration) -> Instant {
         self.tokio.block_on(async {
-            self.local.run_until(async {
-                sleep(duration).await;
+            self.local
+                .run_until(async {
+                    sleep(duration).await;
 
-                Instant::now()
-            }).await
+                    Instant::now()
+                })
+                .await
         })
     }
 }
