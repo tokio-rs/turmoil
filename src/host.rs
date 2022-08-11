@@ -1,157 +1,92 @@
-use crate::*;
+use crate::{version, Envelope};
 
-use tokio::runtime::Runtime;
-use tokio::task::LocalSet;
+use indexmap::IndexMap;
+use std::any::Any;
+use std::collections::VecDeque;
+use std::net::SocketAddr;
+use std::sync::Arc;
+use tokio::sync::Notify;
 use tokio::time::{Duration, Instant};
 
-use std::any::Any;
-use std::marker::PhantomData;
-use std::net::SocketAddr;
-use std::rc::Rc;
+/// A host in the simulated network
+pub(crate) struct Host {
+    /// Messages in-flight to the host. Some of these may still be "on the
+    /// network".
+    inbox: IndexMap<SocketAddr, VecDeque<Envelope>>,
 
-/// A host in the simulated network.
-pub(crate) enum Host {
-    /// A simulated host may have its clock skewed, experience partitions, or
-    /// become isolated.
-    Simulated(Simulated),
-    Client {
-        /// Sends messages to the client
-        inbox: inbox::Sender,
+    /// Signaled when a message becomes available to receive
+    notify: Arc<Notify>,
 
-        /// Instant at which the client was created.
-        epoch: Instant,
-    },
-}
+    /// Current instant at the host
+    pub(crate) now: Instant,
 
-/// A simulated host
-pub(crate) struct Simulated {
-    /// Handle to the Tokio runtime driving this host. Each runtime may have a
-    /// different sense of "now" which simulates clock skew.
-    pub(crate) rt: Runtime,
-
-    /// Local task set, used for running !Send tasks.
-    pub(crate) local: LocalSet,
-
-    /// Send messages to the host's inbox
-    pub(crate) inbox: inbox::Sender,
-
-    /// Instant at which the host began
-    pub(crate) epoch: Instant,
+    /// Current host version. This is incremented each time a message is received.
+    pub(crate) version: u64,
 }
 
 impl Host {
-    /// Create a new simulated host in the simulated network
-    pub(crate) fn new_simulated<M: Message>(
-        addr: SocketAddr,
-        inner: &Rc<super::Inner>,
-    ) -> (Host, Io<M>) {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
-            .start_paused(true)
-            .unhandled_panic(tokio::runtime::UnhandledPanic::ShutdownRuntime)
-            .build()
-            .unwrap();
+    pub(crate) fn new(now: Instant, notify: Arc<Notify>) -> Host {
+        Host {
+            inbox: IndexMap::new(),
+            notify,
+            now,
+            version: 0,
+        }
+    }
 
-        let epoch = rt.block_on(async {
-            // Sleep to "round" `Instant::now()` to the closes `ms`
-            tokio::time::sleep(Duration::from_millis(1)).await;
-            Instant::now()
+    pub(crate) fn send(&mut self, src: version::Dot, delay: Duration, message: Box<dyn Any>) {
+        let deliver_at = self.now + delay;
+
+        self.inbox.entry(src.host).or_default().push_back(Envelope {
+            src,
+            deliver_at,
+            message,
         });
 
-        let mut local = LocalSet::new();
-        local.unhandled_panic(tokio::runtime::UnhandledPanic::ShutdownRuntime);
-
-        let (tx, rx) = inbox::channel();
-
-        let host = Host::Simulated(Simulated {
-            rt,
-            local,
-            inbox: tx,
-            epoch,
-        });
-        let stream = Io {
-            inner: Rc::downgrade(inner),
-            addr,
-            inbox: rx,
-            _p: PhantomData,
-        };
-
-        (host, stream)
+        self.notify.notify_one();
     }
 
-    pub(crate) fn new_client<M: Message>(
-        addr: SocketAddr,
-        inner: &Rc<super::Inner>,
-    ) -> (Host, Io<M>) {
-        let (tx, rx) = inbox::channel();
+    pub(crate) fn recv(&mut self) -> Option<Envelope> {
+        let now = Instant::now();
 
-        let host = Host::Client {
-            inbox: tx,
-            epoch: std::time::Instant::now().into(),
-        };
+        for deque in self.inbox.values_mut() {
+            match deque.front() {
+                Some(Envelope { deliver_at, .. }) if *deliver_at <= now => {
+                    self.version += 1;
+                    return deque.pop_front();
+                }
+                _ => {
+                    // Fall through to the notify
+                }
+            }
+        }
 
-        let stream = Io {
-            inner: Rc::downgrade(&inner),
-            addr,
-            inbox: rx,
-            _p: PhantomData,
-        };
-
-        (host, stream)
+        None
     }
 
-    pub(crate) fn send(&self, self_addr: SocketAddr, delay: Duration, message: Box<dyn Any>) {
-        match self {
-            Host::Simulated(Simulated { inbox, .. }) => {
-                let now = self.now();
-                inbox.send(self_addr, now + delay, message);
+    pub(crate) fn recv_from(&mut self, src: SocketAddr) -> Option<Envelope> {
+        let now = Instant::now();
+        let deque = self.inbox.entry(src).or_default();
+
+        match deque.front() {
+            Some(Envelope { deliver_at, .. }) if *deliver_at <= now => {
+                self.version += 1;
+                deque.pop_front()
             }
-            Host::Client { inbox, epoch, .. } => {
-                // Just send the message
-                inbox.send(self_addr, *epoch, message);
-            }
+            _ => None,
         }
     }
 
-    pub(crate) fn tick(&self, config: &Config) {
-        match self {
-            Host::Simulated(Simulated {
-                rt,
-                local,
-                epoch,
-                inbox,
-                ..
-            }) => rt.block_on(async {
-                local
-                    .run_until(async {
-                        tokio::time::sleep(config.tick).await;
+    pub(crate) fn tick(&mut self, now: Instant) {
+        self.now = now;
 
-                        if epoch.elapsed() > config.duration {
-                            panic!("Ran for {:?} without completing", config.duration);
-                        }
-
-                        inbox.tick(Instant::now());
-                    })
-                    .await;
-            }),
-            _ => {}
-        }
-    }
-
-    pub(crate) fn now(&self) -> Instant {
-        match self {
-            Host::Simulated(Simulated { rt, .. }) => {
-                let _enter = rt.enter();
-                Instant::now()
+        for deque in self.inbox.values() {
+            if let Some(Envelope { deliver_at, .. }) = deque.front() {
+                if *deliver_at <= now {
+                    self.notify.notify_one();
+                    return;
+                }
             }
-            Host::Client { epoch, .. } => *epoch,
-        }
-    }
-
-    pub(crate) fn is_client(&self) -> bool {
-        match self {
-            Host::Client { .. } => true,
-            _ => false,
         }
     }
 }
