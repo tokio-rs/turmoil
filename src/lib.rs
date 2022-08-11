@@ -11,20 +11,20 @@ pub use dns::ToSocketAddr;
 mod envelope;
 use envelope::Envelope;
 
-mod io;
-pub use io::Io;
-
 mod host;
 use host::Host;
+
+mod io;
+pub use io::Io;
 
 mod message;
 pub use message::Message;
 
-mod sim;
-pub use sim::Sim;
-
 mod rt;
 use rt::Rt;
+
+mod sim;
+pub use sim::Sim;
 
 mod top;
 use top::Topology;
