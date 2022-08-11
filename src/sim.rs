@@ -1,4 +1,4 @@
-use crate::{Message, Rt, ToSocketAddr, World};
+use crate::{Config, Io, Message, Rt, ToSocketAddr, World};
 
 use indexmap::IndexMap;
 use std::cell::RefCell;
@@ -10,6 +10,9 @@ use tokio::time::{Duration, Instant};
 
 /// Network simulation
 pub struct Sim {
+    /// Simulation configuration
+    config: Config,
+
     /// Tracks the simulated world state.
     ///
     /// This is what is stored in the thread-local
@@ -22,8 +25,9 @@ pub struct Sim {
 }
 
 impl Sim {
-    pub(crate) fn new(world: World) -> Sim {
+    pub(crate) fn new(config: Config, world: World) -> Sim {
         Sim {
+            config,
             world: RefCell::new(world),
             rts: IndexMap::new(),
         }
@@ -64,6 +68,41 @@ impl Sim {
         self.world.borrow_mut().lookup(addr)
     }
 
+    // Introduce a full network partition between two hosts
+    pub fn partition(&self, a: impl ToSocketAddr, b: impl ToSocketAddr) {
+        let a = self.lookup(a);
+        let b = self.lookup(b);
+
+        self.world.borrow_mut().partition(a, b);
+    }
+
+    // Repair a partition between two hosts
+    pub fn repair(&self, a: impl ToSocketAddr, b: impl ToSocketAddr) {
+        let a = self.lookup(a);
+        let b = self.lookup(b);
+
+        self.world.borrow_mut().repair(a, b);
+    }
+
+    /// Set the max message latency
+    pub fn set_max_message_latency(&self, value: Duration) {
+        self.world
+            .borrow_mut()
+            .topology
+            .set_max_message_latency(value);
+    }
+
+    /// Set the message latency distribution curve.
+    ///
+    /// Message latency follows an exponential distribution curve. The `value`
+    /// is the lambda argument to the probability function.
+    pub fn set_message_latency_curve(&self, value: f64) {
+        self.world
+            .borrow_mut()
+            .topology
+            .set_message_latency_curve(value);
+    }
+
     /// Create a client handle
     pub fn client<M: Message>(&mut self, addr: impl ToSocketAddr) -> Io<M> {
         let world = RefCell::get_mut(&mut self.world);
@@ -83,7 +122,7 @@ impl Sim {
         let mut elapsed = Duration::default();
 
         // TODO: use config value for tick
-        let tick = Duration::from_millis(1);
+        let tick = self.config.tick;
 
         loop {
             let res = World::enter(&self.world, || task.poll());
@@ -111,88 +150,11 @@ impl Sim {
                 }
             }
 
-            // TODO: use config value for tick
             elapsed += tick;
-        }
-    }
-}
 
-// ===== TODO: Move this to io.rs =====
-
-pub struct Io<M: Message> {
-    /// The address also serves as the identifier to access host state from the
-    /// world.
-    addr: SocketAddr,
-
-    /// Signaled when a new message becomes ready to consume.
-    notify: Arc<Notify>,
-
-    _p: std::marker::PhantomData<M>,
-}
-
-impl<M: Message> Io<M> {
-    pub(crate) fn new(addr: SocketAddr, notify: Arc<Notify>) -> Io<M> {
-        Io {
-            addr,
-            notify,
-            _p: std::marker::PhantomData,
-        }
-    }
-
-    pub fn send(&self, dst: impl ToSocketAddr, message: M) {
-        World::current(|world| {
-            let dst = world.lookup(dst);
-
-            world.send(self.addr, dst, Box::new(message));
-        });
-    }
-
-    pub async fn recv(&self) -> (M, SocketAddr) {
-        loop {
-            let maybe_envelope = World::current(|world| {
-                if let Some(current) = world.current {
-                    assert_eq!(current, self.addr);
-                }
-
-                let host = world.host_mut(self.addr);
-
-                host.recv()
-            });
-
-            if let Some(envelope) = maybe_envelope {
-                let message = *envelope.message.downcast::<M>().unwrap();
-                return (message, envelope.src.host);
+            if elapsed > self.config.duration {
+                panic!("Ran for {:?} without completing", self.config.duration);
             }
-
-            self.notify.notified().await;
         }
-    }
-
-    /// Receive a message from the specific host
-    pub async fn recv_from(&self, src: impl ToSocketAddr) -> M {
-        let src = self.lookup(src);
-
-        loop {
-            let maybe_envelope = World::current(|world| {
-                if let Some(current) = world.current {
-                    assert_eq!(current, self.addr);
-                }
-
-                let host = world.host_mut(self.addr);
-
-                host.recv_from(src)
-            });
-
-            if let Some(envelope) = maybe_envelope {
-                return *envelope.message.downcast::<M>().unwrap();
-            }
-
-            self.notify.notified().await;
-        }
-    }
-
-    /// Lookup a socket address by host name.
-    pub fn lookup(&self, addr: impl ToSocketAddr) -> SocketAddr {
-        World::current(|world| world.lookup(addr))
     }
 }

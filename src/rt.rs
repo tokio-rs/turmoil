@@ -1,5 +1,3 @@
-use crate::*;
-
 use tokio::runtime::Runtime;
 use tokio::task::LocalSet;
 use tokio::time::{sleep, Duration, Instant};
@@ -23,10 +21,9 @@ impl Rt {
             .build()
             .unwrap();
 
-        let epoch = tokio.block_on(async {
+        tokio.block_on(async {
             // Sleep to "round" `Instant::now()` to the closes `ms`
             tokio::time::sleep(Duration::from_millis(1)).await;
-            Instant::now()
         });
 
         let mut local = LocalSet::new();

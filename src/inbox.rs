@@ -57,17 +57,6 @@ struct Inner {
     notify: Notify,
 }
 
-pub(crate) struct Envelope {
-    /// Who sent the message
-    pub(crate) src: version::Dot,
-
-    /// When to deliver the message
-    pub(crate) deliver_at: Instant,
-
-    /// Message value
-    pub(crate) message: Box<dyn Any>,
-}
-
 impl Sender {
     /// Send a message
     pub(crate) fn send(&self, envelope: Envelope) {

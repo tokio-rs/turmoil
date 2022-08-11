@@ -31,7 +31,7 @@ fn ping_pong() {
 }
 
 impl turmoil::Message for Message {
-    fn write_json(&self, dst: &mut dyn std::io::Write) {
+    fn write_json(&self, _dst: &mut dyn std::io::Write) {
         unimplemented!()
     }
 }

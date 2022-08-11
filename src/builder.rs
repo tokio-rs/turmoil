@@ -1,9 +1,6 @@
 use crate::*;
 
 use rand::{RngCore, SeedableRng};
-use std::cell::RefCell;
-use std::rc::Rc;
-
 use std::time::Duration;
 
 /// Configure the simulation
@@ -12,7 +9,7 @@ pub struct Builder {
 
     config: Config,
 
-    link_config: top::Latency,
+    link: config::Link,
 }
 
 impl Builder {
@@ -20,7 +17,7 @@ impl Builder {
         Builder {
             rng: None,
             config: Config::default(),
-            link_config: top::Latency::default(),
+            link: config::Link::default(),
         }
     }
 
@@ -43,22 +40,22 @@ impl Builder {
     }
 
     pub fn min_message_latency(&mut self, value: Duration) -> &mut Self {
-        self.link_config.min_message_latency = value;
+        self.link.min_message_latency = value;
         self
     }
 
     pub fn max_message_latency(&mut self, value: Duration) -> &mut Self {
-        self.link_config.max_message_latency = value;
+        self.link.max_message_latency = value;
         self
     }
 
     pub fn fail_rate(&mut self, value: f64) -> &mut Self {
-        self.link_config.fail_rate = value;
+        self.link.fail_rate = value;
         self
     }
 
     pub fn repair_rate(&mut self, value: f64) -> &mut Self {
-        self.link_config.repair_rate = value;
+        self.link.repair_rate = value;
         self
     }
 
@@ -67,20 +64,7 @@ impl Builder {
     }
 
     pub fn build_with_rng(&self, rng: Box<dyn RngCore>) -> Sim {
-        let world = World::new(self.link_config.clone(), rng);
-        // let topology = Topology::new(self.link_config.clone());
-
-        Sim::new(world)
-        /*
-        Sim {
-            inner: Rc::new(Inner {
-                config: self.config.clone(),
-                dns: Dns::new(),
-                hosts: Default::default(),
-                topology: RefCell::new(topology),
-                rand: RefCell::new(rng),
-            }),
-        }
-        */
+        let world = World::new(self.link.clone(), rng);
+        Sim::new(self.config.clone(), world)
     }
 }
