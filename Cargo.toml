@@ -14,7 +14,7 @@ homepage = "https://github.com/tokio-rs/turmoil"
 repository = "https://github.com/tokio-rs/turmoil"
 readme = "README.md"
 keywords = ["Deterministic", "Simulation", "Testing"]
-categories = ["Asynchronous", "Network programming", "Simulation"]
+categories = ["asynchronous", "network-programming", "simulation"]
 
 [dependencies]
 indexmap = "1.9"
