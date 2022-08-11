@@ -2,7 +2,7 @@ use tokio::runtime::Runtime;
 use tokio::task::LocalSet;
 use tokio::time::{sleep, Duration, Instant};
 
-/// Per simulated host runtimes
+/// Per host simulated runtime
 pub(crate) struct Rt {
     /// Handle to the Tokio runtime driving this simulated host. Each runtime
     /// may have a different sense of "now" which simulates clock skew.
@@ -22,7 +22,7 @@ impl Rt {
             .unwrap();
 
         tokio.block_on(async {
-            // Sleep to "round" `Instant::now()` to the closes `ms`
+            // Sleep to "round" `Instant::now()` to the closest `ms`
             tokio::time::sleep(Duration::from_millis(1)).await;
         });
 

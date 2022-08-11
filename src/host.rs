@@ -55,9 +55,7 @@ impl Host {
                     self.version += 1;
                     return deque.pop_front();
                 }
-                _ => {
-                    // Fall through to the notify
-                }
+                _ => continue,
             }
         }
 

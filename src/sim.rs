@@ -121,7 +121,6 @@ impl Sim {
         let mut task = tokio_test::task::spawn(until);
         let mut elapsed = Duration::default();
 
-        // TODO: use config value for tick
         let tick = self.config.tick;
 
         loop {
