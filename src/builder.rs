@@ -21,7 +21,10 @@ impl Builder {
         Builder {
             rng: None,
             config: Config::default(),
-            link: config::Link::default(),
+            link: config::Link {
+                latency: Some(config::Latency::default()),
+                message_loss: Some(config::MessageLoss::default()),
+            },
             log: None,
         }
     }
@@ -45,22 +48,30 @@ impl Builder {
     }
 
     pub fn min_message_latency(&mut self, value: Duration) -> &mut Self {
-        self.link.min_message_latency = value;
+        self.link
+            .latency
+            .as_mut()
+            .expect("`Latency` missing")
+            .min_message_latency = value;
         self
     }
 
     pub fn max_message_latency(&mut self, value: Duration) -> &mut Self {
-        self.link.max_message_latency = value;
+        self.link
+            .latency
+            .as_mut()
+            .expect("`MessageLoss` missing")
+            .max_message_latency = value;
         self
     }
 
     pub fn fail_rate(&mut self, value: f64) -> &mut Self {
-        self.link.fail_rate = value;
+        self.link.message_loss_mut().fail_rate = value;
         self
     }
 
     pub fn repair_rate(&mut self, value: f64) -> &mut Self {
-        self.link.repair_rate = value;
+        self.link.message_loss_mut().repair_rate = value;
         self
     }
 

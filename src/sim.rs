@@ -70,18 +70,20 @@ impl Sim {
 
     // Introduce a full network partition between two hosts
     pub fn partition(&self, a: impl ToSocketAddr, b: impl ToSocketAddr) {
-        let a = self.lookup(a);
-        let b = self.lookup(b);
+        let mut world = self.world.borrow_mut();
+        let a = world.lookup(a);
+        let b = world.lookup(b);
 
-        self.world.borrow_mut().partition(a, b);
+        world.partition(a, b);
     }
 
     // Repair a partition between two hosts
     pub fn repair(&self, a: impl ToSocketAddr, b: impl ToSocketAddr) {
-        let a = self.lookup(a);
-        let b = self.lookup(b);
+        let mut world = self.world.borrow_mut();
+        let a = world.lookup(a);
+        let b = world.lookup(b);
 
-        self.world.borrow_mut().repair(a, b);
+        world.repair(a, b);
     }
 
     /// Set the max message latency
@@ -90,6 +92,19 @@ impl Sim {
             .borrow_mut()
             .topology
             .set_max_message_latency(value);
+    }
+
+    pub fn set_link_max_message_latency(
+        &self,
+        a: impl ToSocketAddr,
+        b: impl ToSocketAddr,
+        value: Duration,
+    ) {
+        let mut world = self.world.borrow_mut();
+        let a = world.lookup(a);
+        let b = world.lookup(b);
+
+        world.topology.set_link_max_message_latency(a, b, value);
     }
 
     /// Set the message latency distribution curve.
@@ -101,6 +116,18 @@ impl Sim {
             .borrow_mut()
             .topology
             .set_message_latency_curve(value);
+    }
+
+    pub fn set_fail_rate(&mut self, value: f64) {
+        self.world.borrow_mut().topology.set_fail_rate(value);
+    }
+
+    pub fn set_link_fail_rate(&mut self, a: impl ToSocketAddr, b: impl ToSocketAddr, value: f64) {
+        let mut world = self.world.borrow_mut();
+        let a = world.lookup(a);
+        let b = world.lookup(b);
+
+        world.topology.set_link_fail_rate(a, b, value);
     }
 
     /// Create a client handle
