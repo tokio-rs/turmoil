@@ -60,7 +60,7 @@ impl Builder {
         self.link
             .latency
             .as_mut()
-            .expect("`MessageLos` missing")
+            .expect("`MessageLoss` missing")
             .max_message_latency = value;
         self
     }

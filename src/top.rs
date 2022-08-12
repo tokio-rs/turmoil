@@ -75,7 +75,7 @@ impl Topology {
 
     pub(crate) fn set_link_fail_rate(&mut self, a: SocketAddr, b: SocketAddr, value: f64) {
         self.links[&Pair::new(a, b)]
-            .message_los(&self.config.message_loss())
+            .message_loss(&self.config.message_loss())
             .fail_rate = value;
     }
 
@@ -168,7 +168,7 @@ impl Link {
         self.config.latency.get_or_insert_with(|| global.clone())
     }
 
-    fn message_los(&mut self, global: &config::MessageLoss) -> &mut config::MessageLoss {
+    fn message_loss(&mut self, global: &config::MessageLoss) -> &mut config::MessageLoss {
         self.config
             .message_loss
             .get_or_insert_with(|| global.clone())
