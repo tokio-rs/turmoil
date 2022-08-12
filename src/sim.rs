@@ -142,19 +142,21 @@ impl Sim {
         Io::new(addr, notify)
     }
 
-    pub fn run_until<R>(&mut self, until: impl Future<Output = R>) -> R {
-        use std::task::Poll;
+    pub fn run_until<F>(&mut self, until: F)
+    where
+        F: Future<Output = ()> + 'static,
+    {
+        let rt = Rt::new();
+        let task = World::enter(&self.world, || rt.with(|| tokio::task::spawn_local(until)));
 
-        let mut task = tokio_test::task::spawn(until);
         let mut elapsed = Duration::default();
-
         let tick = self.config.tick;
 
         loop {
-            let res = World::enter(&self.world, || task.poll());
+            World::enter(&self.world, || rt.tick(tick));
 
-            if let Poll::Ready(ret) = res {
-                return ret;
+            if task.is_finished() {
+                return;
             }
 
             for (&addr, maybe_rt) in self.rts.iter() {
