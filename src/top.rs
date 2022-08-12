@@ -13,15 +13,19 @@ pub(crate) struct Topology {
 
     /// Specific configuration overrides between specific hosts.
     links: IndexMap<Pair, Link>,
-
-    /// Current number of partitioned links
-    num_partitioned: usize,
 }
 
 #[derive(Debug, Hash, Eq, PartialEq)]
 struct Pair(SocketAddr, SocketAddr);
 
-pub(crate) enum Link {
+struct Link {
+    state: State,
+
+    /// Optional, per-link configuration.
+    config: config::Link,
+}
+
+enum State {
     /// The link is healthy
     Healthy,
 
@@ -37,22 +41,42 @@ impl Topology {
         Topology {
             config,
             links: IndexMap::new(),
-            num_partitioned: 0,
         }
     }
 
     /// Register a link between two hosts
     pub(crate) fn register(&mut self, a: SocketAddr, b: SocketAddr) {
         let pair = Pair::new(a, b);
-        assert!(self.links.insert(pair, Link::Healthy).is_none());
+        assert!(self.links.insert(pair, Link::new()).is_none());
     }
 
     pub(crate) fn set_max_message_latency(&mut self, value: Duration) {
-        self.config.latency.max_message_latency = value;
+        self.config.latency_mut().max_message_latency = value;
+    }
+
+    pub(crate) fn set_link_max_message_latency(
+        &mut self,
+        a: SocketAddr,
+        b: SocketAddr,
+        value: Duration,
+    ) {
+        self.links[&Pair::new(a, b)]
+            .latency(self.config.latency())
+            .max_message_latency = value;
     }
 
     pub(crate) fn set_message_latency_curve(&mut self, value: f64) {
-        self.config.latency.latency_distribution = Exp::new(value).unwrap();
+        self.config.latency_mut().latency_distribution = Exp::new(value).unwrap();
+    }
+
+    pub(crate) fn set_fail_rate(&mut self, value: f64) {
+        self.config.message_loss_mut().fail_rate = value;
+    }
+
+    pub(crate) fn set_link_fail_rate(&mut self, a: SocketAddr, b: SocketAddr, value: f64) {
+        self.links[&Pair::new(a, b)]
+            .message_los(&self.config.message_loss())
+            .fail_rate = value;
     }
 
     pub(crate) fn send_delay(
@@ -61,30 +85,47 @@ impl Topology {
         src: SocketAddr,
         dst: SocketAddr,
     ) -> Option<Duration> {
-        let pair = Pair::new(src, dst);
+        self.links[&Pair::new(src, dst)].send_delay(&self.config, rand)
+    }
 
-        match self.links[&pair] {
-            Link::Healthy => {
+    pub(crate) fn partition(&mut self, a: SocketAddr, b: SocketAddr) {
+        self.links[&Pair::new(a, b)].explicit_partition();
+    }
+
+    pub(crate) fn repair(&mut self, a: SocketAddr, b: SocketAddr) {
+        self.links[&Pair::new(a, b)].explicit_repair();
+    }
+}
+
+impl Link {
+    fn new() -> Link {
+        Link {
+            state: State::Healthy,
+            config: config::Link::default(),
+        }
+    }
+
+    fn send_delay(
+        &mut self,
+        global_config: &config::Link,
+        rand: &mut dyn RngCore,
+    ) -> Option<Duration> {
+        match self.state {
+            State::Healthy => {
                 // Should the link be broken?
-                if self.config.message_loss.fail_rate > 0.0 {
-                    if rand.gen_bool(self.config.message_loss.fail_rate) {
-                        self.num_partitioned += 1;
-                        self.links.insert(pair, Link::RandPartition);
-                        return None;
-                    }
+                if self.rand_partition(global_config.message_loss(), rand) {
+                    self.state = State::RandPartition;
+                    return None;
                 }
 
-                Some(send_delay(&self.config.latency, rand))
+                Some(self.delay(global_config.latency(), rand))
             }
-            Link::ExplicitPartition => None,
-            Link::RandPartition => {
+            State::ExplicitPartition => None,
+            State::RandPartition => {
                 // Should the link be repaired?
-                if self.config.message_loss.repair_rate > 0.0 {
-                    if rand.gen_bool(self.config.message_loss.repair_rate) {
-                        self.num_partitioned -= 1;
-                        self.links.remove(&pair);
-                        return Some(send_delay(&self.config.latency, rand));
-                    }
+                if self.rand_repair(global_config.message_loss(), rand) {
+                    self.state = State::Healthy;
+                    return Some(self.delay(&global_config.latency(), rand));
                 }
 
                 None
@@ -92,21 +133,45 @@ impl Topology {
         }
     }
 
-    pub(crate) fn partition(&mut self, a: SocketAddr, b: SocketAddr) {
-        let pair = Pair::new(a, b);
-
-        match self.links.insert(pair, Link::ExplicitPartition) {
-            Some(Link::RandPartition | Link::ExplicitPartition) => {}
-            _ => self.num_partitioned += 1,
-        }
+    fn explicit_partition(&mut self) {
+        self.state = State::ExplicitPartition;
     }
 
-    pub(crate) fn repair(&mut self, a: SocketAddr, b: SocketAddr) {
-        let pair = Pair::new(a, b);
-        match self.links.remove(&pair) {
-            Some(Link::RandPartition | Link::ExplicitPartition) => self.num_partitioned += 1,
-            _ => {}
-        }
+    fn explicit_repair(&mut self) {
+        self.state = State::Healthy;
+    }
+
+    /// Should the link be randomly partitioned
+    fn rand_partition(&self, global: &config::MessageLoss, rand: &mut dyn RngCore) -> bool {
+        let config = self.config.message_loss.as_ref().unwrap_or(global);
+        let fail_rate = config.fail_rate;
+        fail_rate > 0.0 && rand.gen_bool(fail_rate)
+    }
+
+    fn rand_repair(&self, global: &config::MessageLoss, rand: &mut dyn RngCore) -> bool {
+        let config = self.config.message_loss.as_ref().unwrap_or(global);
+        let repair_rate = config.repair_rate;
+        repair_rate > 0.0 && rand.gen_bool(repair_rate)
+    }
+
+    fn delay(&self, global: &config::Latency, rand: &mut dyn RngCore) -> Duration {
+        let config = self.config.latency.as_ref().unwrap_or(global);
+
+        let mult = config.latency_distribution.sample(rand);
+        let range = (config.max_message_latency - config.min_message_latency).as_millis() as f64;
+        let delay = config.min_message_latency + Duration::from_millis((range * mult) as _);
+
+        std::cmp::min(delay, config.max_message_latency)
+    }
+
+    fn latency(&mut self, global: &config::Latency) -> &mut config::Latency {
+        self.config.latency.get_or_insert_with(|| global.clone())
+    }
+
+    fn message_los(&mut self, global: &config::MessageLoss) -> &mut config::MessageLoss {
+        self.config
+            .message_loss
+            .get_or_insert_with(|| global.clone())
     }
 }
 
@@ -120,11 +185,4 @@ impl Pair {
             Pair(b, a)
         }
     }
-}
-
-fn send_delay(config: &config::Latency, rand: &mut dyn RngCore) -> Duration {
-    let mult = config.latency_distribution.sample(rand);
-    let range = (config.max_message_latency - config.min_message_latency).as_millis() as f64;
-    let delay = config.min_message_latency + Duration::from_millis((range * mult) as _);
-    std::cmp::min(delay, config.max_message_latency)
 }
