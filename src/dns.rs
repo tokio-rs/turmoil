@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 
 pub struct Dns {
     next: u16,
-    names: IndexMap<String, u16>,
+    names: IndexMap<String, SocketAddr>,
 }
 
 pub trait ToSocketAddr {
@@ -21,6 +21,14 @@ impl Dns {
     pub(crate) fn lookup(&mut self, addr: impl ToSocketAddr) -> SocketAddr {
         addr.to_socket_addr(self)
     }
+
+    pub(crate) fn reverse(&self, addr: SocketAddr) -> &str {
+        self.names
+            .iter()
+            .find(|(_, a)| **a == addr)
+            .map(|(name, _)| name)
+            .expect("no hostname found for socket address")
+    }
 }
 
 impl ToSocketAddr for String {
@@ -31,16 +39,15 @@ impl ToSocketAddr for String {
 
 impl<'a> ToSocketAddr for &'a str {
     fn to_socket_addr(&self, dns: &mut Dns) -> SocketAddr {
-        let host = dns.names.entry(self.to_string()).or_insert_with(|| {
-            let next = dns.next;
+        *dns.names.entry(self.to_string()).or_insert_with(|| {
+            let host = dns.next;
             dns.next += 1;
-            next
-        });
 
-        let a = (*host >> 8) as u8;
-        let b = (*host & 0xFF) as u8;
+            let a = (host >> 8) as u8;
+            let b = (host & 0xFF) as u8;
 
-        (std::net::Ipv4Addr::new(127, 0, a, b), 3000).into()
+            (std::net::Ipv4Addr::new(127, 0, a, b), 3000).into()
+        })
     }
 }
 
