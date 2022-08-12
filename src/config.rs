@@ -13,15 +13,29 @@ pub(crate) struct Config {
 /// Configures link behavior.
 #[derive(Clone)]
 pub(crate) struct Link {
+    /// Message latency between two hosts
+    pub(crate) latency: Latency,
+
+    /// How often sending a message works vs. the message getting dropped
+    pub(crate) message_loss: MessageLoss,
+}
+
+/// Configure latency behavior between two hosts.
+#[derive(Clone)]
+pub(crate) struct Latency {
     /// Minimum latency
     pub(crate) min_message_latency: Duration,
 
     /// Maximum latency
     pub(crate) max_message_latency: Duration,
 
-    /// Value distribution
-    pub(crate) distribution: Exp<f64>,
+    /// Probability distribution of latency within the range above.
+    pub(crate) latency_distribution: Exp<f64>,
+}
 
+/// Configure how often messages are lost
+#[derive(Clone)]
+pub(crate) struct MessageLoss {
     /// Probability of a link failing
     pub(crate) fail_rate: f64,
 
@@ -41,9 +55,25 @@ impl Default for Config {
 impl Default for Link {
     fn default() -> Link {
         Link {
+            latency: Latency::default(),
+            message_loss: MessageLoss::default(),
+        }
+    }
+}
+
+impl Default for Latency {
+    fn default() -> Latency {
+        Latency {
             min_message_latency: Duration::from_millis(0),
             max_message_latency: Duration::from_millis(100),
-            distribution: Exp::new(5.0).unwrap(),
+            latency_distribution: Exp::new(5.0).unwrap(),
+        }
+    }
+}
+
+impl Default for MessageLoss {
+    fn default() -> MessageLoss {
+        MessageLoss {
             fail_rate: 0.0,
             repair_rate: 1.0,
         }

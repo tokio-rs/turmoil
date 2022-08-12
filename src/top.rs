@@ -48,11 +48,11 @@ impl Topology {
     }
 
     pub(crate) fn set_max_message_latency(&mut self, value: Duration) {
-        self.config.max_message_latency = value;
+        self.config.latency.max_message_latency = value;
     }
 
     pub(crate) fn set_message_latency_curve(&mut self, value: f64) {
-        self.config.distribution = Exp::new(value).unwrap();
+        self.config.latency.latency_distribution = Exp::new(value).unwrap();
     }
 
     pub(crate) fn send_delay(
@@ -66,24 +66,24 @@ impl Topology {
         match self.links[&pair] {
             Link::Healthy => {
                 // Should the link be broken?
-                if self.config.fail_rate > 0.0 {
-                    if rand.gen_bool(self.config.fail_rate) {
+                if self.config.message_loss.fail_rate > 0.0 {
+                    if rand.gen_bool(self.config.message_loss.fail_rate) {
                         self.num_partitioned += 1;
                         self.links.insert(pair, Link::RandPartition);
                         return None;
                     }
                 }
 
-                Some(send_delay(&self.config, rand))
+                Some(send_delay(&self.config.latency, rand))
             }
             Link::ExplicitPartition => None,
             Link::RandPartition => {
                 // Should the link be repaired?
-                if self.config.repair_rate > 0.0 {
-                    if rand.gen_bool(self.config.repair_rate) {
+                if self.config.message_loss.repair_rate > 0.0 {
+                    if rand.gen_bool(self.config.message_loss.repair_rate) {
                         self.num_partitioned -= 1;
                         self.links.remove(&pair);
-                        return Some(send_delay(&self.config, rand));
+                        return Some(send_delay(&self.config.latency, rand));
                     }
                 }
 
@@ -122,8 +122,8 @@ impl Pair {
     }
 }
 
-fn send_delay(config: &config::Link, rand: &mut dyn RngCore) -> Duration {
-    let mult = config.distribution.sample(rand);
+fn send_delay(config: &config::Latency, rand: &mut dyn RngCore) -> Duration {
+    let mult = config.latency_distribution.sample(rand);
     let range = (config.max_message_latency - config.min_message_latency).as_millis() as f64;
     let delay = config.min_message_latency + Duration::from_millis((range * mult) as _);
     std::cmp::min(delay, config.max_message_latency)

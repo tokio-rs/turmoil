@@ -45,22 +45,22 @@ impl Builder {
     }
 
     pub fn min_message_latency(&mut self, value: Duration) -> &mut Self {
-        self.link.min_message_latency = value;
+        self.link.latency.min_message_latency = value;
         self
     }
 
     pub fn max_message_latency(&mut self, value: Duration) -> &mut Self {
-        self.link.max_message_latency = value;
+        self.link.latency.max_message_latency = value;
         self
     }
 
     pub fn fail_rate(&mut self, value: f64) -> &mut Self {
-        self.link.fail_rate = value;
+        self.link.message_loss.fail_rate = value;
         self
     }
 
     pub fn repair_rate(&mut self, value: f64) -> &mut Self {
-        self.link.repair_rate = value;
+        self.link.message_loss.repair_rate = value;
         self
     }
 
