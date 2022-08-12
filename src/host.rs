@@ -1,7 +1,6 @@
-use crate::{version, Envelope};
+use crate::{version, Envelope, Message};
 
 use indexmap::IndexMap;
-use std::any::Any;
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -10,6 +9,9 @@ use tokio::time::{Duration, Instant};
 
 /// A host in the simulated network
 pub(crate) struct Host {
+    /// Host address
+    addr: SocketAddr,
+
     /// Messages in-flight to the host. Some of these may still be "on the
     /// network".
     inbox: IndexMap<SocketAddr, VecDeque<Envelope>>,
@@ -20,21 +22,38 @@ pub(crate) struct Host {
     /// Current instant at the host
     pub(crate) now: Instant,
 
+    epoch: Instant,
+
     /// Current host version. This is incremented each time a message is received.
     pub(crate) version: u64,
 }
 
 impl Host {
-    pub(crate) fn new(now: Instant, notify: Arc<Notify>) -> Host {
+    pub(crate) fn new(addr: SocketAddr, now: Instant, notify: Arc<Notify>) -> Host {
         Host {
+            addr,
             inbox: IndexMap::new(),
             notify,
             now,
+            epoch: now,
             version: 0,
         }
     }
 
-    pub(crate) fn send(&mut self, src: version::Dot, delay: Duration, message: Box<dyn Any>) {
+    /// Returns how long the host has been executing for in virtual time
+    pub(crate) fn elapsed(&self) -> Duration {
+        self.now - self.epoch
+    }
+
+    /// Returns a dot for the host at its current version
+    pub(crate) fn dot(&self) -> version::Dot {
+        version::Dot {
+            host: self.addr,
+            version: self.version,
+        }
+    }
+
+    pub(crate) fn send(&mut self, src: version::Dot, delay: Duration, message: Box<dyn Message>) {
         let deliver_at = self.now + delay;
 
         self.inbox.entry(src.host).or_default().push_back(Envelope {
@@ -62,9 +81,9 @@ impl Host {
         None
     }
 
-    pub(crate) fn recv_from(&mut self, src: SocketAddr) -> Option<Envelope> {
+    pub(crate) fn recv_from(&mut self, peer: SocketAddr) -> Option<Envelope> {
         let now = Instant::now();
-        let deque = self.inbox.entry(src).or_default();
+        let deque = self.inbox.entry(peer).or_default();
 
         match deque.front() {
             Some(Envelope { deliver_at, .. }) if *deliver_at <= now => {

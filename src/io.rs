@@ -1,4 +1,4 @@
-use crate::{Message, ToSocketAddr, World};
+use crate::{message, Message, ToSocketAddr, World};
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -24,6 +24,11 @@ impl<M: Message> Io<M> {
         }
     }
 
+    /// Return the socket address associated with this `Io`
+    pub fn local_addr(&self) -> SocketAddr {
+        self.addr
+    }
+
     pub fn send(&self, dst: impl ToSocketAddr, message: M) {
         World::current(|world| {
             let dst = world.lookup(dst);
@@ -39,13 +44,11 @@ impl<M: Message> Io<M> {
                     assert_eq!(current, self.addr);
                 }
 
-                let host = world.host_mut(self.addr);
-
-                host.recv()
+                world.recv(self.addr)
             });
 
             if let Some(envelope) = maybe_envelope {
-                let message = *envelope.message.downcast::<M>().unwrap();
+                let message = message::downcast::<M>(envelope.message);
                 return (message, envelope.src.host);
             }
 
@@ -54,8 +57,8 @@ impl<M: Message> Io<M> {
     }
 
     /// Receive a message from the specific host
-    pub async fn recv_from(&self, src: impl ToSocketAddr) -> M {
-        let src = self.lookup(src);
+    pub async fn recv_from(&self, peer: impl ToSocketAddr) -> M {
+        let peer = self.lookup(peer);
 
         loop {
             let maybe_envelope = World::current(|world| {
@@ -63,13 +66,11 @@ impl<M: Message> Io<M> {
                     assert_eq!(current, self.addr);
                 }
 
-                let host = world.host_mut(self.addr);
-
-                host.recv_from(src)
+                world.recv_from(self.addr, peer)
             });
 
             if let Some(envelope) = maybe_envelope {
-                return *envelope.message.downcast::<M>().unwrap();
+                return message::downcast::<M>(envelope.message);
             }
 
             self.notify.notified().await;
@@ -79,5 +80,15 @@ impl<M: Message> Io<M> {
     /// Lookup a socket address by host name.
     pub fn lookup(&self, addr: impl ToSocketAddr) -> SocketAddr {
         World::current(|world| world.lookup(addr))
+    }
+}
+
+impl<M: Message> Clone for Io<M> {
+    fn clone(&self) -> Io<M> {
+        Io {
+            addr: self.addr,
+            notify: self.notify.clone(),
+            _p: std::marker::PhantomData,
+        }
     }
 }
