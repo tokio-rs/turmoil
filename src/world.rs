@@ -18,7 +18,7 @@ pub(crate) struct World {
     pub(crate) topology: Topology,
 
     /// Maps hostnames to socket addresses.
-    dns: Dns,
+    pub(crate) dns: Dns,
 
     /// If set, this is the current host being executed.
     pub(crate) current: Option<SocketAddr>,
@@ -97,9 +97,23 @@ impl World {
             let host = &self.hosts[&host];
             let dot = host.dot();
 
-            self.log.send(dot, host.elapsed(), dst, &*message);
+            self.log.send(
+                &self.dns,
+                dot,
+                host.elapsed(),
+                dst,
+                Some(delay),
+                false,
+                &*message,
+            );
 
             self.hosts[&dst].send(dot, delay, message);
+        } else {
+            let host = &self.hosts[&host];
+            let dot = host.dot();
+
+            self.log
+                .send(&self.dns, dot, host.elapsed(), dst, None, true, &*message);
         }
     }
 
@@ -109,7 +123,8 @@ impl World {
         let ret = host.recv();
 
         if let Some(Envelope { src, message, .. }) = &ret {
-            self.log.recv(host.dot(), host.elapsed(), *src, &**message);
+            self.log
+                .recv(&self.dns, host.dot(), host.elapsed(), *src, &**message);
         }
 
         ret
@@ -120,7 +135,8 @@ impl World {
         let ret = host.recv_from(peer);
 
         if let Some(Envelope { src, message, .. }) = &ret {
-            self.log.recv(host.dot(), host.elapsed(), *src, &**message);
+            self.log
+                .recv(&self.dns, host.dot(), host.elapsed(), *src, &**message);
         }
 
         ret

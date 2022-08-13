@@ -63,3 +63,41 @@ pub fn repair(a: impl ToSocketAddr, b: impl ToSocketAddr) {
         world.repair(a, b);
     })
 }
+
+/// Returns `true` if logging is enabled
+pub fn log_enabled() -> bool {
+    World::current(|world| world.log.enabled() && world.current.is_some())
+}
+
+#[macro_export]
+macro_rules! info {
+    ( $($t:tt)* ) => {{
+        if $crate::log_enabled() {
+            let line = format!( $($t)* );
+            $crate::log(false, &line);
+        }
+    }};
+}
+
+#[macro_export]
+macro_rules! debug {
+    () => {
+        if $crate::log_enabled() {
+            let line = format!( $($t)* );
+            $crate::log(true, &line);
+        }
+    };
+}
+
+#[doc(hidden)]
+pub fn log(debug: bool, line: &str) {
+    World::current(|world| {
+        if let Some(current) = world.current {
+            let host = world.host(current);
+            let dot = host.dot();
+            let elapsed = host.elapsed();
+
+            world.log.line(&world.dns, dot, elapsed, debug, line);
+        }
+    })
+}
