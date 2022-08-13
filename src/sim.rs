@@ -149,7 +149,6 @@ impl Sim {
         let mut task = tokio_test::task::spawn(until);
 
         let rt = Rt::new();
-        // let task = World::enter(&self.world, || rt.with(|| tokio::task::spawn_local(until)));
 
         let mut elapsed = Duration::default();
         let tick = self.config.tick;
