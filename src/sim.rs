@@ -144,18 +144,30 @@ impl Sim {
 
     pub fn run_until<F>(&mut self, until: F)
     where
-        F: Future<Output = ()> + 'static,
+        F: Future<Output = ()>,
     {
+        let mut task = tokio_test::task::spawn(until);
+
         let rt = Rt::new();
-        let task = World::enter(&self.world, || rt.with(|| tokio::task::spawn_local(until)));
+        // let task = World::enter(&self.world, || rt.with(|| tokio::task::spawn_local(until)));
 
         let mut elapsed = Duration::default();
         let tick = self.config.tick;
 
         loop {
-            World::enter(&self.world, || rt.tick(tick));
+            let done = World::enter(&self.world, || {
+                // Poll the task
+                let res = rt.with(|| task.poll());
 
-            if task.is_finished() {
+                if res.is_ready() {
+                    return true;
+                }
+
+                rt.tick(tick);
+                false
+            });
+
+            if done {
                 return;
             }
 
