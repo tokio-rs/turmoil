@@ -24,3 +24,4 @@ scoped-tls = "1.0.0"
 serde = { version = "1.0.143", features = ["derive"] }
 serde_json = "1.0.83"
 tokio = { version = "1.19.2", features = ["rt", "sync", "test-util", "time"] }
+tokio-test = { version = "0.4.2" }
