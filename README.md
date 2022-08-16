@@ -29,13 +29,11 @@ Next, create a test file and add a test:
 use turmoil::{Builder, Io};
 
 #[derive(Debug)]
-enum Message {
-    Echo(String),
-}
+struct Echo(String);
 
-impl turmoil::Message for Message {
+impl turmoil::Message for Echo {
     fn write_json(&self, _dst: &mut dyn std::io::Write) {
-        todo!("not yet implemented")
+        unimplemented!()
     }
 }
 
@@ -43,29 +41,25 @@ impl turmoil::Message for Message {
 fn simulation() {
     let mut sim = Builder::new().build();
 
-    // register a client
-    let client = sim.client("client");
-
     // register a host
-    sim.register("server", |host: Io<Message>| async move {
+    sim.register("server", |host: Io<Echo>| async move {
         loop {
             let (msg, src) = host.recv().await;
             host.send(src, msg);
         }
     });
 
-    // run the simulation
-    sim.run_until(async move {
-        client.send("server", Message::Echo("hello, server!".to_string()));
+    // register a client (this is the test code)
+    sim.client("client", |host: Io<Echo>| async move {
+        host.send("server", Echo("hello, server!".to_string()));
 
-        let (msg, _) = client.recv().await;
-        let echo = match msg {
-            Message::Echo(e) => e,
-        };
-        assert_eq!("hello, server!", echo);
+        let (echo, _) = host.recv().await;
+        assert_eq!("hello, server!", echo.0);
     });
-}
 
+    // run the simulation
+    sim.run();
+}
 ```
 
 ## License
