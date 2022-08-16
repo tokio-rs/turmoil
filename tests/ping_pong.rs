@@ -1,4 +1,5 @@
-use std::matches;
+use std::{matches, time::Duration};
+use tokio::time::timeout;
 use turmoil::Builder;
 
 #[derive(Debug)]
@@ -7,11 +8,15 @@ enum Message {
     Pong,
 }
 
+impl turmoil::Message for Message {
+    fn write_json(&self, _dst: &mut dyn std::io::Write) {
+        unimplemented!()
+    }
+}
+
 #[test]
 fn ping_pong() {
     let mut sim = Builder::new().build();
-
-    let client = sim.client("client");
 
     sim.register("server", |host| async move {
         loop {
@@ -22,16 +27,38 @@ fn ping_pong() {
         }
     });
 
-    sim.run_until(async move {
-        client.send("server", Message::Ping);
+    sim.client("client", |host| async move {
+        host.send("server", Message::Ping);
 
-        let (pong, _) = client.recv().await;
+        let (pong, _) = host.recv().await;
         assert!(matches!(pong, Message::Pong));
     });
+
+    sim.run();
 }
 
-impl turmoil::Message for Message {
-    fn write_json(&self, _dst: &mut dyn std::io::Write) {
-        unimplemented!()
-    }
+#[test]
+fn network_partition() {
+    let mut sim = Builder::new().build();
+
+    sim.register("server", |host| async move {
+        loop {
+            let (ping, src) = host.recv().await;
+            assert!(matches!(ping, Message::Ping));
+
+            host.send(src, Message::Pong);
+        }
+    });
+
+    sim.client("client", |host| async move {
+        // introduce the partition
+        turmoil::partition("client", "server");
+
+        host.send("server", Message::Ping);
+
+        let res = timeout(Duration::from_secs(1), host.recv()).await;
+        assert!(matches!(res, Err(_)));
+    });
+
+    sim.run();
 }

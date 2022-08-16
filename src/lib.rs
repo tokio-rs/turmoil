@@ -24,6 +24,9 @@ use log::Log;
 mod message;
 pub use message::Message;
 
+mod role;
+use role::Role;
+
 mod rt;
 use rt::Rt;
 
