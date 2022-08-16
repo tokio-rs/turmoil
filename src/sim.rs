@@ -1,4 +1,4 @@
-use crate::{Config, Io, Message, Rt, Software, ToSocketAddr, World};
+use crate::{Config, Io, Message, Role, Rt, ToSocketAddr, World};
 
 use indexmap::IndexMap;
 use std::cell::RefCell;
@@ -18,8 +18,8 @@ pub struct Sim {
     /// This is what is stored in the thread-local
     world: RefCell<World>,
 
-    /// Per simulated host software
-    software: IndexMap<SocketAddr, Software>,
+    /// Per simulated host runtimes
+    rts: IndexMap<SocketAddr, Role>,
 }
 
 impl Sim {
@@ -27,7 +27,7 @@ impl Sim {
         Sim {
             config,
             world: RefCell::new(world),
-            software: IndexMap::new(),
+            rts: IndexMap::new(),
         }
     }
 
@@ -56,7 +56,7 @@ impl Sim {
             rt.with(|| tokio::task::spawn_local(host(io)))
         });
 
-        self.software.insert(addr, Software::client(rt, handle));
+        self.rts.insert(addr, Role::client(rt, handle));
     }
 
     /// Register a host with the simulation
@@ -86,7 +86,7 @@ impl Sim {
             });
         });
 
-        self.software.insert(addr, Software::simulated(rt));
+        self.rts.insert(addr, Role::simulated(rt));
     }
 
     /// Lookup a socket address by host name
@@ -164,11 +164,11 @@ impl Sim {
         loop {
             let mut is_finished = false;
 
-            for (&addr, software) in self.software.iter() {
+            for (&addr, rt) in self.rts.iter() {
                 // Set the current host
                 self.world.borrow_mut().current = Some(addr);
 
-                let now = World::enter(&self.world, || software.tick(tick));
+                let now = World::enter(&self.world, || rt.tick(tick));
 
                 // Unset the current host
                 self.world.borrow_mut().current = None;
@@ -176,8 +176,8 @@ impl Sim {
                 let mut world = self.world.borrow_mut();
                 world.tick(addr, now);
 
-                if let Software::Client(s) = software {
-                    is_finished = s.is_finished();
+                if let Role::Client { handle, .. } = rt {
+                    is_finished = handle.is_finished();
                 }
             }
 

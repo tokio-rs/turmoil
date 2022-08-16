@@ -24,14 +24,14 @@ use log::Log;
 mod message;
 pub use message::Message;
 
+mod role;
+use role::Role;
+
 mod rt;
 use rt::Rt;
 
 mod sim;
 pub use sim::Sim;
-
-mod software;
-use software::Software;
 
 mod top;
 use top::Topology;

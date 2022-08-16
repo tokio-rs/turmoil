@@ -4,25 +4,18 @@ use tokio::{task::JoinHandle, time::Instant};
 
 use crate::rt::Rt;
 
-pub(crate) enum Software {
-    Client(ClientSoftware),
+/// Differentiates runtime fields for different host types
+pub(crate) enum Role {
+    /// A client handle
+    Client { rt: Rt, handle: JoinHandle<()> },
+
+    /// A simulated host
     Simulated(Rt),
 }
 
-pub(crate) struct ClientSoftware {
-    rt: Rt,
-    handle: JoinHandle<()>,
-}
-
-impl ClientSoftware {
-    pub(crate) fn is_finished(&self) -> bool {
-        self.handle.is_finished()
-    }
-}
-
-impl Software {
+impl Role {
     pub(crate) fn client(rt: Rt, handle: JoinHandle<()>) -> Self {
-        Self::Client(ClientSoftware { rt, handle })
+        Self::Client { rt, handle }
     }
 
     pub(crate) fn simulated(rt: Rt) -> Self {
@@ -31,8 +24,8 @@ impl Software {
 
     pub(crate) fn tick(&self, duration: Duration) -> Instant {
         let rt = match self {
-            Software::Client(cs) => &cs.rt,
-            Software::Simulated(rt) => rt,
+            Role::Client { rt, .. } => rt,
+            Role::Simulated(rt) => rt,
         };
 
         rt.tick(duration)
