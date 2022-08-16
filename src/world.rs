@@ -12,7 +12,7 @@ use tokio::time::Instant;
 /// Tracks all the state for the simulated world.
 pub(crate) struct World {
     /// Tracks all individual hosts
-    pub(crate) hosts: IndexMap<SocketAddr, Host>,
+    hosts: IndexMap<SocketAddr, Host>,
 
     /// Tracks how each host is connected to each other.
     pub(crate) topology: Topology,
