@@ -30,6 +30,9 @@ use rt::Rt;
 mod sim;
 pub use sim::Sim;
 
+mod software;
+use software::Software;
+
 mod top;
 use top::Topology;
 
