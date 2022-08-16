@@ -19,9 +19,7 @@ pub struct Sim {
     world: RefCell<World>,
 
     /// Per simulated host Tokio runtimes
-    ///
-    /// When `None`, this signifies the host is a "client"
-    rts: IndexMap<SocketAddr, Option<Rt>>,
+    rts: IndexMap<SocketAddr, Rt>,
 }
 
 impl Sim {
@@ -49,7 +47,7 @@ impl Sim {
             let notify = Arc::new(Notify::new());
 
             // Register host state with the world
-            world.register(addr, epoch, notify.clone());
+            world.simulated(addr, epoch, notify.clone());
 
             Io::new(addr, notify)
         };
@@ -60,7 +58,7 @@ impl Sim {
             });
         });
 
-        self.rts.insert(addr, Some(rt));
+        self.rts.insert(addr, rt);
     }
 
     /// Lookup a socket address by host name
@@ -131,18 +129,17 @@ impl Sim {
     }
 
     /// Create a client handle
-    pub fn client<M: Message>(&mut self, addr: impl ToSocketAddr) -> Io<M> {
-        let world = RefCell::get_mut(&mut self.world);
+    pub fn client<M: Message>(&self, addr: impl ToSocketAddr) -> Io<M> {
+        let mut world = self.world.borrow_mut();
         let addr = world.lookup(addr);
         let notify = Arc::new(Notify::new());
 
-        world.register(addr, Instant::now(), notify.clone());
-        self.rts.insert(addr, None);
+        world.client(addr, Instant::now(), notify.clone());
 
         Io::new(addr, notify)
     }
 
-    pub fn run_until<F>(&mut self, until: F)
+    pub fn run_until<F>(&self, until: F)
     where
         F: Future<Output = ()>,
     {
@@ -170,23 +167,25 @@ impl Sim {
                 return;
             }
 
-            for (&addr, maybe_rt) in self.rts.iter() {
-                if let Some(rt) = maybe_rt {
-                    // Set the current host
-                    self.world.borrow_mut().current = Some(addr);
+            for (&addr, rt) in self.rts.iter() {
+                // Set the current host
+                self.world.borrow_mut().current = Some(addr);
 
-                    let now = World::enter(&self.world, || rt.tick(tick));
+                let now = World::enter(&self.world, || rt.tick(tick));
 
-                    // Unset the current host
-                    self.world.borrow_mut().current = None;
+                // Unset the current host
+                self.world.borrow_mut().current = None;
 
-                    let mut world = self.world.borrow_mut();
-                    world.tick(addr, now);
-                } else {
-                    let mut world = self.world.borrow_mut();
-                    let now = world.host(addr).now;
-                    world.tick(addr, now + tick);
-                }
+                let mut world = self.world.borrow_mut();
+                world.tick(addr, now);
+            }
+
+            let clients = self.world.borrow().clients();
+
+            for addr in clients {
+                let mut world = self.world.borrow_mut();
+                let now = world.host(addr).now();
+                world.tick(addr, now + tick);
             }
 
             elapsed += tick;

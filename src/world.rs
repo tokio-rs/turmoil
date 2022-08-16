@@ -12,7 +12,7 @@ use tokio::time::Instant;
 /// Tracks all the state for the simulated world.
 pub(crate) struct World {
     /// Tracks all individual hosts
-    hosts: IndexMap<SocketAddr, Host>,
+    pub(crate) hosts: IndexMap<SocketAddr, Host>,
 
     /// Tracks how each host is connected to each other.
     pub(crate) topology: Topology,
@@ -76,7 +76,23 @@ impl World {
     }
 
     /// Register a new host with the simulation
-    pub(crate) fn register(&mut self, addr: SocketAddr, epoch: Instant, notify: Arc<Notify>) {
+    pub(crate) fn client(&mut self, addr: SocketAddr, epoch: Instant, notify: Arc<Notify>) {
+        self.register(addr);
+
+        // Initialize host state
+        self.hosts.insert(addr, Host::client(addr, epoch, notify));
+    }
+
+    /// Register a new host with the simulation
+    pub(crate) fn simulated(&mut self, addr: SocketAddr, epoch: Instant, notify: Arc<Notify>) {
+        self.register(addr);
+
+        // Initialize host state
+        self.hosts
+            .insert(addr, Host::simulated(addr, epoch, notify));
+    }
+
+    fn register(&mut self, addr: SocketAddr) {
         assert!(
             !self.hosts.contains_key(&addr),
             "already registered host for the given socket address"
@@ -86,9 +102,6 @@ impl World {
         for existing in self.hosts.keys() {
             self.topology.register(*existing, addr);
         }
-
-        // Initialize host state
-        self.hosts.insert(addr, Host::new(addr, epoch, notify));
     }
 
     /// Send a message between two hosts
@@ -145,5 +158,16 @@ impl World {
     /// Tick a host
     pub(crate) fn tick(&mut self, addr: SocketAddr, now: Instant) {
         self.hosts.get_mut(&addr).expect("missing host").tick(now);
+    }
+
+    /// Returns a view of all the world's client hosts
+    pub(crate) fn clients(&self) -> Vec<SocketAddr> {
+        self.hosts
+            .iter()
+            .filter_map(|(addr, host)| match host {
+                Host::Client(_) => Some(*addr),
+                Host::Simulated(_) => None,
+            })
+            .collect()
     }
 }
