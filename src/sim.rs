@@ -162,7 +162,7 @@ impl Sim {
         let tick = self.config.tick;
 
         loop {
-            let mut is_finished = false;
+            let mut is_finished = true;
 
             for (&addr, rt) in self.rts.iter() {
                 // Set the current host
@@ -177,7 +177,7 @@ impl Sim {
                 world.tick(addr, now);
 
                 if let Role::Client { handle, .. } = rt {
-                    is_finished = handle.is_finished();
+                    is_finished = is_finished && handle.is_finished();
                 }
             }
 
