@@ -8,7 +8,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 
 /// A connection between two hosts.
-pub struct Connection<M: Message> {
+pub struct Connection<M> {
     /// Connection identification information
     info: ConnectionInfo,
 
@@ -19,7 +19,7 @@ pub struct Connection<M: Message> {
     tx: mpsc::Sender<(ConnectionInfo, M)>,
 }
 
-impl<M: Message> Connection<M> {
+impl<M> Connection<M> {
     /// Send a message.
     ///
     /// # Errors
@@ -90,7 +90,7 @@ struct ConnectionInfo {
     peer: SocketAddr,
 }
 
-enum Action<M: Message> {
+enum Action<M> {
     /// Accept a new connection
     Accept(ConnectionInfo),
 
@@ -251,7 +251,7 @@ impl<M: Message> Inner<M> {
 }
 
 /// Connection state management.
-struct Connections<M: Message> {
+struct Connections<M> {
     // State for each connection
     by_info: IndexMap<ConnectionInfo, ConnectionState<M>>,
 
@@ -262,7 +262,7 @@ struct Connections<M: Message> {
     receivers: unicycle::IndexedStreamsUnordered<ReceiverStream<(ConnectionInfo, M)>>,
 }
 
-enum ConnectionState<M: Message> {
+enum ConnectionState<M> {
     /// Connection initiated; awaiting syn-ack
     New {
         recv_idx: usize,
@@ -283,7 +283,7 @@ enum ConnectionState<M: Message> {
     },
 }
 
-impl<M: Message> Display for ConnectionState<M> {
+impl<M> Display for ConnectionState<M> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ConnectionState::New { .. } => write!(f, "New"),
@@ -293,7 +293,7 @@ impl<M: Message> Display for ConnectionState<M> {
     }
 }
 
-impl<M: Message> Connections<M> {
+impl<M> Connections<M> {
     fn new() -> Self {
         Self {
             by_info: IndexMap::new(),
