@@ -6,9 +6,7 @@ mod config;
 use config::Config;
 
 mod connection;
-pub use connection::Connection;
-pub use connection::ConnectionIo;
-pub use connection::Segment;
+pub use connection::{Connection, ConnectionIo, Segment};
 
 mod dns;
 use dns::Dns;
