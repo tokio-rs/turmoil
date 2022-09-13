@@ -26,7 +26,7 @@ turmoil = "0.2"
 Next, create a test file and add a test:
 
 ```rust
-use turmoil::{Builder, Io};
+use turmoil::{io, Builder};
 
 #[derive(Debug)]
 struct Echo(String);
@@ -42,18 +42,18 @@ fn simulation() {
     let mut sim = Builder::new().build();
 
     // register a host
-    sim.register("server", |host: Io<Echo>| async move {
+    sim.host("server", async {
         loop {
-            let (msg, src) = host.recv().await;
-            host.send(src, msg);
+            let (msg, src) = io::recv::<Echo>().await;
+            io::send(src, msg);
         }
     });
 
     // register a client (this is the test code)
-    sim.client("client", |host: Io<Echo>| async move {
-        host.send("server", Echo("hello, server!".to_string()));
+    sim.client("client", async {
+        io::send("server", Echo("hello, server!".to_string()));
 
-        let (echo, _) = host.recv().await;
+        let (echo, _) = io::recv::<Echo>().await;
         assert_eq!("hello, server!", echo.0);
     });
 

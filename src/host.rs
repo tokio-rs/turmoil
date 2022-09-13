@@ -10,14 +10,14 @@ use tokio::time::{Duration, Instant};
 /// A host in the simulated network
 pub(crate) struct Host {
     /// Host address
-    addr: SocketAddr,
+    pub(crate) addr: SocketAddr,
 
     /// Messages in-flight to the host. Some of these may still be "on the
     /// network".
     inbox: IndexMap<SocketAddr, VecDeque<Envelope>>,
 
     /// Signaled when a message becomes available to receive
-    notify: Arc<Notify>,
+    pub(crate) notify: Arc<Notify>,
 
     /// Current instant at the host
     pub(crate) now: Instant,

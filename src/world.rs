@@ -58,6 +58,12 @@ impl World {
         CURRENT.set(world, f)
     }
 
+    /// Return a reference to the currently executing host
+    pub(crate) fn current_host(&self) -> &Host {
+        let addr = self.current.expect("current host missing");
+        self.hosts.get(&addr).expect("host missing")
+    }
+
     /// Return a reference to the host
     pub(crate) fn host(&self, addr: SocketAddr) -> &Host {
         self.hosts.get(&addr).expect("host missing")
@@ -92,7 +98,9 @@ impl World {
     }
 
     /// Send a message between two hosts
-    pub(crate) fn send(&mut self, host: SocketAddr, dst: SocketAddr, message: Box<dyn Message>) {
+    pub(crate) fn send(&mut self, dst: SocketAddr, message: Box<dyn Message>) {
+        let host = self.current.expect("host is not set");
+
         if let Some(delay) = self.topology.send_delay(&mut self.rng, host, dst) {
             let host = &self.hosts[&host];
             let dot = host.dot();

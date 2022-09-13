@@ -1,6 +1,6 @@
 use std::{matches, rc::Rc, time::Duration};
 use tokio::{sync::Semaphore, time::timeout};
-use turmoil::{Builder, Io};
+use turmoil::{io, Builder};
 
 #[derive(Debug)]
 enum Message {
@@ -18,19 +18,19 @@ impl turmoil::Message for Message {
 fn ping_pong() {
     let mut sim = Builder::new().build();
 
-    sim.register("server", |host| async move {
+    sim.host("server", async {
         loop {
-            let (ping, src) = host.recv().await;
+            let (ping, src) = io::recv().await;
             assert!(matches!(ping, Message::Ping));
 
-            host.send(src, Message::Pong);
+            io::send(src, Message::Pong);
         }
     });
 
-    sim.client("client", |host| async move {
-        host.send("server", Message::Ping);
+    sim.client("client", async {
+        io::send("server", Message::Ping);
 
-        let (pong, _) = host.recv().await;
+        let (pong, _) = io::recv().await;
         assert!(matches!(pong, Message::Pong));
     });
 
@@ -41,22 +41,22 @@ fn ping_pong() {
 fn network_partition() {
     let mut sim = Builder::new().build();
 
-    sim.register("server", |host| async move {
+    sim.host("server", async {
         loop {
-            let (ping, src) = host.recv().await;
+            let (ping, src) = io::recv().await;
             assert!(matches!(ping, Message::Ping));
 
-            host.send(src, Message::Pong);
+            io::send(src, Message::Pong);
         }
     });
 
-    sim.client("client", |host| async move {
+    sim.client("client", async {
         // introduce the partition
         turmoil::partition("client", "server");
 
-        host.send("server", Message::Ping);
+        io::send("server", Message::Ping);
 
-        let res = timeout(Duration::from_secs(1), host.recv()).await;
+        let res = timeout(Duration::from_secs(1), io::recv::<Message>()).await;
         assert!(matches!(res, Err(_)));
     });
 
@@ -79,7 +79,7 @@ fn multiple_clients_all_finish() {
         for client in 0..how_many {
             let ct = ct.clone();
 
-            sim.client(format!("client-{}", client), |_: Io<Message>| async move {
+            sim.client(format!("client-{}", client), async move {
                 let ms = if run == client { 0 } else { 2 * tick_ms };
                 tokio::time::sleep(Duration::from_millis(ms)).await;
 

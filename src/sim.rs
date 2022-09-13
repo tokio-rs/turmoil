@@ -1,4 +1,4 @@
-use crate::{Config, Io, Message, Role, Rt, ToSocketAddr, World};
+use crate::{Config, Role, Rt, ToSocketAddr, World};
 
 use indexmap::IndexMap;
 use std::cell::RefCell;
@@ -31,58 +31,48 @@ impl Sim {
         }
     }
 
-    /// Register a client with the simulation.
-    pub fn client<F, M, R>(&mut self, addr: impl ToSocketAddr, host: F)
+    /// Register a client with the simulation
+    pub fn client<F>(&mut self, addr: impl ToSocketAddr, host: F)
     where
-        F: FnOnce(Io<M>) -> R,
-        M: Message,
-        R: Future<Output = ()> + 'static,
+        F: Future<Output = ()> + 'static,
     {
         let rt = Rt::new();
         let epoch = rt.now();
         let addr = self.lookup(addr);
 
-        let io = {
+        {
             let world = RefCell::get_mut(&mut self.world);
             let notify = Arc::new(Notify::new());
 
             // Register host state with the world
             world.register(addr, epoch, notify.clone());
+        }
 
-            Io::new(addr, notify)
-        };
-
-        let handle = World::enter(&self.world, || {
-            rt.with(|| tokio::task::spawn_local(host(io)))
-        });
+        let handle = World::enter(&self.world, || rt.with(|| tokio::task::spawn_local(host)));
 
         self.rts.insert(addr, Role::client(rt, handle));
     }
 
     /// Register a host with the simulation
-    pub fn register<F, M, R>(&mut self, addr: impl ToSocketAddr, host: F)
+    pub fn host<F>(&mut self, addr: impl ToSocketAddr, host: F)
     where
-        F: FnOnce(Io<M>) -> R,
-        M: Message,
-        R: Future<Output = ()> + 'static,
+        F: Future<Output = ()> + 'static,
     {
         let rt = Rt::new();
         let epoch = rt.now();
         let addr = self.lookup(addr);
 
-        let io = {
+        {
             let world = RefCell::get_mut(&mut self.world);
             let notify = Arc::new(Notify::new());
 
             // Register host state with the world
             world.register(addr, epoch, notify.clone());
-
-            Io::new(addr, notify)
-        };
+        }
 
         World::enter(&self.world, || {
             rt.with(|| {
-                tokio::task::spawn_local(host(io));
+                tokio::task::spawn_local(host);
             });
         });
 

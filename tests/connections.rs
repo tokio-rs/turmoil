@@ -20,8 +20,8 @@ impl turmoil::Message for Message {
 fn unknown_host() {
     let mut sim = Builder::new().build();
 
-    sim.client("client", |io| async {
-        let io: ConnectionIo<Message> = ConnectionIo::new(io);
+    sim.client("client", async {
+        let io: ConnectionIo<Message> = ConnectionIo::new();
         let _ = io.connect("foo").await;
     });
 
@@ -32,8 +32,8 @@ fn unknown_host() {
 fn n_responses() {
     let mut sim = Builder::new().build();
 
-    sim.register("server", |io| async move {
-        let mut io: ConnectionIo<Message> = ConnectionIo::new(io);
+    sim.host("server", async {
+        let mut io: ConnectionIo<Message> = ConnectionIo::new();
 
         while let Some(mut c) = io.accept().await {
             tokio::spawn(async move {
@@ -46,8 +46,8 @@ fn n_responses() {
         }
     });
 
-    sim.client("client", |io| async move {
-        let io: ConnectionIo<Message> = ConnectionIo::new(io);
+    sim.client("client", async {
+        let io: ConnectionIo<Message> = ConnectionIo::new();
         let mut c = io.connect("server").await.unwrap();
 
         let how_many = 3;
@@ -66,8 +66,8 @@ fn n_responses() {
 fn server_concurrency() {
     let mut sim = Builder::new().build();
 
-    sim.register("server", |io| async move {
-        let mut io: ConnectionIo<Message> = ConnectionIo::new(io);
+    sim.host("server", async {
+        let mut io: ConnectionIo<Message> = ConnectionIo::new();
 
         while let Some(mut c) = io.accept().await {
             tokio::spawn(async move {
@@ -83,8 +83,8 @@ fn server_concurrency() {
     let how_many = 3;
 
     for i in 0..how_many {
-        sim.client(format!("client-{}", i), |io| async move {
-            let io: ConnectionIo<Message> = ConnectionIo::new(io);
+        sim.client(format!("client-{}", i), async move {
+            let io: ConnectionIo<Message> = ConnectionIo::new();
             let mut c = io.connect("server").await.unwrap();
 
             let _ = c.send(Message::Ping { how_many }).await;
@@ -106,8 +106,8 @@ fn client_hangup() {
     let wait = Arc::new(Notify::new());
     let notify = wait.clone();
 
-    sim.client("bob", |io| async move {
-        let mut io: ConnectionIo<Message> = ConnectionIo::new(io);
+    sim.client("bob", async move {
+        let mut io: ConnectionIo<Message> = ConnectionIo::new();
         let mut c = io.accept().await.unwrap();
 
         assert!(c.recv().await.is_err());
@@ -116,8 +116,8 @@ fn client_hangup() {
         notify.notify_one();
     });
 
-    sim.client("sally", |io| async move {
-        let io: ConnectionIo<Message> = ConnectionIo::new(io);
+    sim.client("sally", async move {
+        let io: ConnectionIo<Message> = ConnectionIo::new();
         let _ = io.connect("bob").await;
 
         wait.notified().await;
@@ -130,16 +130,16 @@ fn client_hangup() {
 fn server_hangup() {
     let mut sim = Builder::new().build();
 
-    sim.register("server", |io| async move {
-        let mut io: ConnectionIo<Message> = ConnectionIo::new(io);
+    sim.host("server", async {
+        let mut io: ConnectionIo<Message> = ConnectionIo::new();
 
         while let Some(c) = io.accept().await {
             drop(c);
         }
     });
 
-    sim.client("client", |io| async move {
-        let io: ConnectionIo<Message> = ConnectionIo::new(io);
+    sim.client("client", async {
+        let io: ConnectionIo<Message> = ConnectionIo::new();
 
         let mut c = io.connect("server").await.unwrap();
 
@@ -159,8 +159,8 @@ fn drop_io() {
     let wait = Arc::new(Notify::new());
     let notify = wait.clone();
 
-    sim.register("server", |io| async move {
-        let mut io: ConnectionIo<Message> = ConnectionIo::new(io);
+    sim.host("server", async move {
+        let mut io: ConnectionIo<Message> = ConnectionIo::new();
 
         for _ in 0..how_many {
             let mut c = io.accept().await.unwrap();
@@ -174,8 +174,8 @@ fn drop_io() {
         notify.notify_one();
     });
 
-    sim.client("client", |io| async move {
-        let io: ConnectionIo<Message> = ConnectionIo::new(io);
+    sim.client("client", async move {
+        let io: ConnectionIo<Message> = ConnectionIo::new();
 
         let mut conns = vec![];
 
