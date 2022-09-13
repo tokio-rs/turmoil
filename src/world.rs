@@ -99,7 +99,7 @@ impl World {
 
     /// Send a message between two hosts
     pub(crate) fn send(&mut self, dst: SocketAddr, message: Box<dyn Message>) {
-        let host = self.current.expect("host is not set");
+        let host = self.current_host().addr;
 
         if let Some(delay) = self.topology.send_delay(&mut self.rng, host, dst) {
             let host = &self.hosts[&host];
