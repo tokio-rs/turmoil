@@ -1,5 +1,7 @@
 mod builder;
 
+use std::net::SocketAddr;
+
 pub use builder::Builder;
 
 mod config;
@@ -18,8 +20,7 @@ use envelope::Envelope;
 mod host;
 use host::Host;
 
-mod io;
-pub use io::Io;
+pub mod io;
 
 mod log;
 use log::Log;
@@ -43,6 +44,13 @@ mod version;
 
 mod world;
 use world::World;
+
+/// Lookup a socket address by host name.
+///
+/// Must be called from within a Turmoil simulation.
+pub fn lookup(addr: impl ToSocketAddr) -> SocketAddr {
+    World::current(|world| world.lookup(addr))
+}
 
 /// Partition two hosts, resulting in all messages sent between them to be
 /// dropped.

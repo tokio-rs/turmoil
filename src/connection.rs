@@ -1,4 +1,4 @@
-use crate::*;
+use crate::{io::*, *};
 
 use std::{fmt::Display, io, net::SocketAddr};
 
@@ -102,14 +102,13 @@ enum Action<M> {
 }
 
 impl<M: Message> ConnectionIo<M> {
-    pub fn new(io: Io<Segment<M>>) -> Self {
+    pub fn new() -> Self {
         let (action_tx, action_rx) = mpsc::channel(1);
         let (accept_tx, accept_rx) = mpsc::channel(1);
 
         let inner = Inner {
             ctr: 0,
             connections: Connections::new(),
-            io,
             queue: accept_tx,
             receiver: action_rx,
         };
@@ -163,7 +162,7 @@ impl<M: Message> ConnectionIo<M> {
                         None => continue,
                     }
                 },
-                (seg, src) = inner.io.recv().fuse() => inner.route(src, seg).await,
+                (seg, src) = recv().fuse() => inner.route(src, seg).await,
             }
         }
 
@@ -178,9 +177,6 @@ struct Inner<M: Message> {
     /// Active connections
     connections: Connections<M>,
 
-    /// Underlying Io
-    io: Io<Segment<M>>,
-
     /// Accept queue
     queue: mpsc::Sender<Connection<M>>,
 
@@ -191,7 +187,7 @@ struct Inner<M: Message> {
 impl<M: Message> Inner<M> {
     fn accept(&mut self, info: ConnectionInfo) {
         self.connections.accept(info);
-        self.io.send(info.peer, Segment::SynAck(info.id));
+        send::<Segment<M>>(info.peer, Segment::SynAck(info.id));
     }
 
     fn connect(&mut self, dst: SocketAddr, notify: oneshot::Sender<Connection<M>>) {
@@ -199,14 +195,14 @@ impl<M: Message> Inner<M> {
         let id = self.ctr;
 
         self.connections.connect(id, dst, notify);
-        self.io.send(dst, Segment::Syn(id));
+        send::<Segment<M>>(dst, Segment::Syn(id));
     }
 
     fn send(&self, info: ConnectionInfo, message: M) {
         self.connections.check_connected(&info);
 
         let ConnectionInfo { id, peer } = info;
-        self.io.send(peer, Segment::Data(id, message))
+        send::<Segment<M>>(peer, Segment::Data(id, message))
     }
 
     async fn route(&mut self, from: SocketAddr, seg: Segment<M>) {
@@ -235,7 +231,7 @@ impl<M: Message> Inner<M> {
 
     fn rst(&mut self, idx: usize) {
         if let Some(info) = self.connections.deregister(idx) {
-            self.io.send(info.peer, Segment::Rst(info.id))
+            send::<Segment<M>>(info.peer, Segment::Rst(info.id))
         }
     }
 
@@ -244,7 +240,7 @@ impl<M: Message> Inner<M> {
 
         by_info.iter().for_each(|(info, s)| {
             if let ConnectionState::Queued { .. } | ConnectionState::Connected { .. } = s {
-                self.io.send(info.peer, Segment::Rst(info.id))
+                send::<Segment<M>>(info.peer, Segment::Rst(info.id))
             }
         });
     }
