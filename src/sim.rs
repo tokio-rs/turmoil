@@ -147,6 +147,12 @@ impl Sim {
     }
 
     /// Run the simulation until all clients finish.
+    ///
+    /// For each runtime, we [`Rt::tick`] it forward, which allows time to
+    /// advance just a little bit. In this way, only one runtime is ever active.
+    /// The turmoil APIs (such as [`crate::io::send`]) operate on the active
+    /// host, and so we remember which host is active before yielding to user
+    /// code.
     pub fn run(&self) {
         let mut elapsed = Duration::default();
         let tick = self.config.tick;
@@ -155,7 +161,7 @@ impl Sim {
             let mut is_finished = true;
 
             for (&addr, rt) in self.rts.iter() {
-                // Set the current host
+                // Set the current host (see method docs)
                 self.world.borrow_mut().current = Some(addr);
 
                 let now = World::enter(&self.world, || rt.tick(tick));
