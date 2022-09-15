@@ -155,6 +155,10 @@ impl Sim {
             let mut is_finished = true;
 
             for (&addr, rt) in self.rts.iter() {
+                if self.world.borrow().host(addr).gone_fishing {
+                    continue;
+                }
+
                 // Set the current host
                 self.world.borrow_mut().current = Some(addr);
 

@@ -65,6 +65,23 @@ pub fn partition(a: impl ToSocketAddr, b: impl ToSocketAddr) {
     })
 }
 
+/// Pause a host. No futures will run, and time will not move forward.
+pub fn pause(h: impl ToSocketAddr) {
+    World::current(|world| {
+        let h = world.lookup(h);
+        world.pause(h);
+    });
+}
+
+/// The opposite of [`pause`]. While time will resume on the host, it probably
+/// now won't be the same as that of other hosts.
+pub fn resume(h: impl ToSocketAddr) {
+    World::current(|world| {
+        let h = world.lookup(h);
+        world.resume(h);
+    });
+}
+
 /// Repair the connection between two hosts, resulting in messages to be
 /// delivered.
 ///

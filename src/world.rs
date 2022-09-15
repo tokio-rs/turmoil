@@ -81,6 +81,20 @@ impl World {
         self.topology.repair(a, b);
     }
 
+    pub(crate) fn pause(&mut self, addr: SocketAddr) {
+        self.hosts
+            .get_mut(&addr)
+            .expect("host missing")
+            .gone_fishing = true;
+    }
+
+    pub(crate) fn resume(&mut self, addr: SocketAddr) {
+        self.hosts
+            .get_mut(&addr)
+            .expect("host missing")
+            .gone_fishing = false;
+    }
+
     /// Register a new host with the simulation
     pub(crate) fn register(&mut self, addr: SocketAddr, epoch: Instant, notify: Arc<Notify>) {
         assert!(

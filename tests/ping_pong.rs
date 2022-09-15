@@ -1,5 +1,8 @@
 use std::{matches, rc::Rc, time::Duration};
-use tokio::{sync::Semaphore, time::timeout};
+use tokio::{
+    sync::Semaphore,
+    time::{timeout, Instant},
+};
 use turmoil::{io, Builder};
 
 #[derive(Debug)]
@@ -29,6 +32,38 @@ fn ping_pong() {
 
     sim.client("client", async {
         io::send("server", Message::Ping);
+
+        let (pong, _) = io::recv().await;
+        assert!(matches!(pong, Message::Pong));
+    });
+
+    sim.run();
+}
+
+#[test]
+fn pausing() {
+    let mut sim = Builder::new().build();
+
+    sim.host("server", async {
+        let start = Instant::now();
+
+        loop {
+            let (ping, src) = io::recv().await;
+            assert!(matches!(ping, Message::Ping));
+
+            io::send(src, Message::Pong);
+        }
+    });
+
+    sim.client("client", async {
+        let start = Instant::now();
+
+        turmoil::pause("server");
+        io::send("server", Message::Ping);
+
+        let res = timeout(Duration::from_secs(1), io::recv::<Message>()).await;
+        assert!(matches!(res, Err(_)));
+        turmoil::resume("server");
 
         let (pong, _) = io::recv().await;
         assert!(matches!(pong, Message::Pong));

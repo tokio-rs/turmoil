@@ -22,6 +22,10 @@ pub(crate) struct Host {
     /// Current instant at the host
     pub(crate) now: Instant,
 
+    /// When true, this host is playing Go Fish and doesn't do any work. This
+    /// allows simulation of arbitrary and complete pauses.
+    pub(crate) gone_fishing: bool,
+
     epoch: Instant,
 
     /// Current host version. This is incremented each time a message is received.
@@ -35,6 +39,7 @@ impl Host {
             inbox: IndexMap::new(),
             notify,
             now,
+            gone_fishing: false,
             epoch: now,
             version: 0,
         }
@@ -66,6 +71,10 @@ impl Host {
     }
 
     pub(crate) fn recv(&mut self) -> Option<Envelope> {
+        // When the simulation correctly pauses a host, it should never schedule
+        // any code that can receive messages while the host is taking a break.
+        assert!(!self.gone_fishing);
+
         let now = Instant::now();
 
         for deque in self.inbox.values_mut() {
@@ -95,6 +104,9 @@ impl Host {
     }
 
     pub(crate) fn tick(&mut self, now: Instant) {
+        // Don't you even dare ask me to tick.
+        assert!(!self.gone_fishing);
+
         self.now = now;
 
         for deque in self.inbox.values() {
