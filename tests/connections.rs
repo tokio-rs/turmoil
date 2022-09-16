@@ -32,7 +32,7 @@ fn unknown_host() {
 fn n_responses() {
     let mut sim = Builder::new().build();
 
-    sim.host("server", async {
+    sim.host("server", || async {
         let mut io: ConnectionIo<Message> = ConnectionIo::new();
 
         while let Some(mut c) = io.accept().await {
@@ -66,7 +66,7 @@ fn n_responses() {
 fn server_concurrency() {
     let mut sim = Builder::new().build();
 
-    sim.host("server", async {
+    sim.host("server", || async {
         let mut io: ConnectionIo<Message> = ConnectionIo::new();
 
         while let Some(mut c) = io.accept().await {
@@ -130,7 +130,7 @@ fn client_hangup() {
 fn server_hangup() {
     let mut sim = Builder::new().build();
 
-    sim.host("server", async {
+    sim.host("server", || async {
         let mut io: ConnectionIo<Message> = ConnectionIo::new();
 
         while let Some(c) = io.accept().await {
@@ -157,21 +157,24 @@ fn drop_io() {
     let how_many = 3;
 
     let wait = Arc::new(Notify::new());
-    let notify = wait.clone();
 
-    sim.host("server", async move {
-        let mut io: ConnectionIo<Message> = ConnectionIo::new();
+    sim.host("server", || {
+        let notify = wait.clone();
 
-        for _ in 0..how_many {
-            let mut c = io.accept().await.unwrap();
+        async move {
+            let mut io: ConnectionIo<Message> = ConnectionIo::new();
 
-            tokio::spawn(async move {
-                let _ = c.recv().await;
-            });
+            for _ in 0..how_many {
+                let mut c = io.accept().await.unwrap();
+
+                tokio::spawn(async move {
+                    let _ = c.recv().await;
+                });
+            }
+
+            drop(io);
+            notify.notify_one();
         }
-
-        drop(io);
-        notify.notify_one();
     });
 
     sim.client("client", async move {

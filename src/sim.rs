@@ -32,7 +32,7 @@ impl Sim {
     }
 
     /// Register a client with the simulation
-    pub fn client<F>(&mut self, addr: impl ToSocketAddr, host: F)
+    pub fn client<F>(&mut self, addr: impl ToSocketAddr, client: F)
     where
         F: Future<Output = ()> + 'static,
     {
@@ -48,15 +48,21 @@ impl Sim {
             world.register(addr, epoch, notify.clone());
         }
 
-        let handle = World::enter(&self.world, || rt.with(|| tokio::task::spawn_local(host)));
+        let handle = World::enter(&self.world, || rt.with(|| tokio::task::spawn_local(client)));
 
         self.rts.insert(addr, Role::client(rt, handle));
     }
 
     /// Register a host with the simulation
-    pub fn host<F>(&mut self, addr: impl ToSocketAddr, host: F)
+    ///
+    /// This method takes a `Fn` that builds a future, as opposed to
+    /// [`Sim::client`] which just takes a future. The reason for this is we
+    /// might restart the host, and so need to be able to call the future
+    /// multiple times.
+    pub fn host<F, Fut>(&mut self, addr: impl ToSocketAddr, host: F)
     where
-        F: Future<Output = ()> + 'static,
+        F: Fn() -> Fut,
+        Fut: Future<Output = ()> + 'static,
     {
         let rt = Rt::new();
         let epoch = rt.now();
@@ -72,7 +78,7 @@ impl Sim {
 
         World::enter(&self.world, || {
             rt.with(|| {
-                tokio::task::spawn_local(host);
+                tokio::task::spawn_local(host());
             });
         });
 

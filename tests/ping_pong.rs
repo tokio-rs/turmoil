@@ -18,7 +18,7 @@ impl turmoil::Message for Message {
 fn ping_pong() {
     let mut sim = Builder::new().build();
 
-    sim.host("server", async {
+    sim.host("server", || async {
         loop {
             let (ping, src) = io::recv().await;
             assert!(matches!(ping, Message::Ping));
@@ -41,7 +41,7 @@ fn ping_pong() {
 fn network_partition() {
     let mut sim = Builder::new().build();
 
-    sim.host("server", async {
+    sim.host("server", || async {
         loop {
             let (ping, src) = io::recv().await;
             assert!(matches!(ping, Message::Ping));
