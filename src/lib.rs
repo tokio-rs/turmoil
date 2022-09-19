@@ -52,6 +52,30 @@ pub fn lookup(addr: impl ToSocketAddr) -> SocketAddr {
     World::current(|world| world.lookup(addr))
 }
 
+/// Hold messages two hosts, until [`release`] is called.
+///
+/// Must be called from within a Turmoil simulation.
+pub fn hold(a: impl ToSocketAddr, b: impl ToSocketAddr) {
+    World::current(|world| {
+        let a = world.lookup(a);
+        let b = world.lookup(b);
+
+        world.hold(a, b);
+    })
+}
+
+/// The opposite of [`hold`]. All held messages are immediately delivered.
+///
+/// Must be called from within a Turmoil simulation.
+pub fn release(a: impl ToSocketAddr, b: impl ToSocketAddr) {
+    World::current(|world| {
+        let a = world.lookup(a);
+        let b = world.lookup(b);
+
+        world.release(a, b);
+    })
+}
+
 /// Partition two hosts, resulting in all messages sent between them to be
 /// dropped.
 ///

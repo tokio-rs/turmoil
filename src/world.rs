@@ -1,3 +1,4 @@
+use crate::top::Embark;
 use crate::{config, Dns, Envelope, Host, Log, Message, ToSocketAddr, Topology};
 
 use indexmap::IndexMap;
@@ -73,6 +74,18 @@ impl World {
         self.dns.lookup(host)
     }
 
+    pub(crate) fn hold(&mut self, a: SocketAddr, b: SocketAddr) {
+        self.topology.hold(a, b);
+    }
+
+    // TODO: Should all held packets be immediately released, or should they be
+    // subject to delay and potentially broken links when the hold is removed?
+    pub(crate) fn release(&mut self, a: SocketAddr, b: SocketAddr) {
+        self.topology.release(a, b);
+        let dst = &mut self.hosts[&b];
+        dst.release(a);
+    }
+
     pub(crate) fn partition(&mut self, a: SocketAddr, b: SocketAddr) {
         self.topology.partition(a, b);
     }
@@ -101,27 +114,29 @@ impl World {
     pub(crate) fn send(&mut self, dst: SocketAddr, message: Box<dyn Message>) {
         let host = self.current_host().addr;
 
-        if let Some(delay) = self.topology.send_delay(&mut self.rng, host, dst) {
-            let host = &self.hosts[&host];
-            let dot = host.dot();
+        match self.topology.embark_one(&mut self.rng, host, dst) {
+            it @ Embark::Delay(_) | it @ Embark::Hold => {
+                let host = &self.hosts[&host];
+                let dot = host.dot();
 
-            self.log.send(
-                &self.dns,
-                dot,
-                host.elapsed(),
-                dst,
-                Some(delay),
-                false,
-                &*message,
-            );
+                let delay = if let Embark::Delay(d) = it {
+                    Some(d)
+                } else {
+                    None
+                };
 
-            self.hosts[&dst].send(dot, delay, message);
-        } else {
-            let host = &self.hosts[&host];
-            let dot = host.dot();
+                self.log
+                    .send(&self.dns, dot, host.elapsed(), dst, delay, false, &*message);
 
-            self.log
-                .send(&self.dns, dot, host.elapsed(), dst, None, true, &*message);
+                self.hosts[&dst].send(dot, delay, message);
+            }
+            Embark::Drop => {
+                let host = &self.hosts[&host];
+                let dot = host.dot();
+
+                self.log
+                    .send(&self.dns, dot, host.elapsed(), dst, None, true, &*message);
+            }
         }
     }
 
