@@ -102,6 +102,7 @@ impl Sim {
     }
 
     /// Bounce a host. The software is restarted.
+    // TODO: Should the host's version be bumped or reset?
     pub fn bounce(&mut self, addr: impl ToSocketAddr) {
         let h = self.world.borrow_mut().lookup(addr);
         let rt = self.rts.get_mut(&h).expect("missing host");
