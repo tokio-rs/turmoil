@@ -34,6 +34,15 @@ enum State {
 
     /// The link was randomly partitioned.
     RandPartition,
+
+    /// Messages are being held indefinitely.
+    Hold,
+}
+
+pub(crate) enum Embark {
+    Delay(Duration),
+    Hold,
+    Drop,
 }
 
 impl Topology {
@@ -79,13 +88,21 @@ impl Topology {
             .fail_rate = value;
     }
 
-    pub(crate) fn send_delay(
+    pub(crate) fn embark_one(
         &mut self,
         rand: &mut dyn RngCore,
         src: SocketAddr,
         dst: SocketAddr,
-    ) -> Option<Duration> {
-        self.links[&Pair::new(src, dst)].send_delay(&self.config, rand)
+    ) -> Embark {
+        self.links[&Pair::new(src, dst)].embark_one(&self.config, rand)
+    }
+
+    pub(crate) fn hold(&mut self, a: SocketAddr, b: SocketAddr) {
+        self.links[&Pair::new(a, b)].hold();
+    }
+
+    pub(crate) fn release(&mut self, a: SocketAddr, b: SocketAddr) {
+        self.links[&Pair::new(a, b)].release();
     }
 
     pub(crate) fn partition(&mut self, a: SocketAddr, b: SocketAddr) {
@@ -105,32 +122,39 @@ impl Link {
         }
     }
 
-    fn send_delay(
-        &mut self,
-        global_config: &config::Link,
-        rand: &mut dyn RngCore,
-    ) -> Option<Duration> {
+    // Computes an outcome for what should happen next on this link. The `World`
+    // is responsible for following the embarkation instruction.
+    fn embark_one(&mut self, global_config: &config::Link, rand: &mut dyn RngCore) -> Embark {
         match self.state {
             State::Healthy => {
                 // Should the link be broken?
                 if self.rand_partition(global_config.message_loss(), rand) {
                     self.state = State::RandPartition;
-                    return None;
+                    return Embark::Drop;
                 }
 
-                Some(self.delay(global_config.latency(), rand))
+                Embark::Delay(self.delay(global_config.latency(), rand))
             }
-            State::ExplicitPartition => None,
+            State::ExplicitPartition => Embark::Drop,
             State::RandPartition => {
                 // Should the link be repaired?
                 if self.rand_repair(global_config.message_loss(), rand) {
                     self.state = State::Healthy;
-                    return Some(self.delay(&global_config.latency(), rand));
+                    return Embark::Delay(self.delay(&global_config.latency(), rand));
                 }
 
-                None
+                Embark::Drop
             }
+            State::Hold => Embark::Hold,
         }
+    }
+
+    fn hold(&mut self) {
+        self.state = State::Hold;
+    }
+
+    fn release(&mut self) {
+        self.state = State::Healthy;
     }
 
     fn explicit_partition(&mut self) {

@@ -53,8 +53,13 @@ impl Host {
         }
     }
 
-    pub(crate) fn send(&mut self, src: version::Dot, delay: Duration, message: Box<dyn Message>) {
-        let deliver_at = self.now + delay;
+    pub(crate) fn send(
+        &mut self,
+        src: version::Dot,
+        delay: Option<Duration>,
+        message: Box<dyn Message>,
+    ) {
+        let deliver_at = delay.map(|it| self.now + it);
 
         self.inbox.entry(src.host).or_default().push_back(Envelope {
             src,
@@ -70,7 +75,10 @@ impl Host {
 
         for deque in self.inbox.values_mut() {
             match deque.front() {
-                Some(Envelope { deliver_at, .. }) if *deliver_at <= now => {
+                Some(Envelope {
+                    deliver_at: Some(time),
+                    ..
+                }) if *time <= now => {
                     self.version += 1;
                     return deque.pop_front();
                 }
@@ -86,7 +94,10 @@ impl Host {
         let deque = self.inbox.entry(peer).or_default();
 
         match deque.front() {
-            Some(Envelope { deliver_at, .. }) if *deliver_at <= now => {
+            Some(Envelope {
+                deliver_at: Some(time),
+                ..
+            }) if *time <= now => {
                 self.version += 1;
                 deque.pop_front()
             }
@@ -94,12 +105,34 @@ impl Host {
         }
     }
 
+    /// Releases all messages previously received from [`peer`]. These messages
+    /// may be received immediately (on the next call to `[Host::recv]`).
+    pub(crate) fn release(&mut self, peer: SocketAddr) {
+        let now = Instant::now();
+        let deque = self.inbox.entry(peer).or_default();
+
+        for envelope in deque {
+            if let Envelope {
+                deliver_at: None, ..
+            } = envelope
+            {
+                envelope.deliver_at = Some(now);
+            }
+        }
+
+        self.notify.notify_one();
+    }
+
     pub(crate) fn tick(&mut self, now: Instant) {
         self.now = now;
 
         for deque in self.inbox.values() {
-            if let Some(Envelope { deliver_at, .. }) = deque.front() {
-                if *deliver_at <= now {
+            if let Some(Envelope {
+                deliver_at: Some(time),
+                ..
+            }) = deque.front()
+            {
+                if *time <= now {
                     self.notify.notify_one();
                     return;
                 }

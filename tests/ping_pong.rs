@@ -43,6 +43,38 @@ fn ping_pong() {
 }
 
 #[test]
+fn hold_and_release() {
+    let mut sim = Builder::new().build();
+
+    sim.host("server", || async {
+        loop {
+            let (ping, src) = io::recv().await;
+            assert!(matches!(ping, Message::Ping));
+
+            io::send(src, Message::Pong);
+        }
+    });
+
+    sim.client("client", async {
+        // pause delivery of packets between the client and server
+        turmoil::hold("client", "server");
+
+        io::send("server", Message::Ping);
+
+        let res = timeout(Duration::from_secs(1), io::recv::<Message>()).await;
+        assert!(matches!(res, Err(_)));
+
+        // resume the network. note that the client ping does not have to be
+        // resent.
+        turmoil::release("client", "server");
+        let (pong, _) = io::recv().await;
+        assert!(matches!(pong, Message::Pong));
+    });
+
+    sim.run();
+}
+
+#[test]
 fn network_partition() {
     let mut sim = Builder::new().build();
 
