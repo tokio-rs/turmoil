@@ -59,9 +59,12 @@ impl Sim {
     /// [`Sim::client`] which just takes a future. The reason for this is we
     /// might restart the host, and so need to be able to call the future
     /// multiple times.
+    ///
+    // TODO: Removing the `'static` bound on `F` would make writing some tests
+    // easier.
     pub fn host<F, Fut>(&mut self, addr: impl ToSocketAddr, host: F)
     where
-        F: Fn() -> Fut,
+        F: Fn() -> Fut + 'static,
         Fut: Future<Output = ()> + 'static,
     {
         let rt = Rt::new();
@@ -82,7 +85,37 @@ impl Sim {
             });
         });
 
-        self.rts.insert(addr, Role::simulated(rt));
+        self.rts.insert(addr, Role::simulated(rt, host));
+    }
+
+    /// Crash a host. Nothing will be running on the host after this method. You
+    /// can use [`Sim::bounce`] to start the host up again.
+    pub fn crash(&mut self, addr: impl ToSocketAddr) {
+        let h = self.world.borrow_mut().lookup(addr);
+        let rt = self.rts.get_mut(&h).expect("missing host");
+        match rt {
+            Role::Client { .. } => panic!("can only bounce hosts, not clients"),
+            Role::Simulated { rt, .. } => {
+                rt.cancel_tasks();
+            }
+        }
+    }
+
+    /// Bounce a host. The software is restarted.
+    pub fn bounce(&mut self, addr: impl ToSocketAddr) {
+        let h = self.world.borrow_mut().lookup(addr);
+        let rt = self.rts.get_mut(&h).expect("missing host");
+        match rt {
+            Role::Client { .. } => panic!("can only bounce hosts, not clients"),
+            Role::Simulated { rt, software } => {
+                rt.cancel_tasks();
+                World::enter(&self.world, || {
+                    rt.with(|| {
+                        tokio::task::spawn_local(software());
+                    });
+                });
+            }
+        }
     }
 
     /// Lookup a socket address by host name

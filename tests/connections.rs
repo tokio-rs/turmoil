@@ -157,10 +157,10 @@ fn drop_io() {
     let how_many = 3;
 
     let wait = Arc::new(Notify::new());
+    let notify = wait.clone();
 
-    sim.host("server", || {
-        let notify = wait.clone();
-
+    sim.host("server", move || {
+        let notify = notify.clone();
         async move {
             let mut io: ConnectionIo<Message> = ConnectionIo::new();
 
