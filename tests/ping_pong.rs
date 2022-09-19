@@ -1,4 +1,9 @@
-use std::{matches, rc::Rc, time::Duration};
+use std::{
+    matches,
+    rc::Rc,
+    sync::{atomic::AtomicUsize, atomic::Ordering, Arc},
+    time::Duration,
+};
 use tokio::{sync::Semaphore, time::timeout};
 use turmoil::{io, Builder};
 
@@ -61,6 +66,46 @@ fn network_partition() {
     });
 
     sim.run();
+}
+
+#[test]
+fn bounce() {
+    let mut sim = Builder::new().build();
+
+    // The server publishes the number of requests it thinks it processed into
+    // this usize. Importantly, it resets when the server is rebooted.
+    let reqs = Arc::new(AtomicUsize::new(0));
+    let publish = reqs.clone();
+
+    sim.host("server", move || {
+        let publish = publish.clone();
+        let mut reqs = 0;
+        async move {
+            loop {
+                let (ping, src) = io::recv().await;
+                assert!(matches!(ping, Message::Ping));
+                reqs += 1;
+                publish.store(reqs, Ordering::SeqCst);
+
+                io::send(src, Message::Pong);
+            }
+        }
+    });
+
+    for i in 0..3 {
+        sim.client(format!("client-{}", i), async {
+            io::send("server", Message::Ping);
+
+            let (pong, _) = io::recv().await;
+            assert!(matches!(pong, Message::Pong));
+        });
+
+        sim.run();
+
+        // The server always thinks it has only server 1 request.
+        assert_eq!(1, reqs.clone().load(Ordering::SeqCst));
+        sim.bounce("server");
+    }
 }
 
 #[test]

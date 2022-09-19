@@ -1,3 +1,5 @@
+use std::mem;
+
 use tokio::runtime::Runtime;
 use tokio::task::LocalSet;
 use tokio::time::{sleep, Duration, Instant};
@@ -26,10 +28,10 @@ impl Rt {
             tokio::time::sleep(Duration::from_millis(1)).await;
         });
 
-        let mut local = LocalSet::new();
-        local.unhandled_panic(tokio::runtime::UnhandledPanic::ShutdownRuntime);
-
-        Rt { tokio, local }
+        Rt {
+            tokio,
+            local: new_local(),
+        }
     }
 
     pub(crate) fn with<R>(&self, f: impl FnOnce() -> R) -> R {
@@ -53,4 +55,14 @@ impl Rt {
                 .await
         })
     }
+
+    pub(crate) fn cancel_tasks(&mut self) {
+        _ = mem::replace(&mut self.local, new_local());
+    }
+}
+
+fn new_local() -> LocalSet {
+    let mut local = LocalSet::new();
+    local.unhandled_panic(tokio::runtime::UnhandledPanic::ShutdownRuntime);
+    local
 }
