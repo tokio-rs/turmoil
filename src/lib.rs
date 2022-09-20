@@ -7,9 +7,6 @@ pub use builder::Builder;
 mod config;
 use config::Config;
 
-mod connection;
-pub use connection::{Connection, ConnectionIo, Segment};
-
 mod dns;
 use dns::Dns;
 pub use dns::ToSocketAddr;
