@@ -1,3 +1,4 @@
+use crate::envelope::DeliveryInstructions;
 use crate::{version, Envelope, Message};
 
 use indexmap::IndexMap;
@@ -59,11 +60,14 @@ impl Host {
         delay: Option<Duration>,
         message: Box<dyn Message>,
     ) {
-        let deliver_at = delay.map(|it| self.now + it);
+        let instructions = match delay {
+            Some(d) => DeliveryInstructions::DeliverAt(self.now + d),
+            None => DeliveryInstructions::ExplicitlyHeld,
+        };
 
         self.inbox.entry(src.host).or_default().push_back(Envelope {
             src,
-            deliver_at,
+            instructions,
             message,
         });
 
@@ -76,7 +80,7 @@ impl Host {
         for deque in self.inbox.values_mut() {
             match deque.front() {
                 Some(Envelope {
-                    deliver_at: Some(time),
+                    instructions: DeliveryInstructions::DeliverAt(time),
                     ..
                 }) if *time <= now => {
                     self.version += 1;
@@ -95,7 +99,7 @@ impl Host {
 
         match deque.front() {
             Some(Envelope {
-                deliver_at: Some(time),
+                instructions: DeliveryInstructions::DeliverAt(time),
                 ..
             }) if *time <= now => {
                 self.version += 1;
@@ -113,10 +117,11 @@ impl Host {
 
         for envelope in deque {
             if let Envelope {
-                deliver_at: None, ..
+                instructions: DeliveryInstructions::ExplicitlyHeld,
+                ..
             } = envelope
             {
-                envelope.deliver_at = Some(now);
+                envelope.instructions = DeliveryInstructions::DeliverAt(now);
             }
         }
 
@@ -128,7 +133,7 @@ impl Host {
 
         for deque in self.inbox.values() {
             if let Some(Envelope {
-                deliver_at: Some(time),
+                instructions: DeliveryInstructions::DeliverAt(time),
                 ..
             }) = deque.front()
             {
