@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 /// vector" [1].
 ///
 /// [1]: https://riak.com/posts/technical/vector-clocks-revisited-part-2-dotted-version-vectors/index.html
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, Hash, Eq, PartialEq)]
 pub(crate) struct Dot {
     pub(crate) host: SocketAddr,
     pub(crate) version: u64,

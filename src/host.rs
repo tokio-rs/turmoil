@@ -1,14 +1,23 @@
 use crate::envelope::DeliveryInstructions;
+use crate::net::{Segment, SocketPair, StreamEnvelope, Syn};
 use crate::{version, Envelope, Message};
 
 use indexmap::IndexMap;
 use std::collections::VecDeque;
+use std::io;
 use std::net::SocketAddr;
 use std::rc::Rc;
+use std::sync::Arc;
 use tokio::sync::Notify;
 use tokio::time::{Duration, Instant};
 
-/// A host in the simulated network
+/// A host in the simulated network.
+///
+/// Hosts support two networking modes:
+/// - Datagram via [`crate::io::send`] and [`crate::io::recv`]
+/// - Stream via [`crate::net::Listener`] and [`crate::net::Stream`]
+///
+/// Both modes may be used by host software simulatanesouly.
 pub(crate) struct Host {
     /// Host address
     pub(crate) addr: SocketAddr,
@@ -17,16 +26,34 @@ pub(crate) struct Host {
     /// network".
     inbox: IndexMap<SocketAddr, VecDeque<Envelope>>,
 
-    /// Signaled when a message becomes available to receive
+    /// Signaled when a message becomes available to receive.
     pub(crate) notify: Rc<Notify>,
 
-    /// Current instant at the host
+    /// Optional accept queue; set if the host is bound. This simulates a server
+    /// socket.
+    listener: Option<Inbox<Envelope>>,
+
+    /// In-flight messages for active connections. Some of these may still be
+    /// "on the network".
+    connections: IndexMap<SocketPair, Inbox<StreamEnvelope>>,
+
+    /// Current instant at the host.
     pub(crate) now: Instant,
 
     epoch: Instant,
 
-    /// Current host version. This is incremented each time a message is received.
+    /// Current host version. This is incremented each time a network operation
+    /// occurs.
     pub(crate) version: u64,
+}
+
+/// A simple unbounded channel.
+struct Inbox<T> {
+    /// Pending connections
+    deque: VecDeque<T>,
+
+    /// Signaled when an item is available
+    notify: Arc<Notify>,
 }
 
 impl Host {
@@ -35,15 +62,53 @@ impl Host {
             addr,
             inbox: IndexMap::new(),
             notify,
+            listener: None,
+            connections: IndexMap::new(),
             now,
             epoch: now,
             version: 0,
         }
     }
 
+    /// Creates a new listener queue, which is bound to the host's `addr`.
+    ///
+    /// This is called by `Listener::bind()` and the returned `Notify` is used
+    /// to signal when connections are available to accept.
+    // TODO: Support binding to multiple ports
+    pub(crate) fn bind(&mut self) -> io::Result<Arc<Notify>> {
+        if self.listener.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::AddrInUse,
+                self.addr.to_string(),
+            ));
+        }
+
+        let notify = Arc::new(Notify::new());
+
+        self.listener.replace(Inbox {
+            deque: VecDeque::new(),
+            notify: notify.clone(),
+        });
+
+        Ok(notify)
+    }
+
+    /// Unbind the host, dropping all pending connections.
+    pub(crate) fn unbind(&mut self) {
+        self.listener.take();
+    }
+
     /// Returns how long the host has been executing for in virtual time
     pub(crate) fn elapsed(&self) -> Duration {
         self.now - self.epoch
+    }
+
+    /// Bump the version for this host and return a dot.
+    ///
+    /// Called when a host establishes a new connection with a remote peer.
+    pub(crate) fn bump(&mut self) -> version::Dot {
+        self.version += 1;
+        self.dot()
     }
 
     /// Returns a dot for the host at its current version
@@ -52,6 +117,67 @@ impl Host {
             host: self.addr,
             version: self.version,
         }
+    }
+
+    pub(crate) fn accept(&mut self) -> Option<Envelope> {
+        let now = Instant::now();
+        let deque = &mut self.listener.as_mut()?.deque;
+
+        match deque.front() {
+            Some(Envelope {
+                instructions: DeliveryInstructions::DeliverAt(time),
+                ..
+            }) if *time <= now => {
+                self.version += 1;
+                deque.pop_front()
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn syn(&mut self, src: version::Dot, delay: Option<Duration>, syn: Syn) {
+        if let Some(listener) = self.listener.as_mut() {
+            let instructions = match delay {
+                Some(d) => DeliveryInstructions::DeliverAt(self.now + d),
+                None => DeliveryInstructions::ExplicitlyHeld,
+            };
+
+            listener.deque.push_back(Envelope {
+                src,
+                instructions,
+                message: Box::new(syn),
+            });
+
+            listener.notify.notify_one();
+        }
+
+        // notify drops, connection is refused
+    }
+
+    /// Finalize the connection, returning a `Notify` to build the stream.
+    ///
+    /// This is idempotent. If the connection has already been initialized, the
+    /// `Notify` is simply cloned and returned.
+    pub(crate) fn finish_connect(&mut self, pair: SocketPair) -> Arc<Notify> {
+        let inbox = self.connections.entry(pair).or_insert_with(|| Inbox {
+            deque: VecDeque::new(),
+            notify: Arc::new(Notify::new()),
+        });
+
+        inbox.notify.clone()
+    }
+
+    pub(crate) fn register_connection(&mut self, pair: SocketPair) {
+        assert!(self
+            .connections
+            .insert(
+                pair,
+                Inbox {
+                    deque: VecDeque::new(),
+                    notify: Arc::new(Notify::new()),
+                }
+            )
+            .is_none());
     }
 
     pub(crate) fn embark(
@@ -73,6 +199,28 @@ impl Host {
         self.version += 1;
 
         self.notify.notify_one();
+    }
+
+    pub(crate) fn embark_on(
+        &mut self,
+        pair: SocketPair,
+        delay: Option<Duration>,
+        segment: Segment,
+    ) {
+        let inbox = self.connections.get_mut(&pair).expect("no connection");
+
+        let instructions = match delay {
+            Some(d) => DeliveryInstructions::DeliverAt(self.now + d),
+            None => DeliveryInstructions::ExplicitlyHeld,
+        };
+
+        inbox.deque.push_back(StreamEnvelope {
+            instructions,
+            segment,
+        });
+        self.version += 1;
+
+        inbox.notify.notify_one();
     }
 
     pub(crate) fn recv(&mut self) -> (Option<Envelope>, Rc<Notify>) {
@@ -97,9 +245,9 @@ impl Host {
 
     pub(crate) fn recv_from(&mut self, peer: SocketAddr) -> (Option<Envelope>, Rc<Notify>) {
         let now = Instant::now();
-        let notify = self.notify.clone();
 
         let deque = self.inbox.entry(peer).or_default();
+        let notify = self.notify.clone();
 
         match deque.front() {
             Some(Envelope {
@@ -113,13 +261,63 @@ impl Host {
         }
     }
 
+    pub(crate) fn recv_on(&mut self, pair: SocketPair) -> Option<Segment> {
+        let now = Instant::now();
+
+        let deque = self
+            .connections
+            .get_mut(&pair)
+            .map(|i| &mut i.deque)
+            .expect("no connection");
+
+        match deque.front() {
+            Some(StreamEnvelope {
+                instructions: DeliveryInstructions::DeliverAt(time),
+                ..
+            }) if *time <= now => {
+                self.version += 1;
+                deque.pop_front().map(|e| e.segment)
+            }
+            _ => None,
+        }
+    }
+
     /// Releases all messages previously received from [`peer`]. These messages
     /// may be received immediately (on the next call to `[Host::recv]`).
     pub(crate) fn release(&mut self, peer: SocketAddr) {
         let now = Instant::now();
-        let deque = self.inbox.entry(peer).or_default();
 
-        for envelope in deque {
+        if let Some(listener) = self.listener.as_mut() {
+            for syn in listener.deque.iter_mut() {
+                if let Envelope {
+                    instructions: DeliveryInstructions::ExplicitlyHeld,
+                    ..
+                } = syn
+                {
+                    syn.instructions = DeliveryInstructions::DeliverAt(now);
+                }
+            }
+
+            listener.notify.notify_one();
+        }
+
+        for (pair, inbox) in self.connections.iter_mut() {
+            if pair.peer.host == peer {
+                for envelope in &mut inbox.deque {
+                    if let StreamEnvelope {
+                        instructions: DeliveryInstructions::ExplicitlyHeld,
+                        ..
+                    } = envelope
+                    {
+                        envelope.instructions = DeliveryInstructions::DeliverAt(now);
+                    }
+                }
+
+                inbox.notify.notify_one();
+            }
+        }
+
+        for envelope in self.inbox.entry(peer).or_default() {
             if let Envelope {
                 instructions: DeliveryInstructions::ExplicitlyHeld,
                 ..
@@ -134,6 +332,30 @@ impl Host {
 
     pub(crate) fn tick(&mut self, now: Instant) {
         self.now = now;
+
+        if let Some(listener) = self.listener.as_ref() {
+            if let Some(Envelope {
+                instructions: DeliveryInstructions::DeliverAt(time),
+                ..
+            }) = listener.deque.front()
+            {
+                if *time <= now {
+                    listener.notify.notify_one();
+                }
+            }
+        }
+
+        for inbox in self.connections.values() {
+            if let Some(StreamEnvelope {
+                instructions: DeliveryInstructions::DeliverAt(time),
+                ..
+            }) = inbox.deque.front()
+            {
+                if *time <= now {
+                    inbox.notify.notify_one();
+                }
+            }
+        }
 
         for deque in self.inbox.values() {
             if let Some(Envelope {

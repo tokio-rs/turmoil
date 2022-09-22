@@ -26,6 +26,26 @@ struct Event<'a> {
 #[derive(serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 enum Kind<'a> {
+    /// Start listening for new connections
+    Bind,
+    /// Initiate a new connection
+    Syn {
+        /// where the message is being sent
+        dst: &'a str,
+
+        /// How long the message will be delayed before the peer receives it.
+        delay: Option<Duration>,
+
+        /// If true, the message is dropped.
+        dropped: bool,
+    },
+    /// Accept a new connection
+    SynAck {
+        /// Host & version at which the message originated
+        src: Dot<'a>,
+    },
+    /// Stop listening
+    Unbind,
     /// The host received a message
     Recv {
         /// Host & version at which the message originated
@@ -99,6 +119,68 @@ impl Log {
         }
     }
 
+    pub(crate) fn bind(&mut self, dns: &Dns, host: version::Dot, elapsed: Duration) {
+        if let Some(writer) = &mut self.writer {
+            serde_json::to_writer_pretty(
+                &mut *writer,
+                &Event {
+                    host: Dot::from(host, dns),
+                    elapsed,
+                    kind: Kind::Bind,
+                },
+            )
+            .unwrap();
+        }
+    }
+
+    pub(crate) fn syn(
+        &mut self,
+        dns: &Dns,
+        host: version::Dot,
+        elapsed: Duration,
+        dst: SocketAddr,
+        delay: Option<Duration>,
+        dropped: bool,
+    ) {
+        if let Some(writer) = &mut self.writer {
+            serde_json::to_writer_pretty(
+                &mut *writer,
+                &Event {
+                    host: Dot::from(host, dns),
+                    elapsed,
+                    kind: Kind::Syn {
+                        dst: dns.reverse(dst),
+                        delay,
+                        dropped,
+                    },
+                },
+            )
+            .unwrap();
+        }
+    }
+
+    pub(crate) fn syn_ack(
+        &mut self,
+        dns: &Dns,
+        host: version::Dot,
+        elapsed: Duration,
+        src: version::Dot,
+    ) {
+        if let Some(writer) = &mut self.writer {
+            serde_json::to_writer_pretty(
+                &mut *writer,
+                &Event {
+                    host: Dot::from(host, dns),
+                    elapsed,
+                    kind: Kind::SynAck {
+                        src: Dot::from(src, dns),
+                    },
+                },
+            )
+            .unwrap();
+        }
+    }
+
     pub(crate) fn recv(
         &mut self,
         dns: &Dns,
@@ -152,6 +234,20 @@ impl Log {
             write!(writer, "\n").unwrap();
             message.write_json(writer);
             write!(writer, "\n").unwrap();
+        }
+    }
+
+    pub(crate) fn unbind(&mut self, dns: &Dns, host: version::Dot, elapsed: Duration) {
+        if let Some(writer) = &mut self.writer {
+            serde_json::to_writer_pretty(
+                &mut *writer,
+                &Event {
+                    host: Dot::from(host, dns),
+                    elapsed,
+                    kind: Kind::Unbind,
+                },
+            )
+            .unwrap();
         }
     }
 }
