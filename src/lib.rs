@@ -1,3 +1,6 @@
+#[cfg(doctest)]
+mod readme;
+
 mod builder;
 
 use std::net::SocketAddr;
