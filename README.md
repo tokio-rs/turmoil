@@ -37,30 +37,29 @@ impl turmoil::Message for Echo {
     }
 }
 
-#[test]
-fn simulation() {
-    let mut sim = Builder::new().build();
+let mut sim = Builder::new().build();
 
-    // register a host
-    sim.host("server", async {
-        loop {
-            let (msg, src) = io::recv::<Echo>().await;
-            io::send(src, msg);
-        }
-    });
+// register a host
+sim.host("server", || async {
+    loop {
+        let (msg, src) = io::recv::<Echo>().await;
+        io::send(src, msg);
+    }
+});
 
-    // register a client (this is the test code)
-    sim.client("client", async {
-        io::send("server", Echo("hello, server!".to_string()));
+// register a client (this is the test code)
+sim.client("client", async {
+    io::send("server", Echo("hello, server!".to_string()));
 
-        let (echo, _) = io::recv::<Echo>().await;
-        assert_eq!("hello, server!", echo.0);
-    });
+    let (echo, _) = io::recv::<Echo>().await;
+    assert_eq!("hello, server!", echo.0);
+});
 
-    // run the simulation
-    sim.run();
-}
+// run the simulation
+sim.run();
 ```
+
+For more examples, check out the [tests](tests) directory.
 
 ## License
 
