@@ -17,8 +17,8 @@ pub struct Builder {
 }
 
 impl Builder {
-    pub fn new() -> Builder {
-        Builder {
+    pub fn new() -> Self {
+        Self {
             rng: None,
             config: Config::default(),
             link: config::Link {
@@ -81,11 +81,11 @@ impl Builder {
         self
     }
 
-    pub fn build(&self) -> Sim {
+    pub fn build<'a>(&self) -> Sim<'a> {
         self.build_with_rng(Box::new(rand::rngs::SmallRng::from_entropy()))
     }
 
-    pub fn build_with_rng(&self, rng: Box<dyn RngCore>) -> Sim {
+    pub fn build_with_rng<'a>(&self, rng: Box<dyn RngCore>) -> Sim<'a> {
         let log = self
             .log
             .as_ref()
