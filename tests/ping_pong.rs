@@ -1,7 +1,7 @@
 use std::{
     matches,
     rc::Rc,
-    sync::{atomic::AtomicUsize, atomic::Ordering, Arc},
+    sync::{atomic::AtomicUsize, atomic::Ordering},
     time::Duration,
 };
 use tokio::{sync::Semaphore, time::timeout};
@@ -102,15 +102,14 @@ fn network_partition() {
 
 #[test]
 fn bounce() {
-    let mut sim = Builder::new().build();
-
     // The server publishes the number of requests it thinks it processed into
     // this usize. Importantly, it resets when the server is rebooted.
-    let reqs = Arc::new(AtomicUsize::new(0));
-    let publish = reqs.clone();
+    let reqs = Rc::new(AtomicUsize::new(0));
 
-    sim.host("server", move || {
-        let publish = publish.clone();
+    let mut sim = Builder::new().build();
+
+    sim.host("server", || {
+        let publish = reqs.clone();
         let mut reqs = 0;
         async move {
             loop {
@@ -135,7 +134,7 @@ fn bounce() {
         sim.run();
 
         // The server always thinks it has only server 1 request.
-        assert_eq!(1, reqs.clone().load(Ordering::SeqCst));
+        assert_eq!(1, reqs.load(Ordering::SeqCst));
         sim.bounce("server");
     }
 }

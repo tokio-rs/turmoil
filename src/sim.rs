@@ -9,7 +9,7 @@ use tokio::sync::Notify;
 use tokio::time::Duration;
 
 /// Network simulation
-pub struct Sim {
+pub struct Sim<'a> {
     /// Simulation configuration
     config: Config,
 
@@ -19,12 +19,12 @@ pub struct Sim {
     world: RefCell<World>,
 
     /// Per simulated host runtimes
-    rts: IndexMap<SocketAddr, Role>,
+    rts: IndexMap<SocketAddr, Role<'a>>,
 }
 
-impl Sim {
-    pub(crate) fn new(config: Config, world: World) -> Sim {
-        Sim {
+impl<'a> Sim<'a> {
+    pub(crate) fn new(config: Config, world: World) -> Self {
+        Self {
             config,
             world: RefCell::new(world),
             rts: IndexMap::new(),
@@ -59,12 +59,9 @@ impl Sim {
     /// [`Sim::client`] which just takes a future. The reason for this is we
     /// might restart the host, and so need to be able to call the future
     /// multiple times.
-    ///
-    // TODO: Removing the `'static` bound on `F` would make writing some tests
-    // easier.
     pub fn host<F, Fut>(&mut self, addr: impl ToSocketAddr, host: F)
     where
-        F: Fn() -> Fut + 'static,
+        F: Fn() -> Fut + 'a,
         Fut: Future<Output = ()> + 'static,
     {
         let rt = Rt::new();
