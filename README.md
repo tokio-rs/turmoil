@@ -9,10 +9,16 @@ provides deterministic execution by running multiple concurrent hosts within
 a single thread. It introduces "hardship" into the system via changes in the
 simulated network. The network can be controlled manually or with a seeded rng.
 
-[![Crates.io](https://img.shields.io/crates/v/turmoil.svg)](https://crates.io/crates/turmoil)
-[![Documentation](https://docs.rs/turmoil/badge.svg)][docs]
+[![Crates.io][crates-badge]][crates-url]
+[![Documentation][docs-badge]][docs-url]
+[![Build Status][actions-badge]][actions-url]
 
-[docs]: https://docs.rs/turmoil
+[crates-badge]: https://img.shields.io/crates/v/turmoil.svg
+[crates-url]: https://crates.io/crates/turmoil
+[docs-badge]: https://docs.rs/turmoil/badge.svg
+[docs-url]: https://docs.rs/turmoil
+[actions-badge]: https://github.com/tokio-rs/turmoil/actions/workflows/rust.yml/badge.svg?branch=main
+[actions-url]: https://github.com/tokio-rs/turmoil/actions?query=workflow%3ACI+branch%3Amain
 
 ## Quickstart
 
