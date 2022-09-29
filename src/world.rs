@@ -47,7 +47,7 @@ impl World {
         }
     }
 
-    /// Get a mutable ref to the **current** world.
+    /// Get a mutable reference to the **current** world.
     pub(crate) fn current<R>(f: impl FnOnce(&mut World) -> R) -> R {
         CURRENT.with(|current| {
             let mut current = current.borrow_mut();
@@ -59,13 +59,13 @@ impl World {
         CURRENT.set(world, f)
     }
 
-    /// Return a ref to the currently executing host.
+    /// Return a reference to the currently executing host.
     pub(crate) fn current_host(&self) -> &Host {
         let addr = self.current.expect("current host missing");
         self.hosts.get(&addr).expect("host missing")
     }
 
-    /// Return a reference to a host at `addr`.
+    /// Return a reference to the host at `addr`.
     pub(crate) fn host(&self, addr: SocketAddr) -> &Host {
         self.hosts.get(&addr).expect("host missing")
     }
