@@ -4,7 +4,7 @@ use crate::{version, Envelope, Message};
 use indexmap::IndexMap;
 use std::collections::VecDeque;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::rc::Rc;
 use tokio::sync::Notify;
 use tokio::time::{Duration, Instant};
 
@@ -18,7 +18,7 @@ pub(crate) struct Host {
     inbox: IndexMap<SocketAddr, VecDeque<Envelope>>,
 
     /// Signaled when a message becomes available to receive
-    pub(crate) notify: Arc<Notify>,
+    pub(crate) notify: Rc<Notify>,
 
     /// Current instant at the host
     pub(crate) now: Instant,
@@ -30,7 +30,7 @@ pub(crate) struct Host {
 }
 
 impl Host {
-    pub(crate) fn new(addr: SocketAddr, now: Instant, notify: Arc<Notify>) -> Host {
+    pub(crate) fn new(addr: SocketAddr, now: Instant, notify: Rc<Notify>) -> Host {
         Host {
             addr,
             inbox: IndexMap::new(),
@@ -54,7 +54,7 @@ impl Host {
         }
     }
 
-    pub(crate) fn send(
+    pub(crate) fn embark(
         &mut self,
         src: version::Dot,
         delay: Option<Duration>,
@@ -70,12 +70,14 @@ impl Host {
             instructions,
             message,
         });
+        self.version += 1;
 
         self.notify.notify_one();
     }
 
-    pub(crate) fn recv(&mut self) -> Option<Envelope> {
+    pub(crate) fn recv(&mut self) -> (Option<Envelope>, Rc<Notify>) {
         let now = Instant::now();
+        let notify = self.notify.clone();
 
         for deque in self.inbox.values_mut() {
             match deque.front() {
@@ -84,17 +86,19 @@ impl Host {
                     ..
                 }) if *time <= now => {
                     self.version += 1;
-                    return deque.pop_front();
+                    return (deque.pop_front(), notify);
                 }
                 _ => continue,
             }
         }
 
-        None
+        (None, notify)
     }
 
-    pub(crate) fn recv_from(&mut self, peer: SocketAddr) -> Option<Envelope> {
+    pub(crate) fn recv_from(&mut self, peer: SocketAddr) -> (Option<Envelope>, Rc<Notify>) {
         let now = Instant::now();
+        let notify = self.notify.clone();
+
         let deque = self.inbox.entry(peer).or_default();
 
         match deque.front() {
@@ -103,9 +107,9 @@ impl Host {
                 ..
             }) if *time <= now => {
                 self.version += 1;
-                deque.pop_front()
+                (deque.pop_front(), notify)
             }
-            _ => None,
+            _ => (None, notify),
         }
     }
 

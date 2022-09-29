@@ -4,7 +4,7 @@ use indexmap::IndexMap;
 use std::cell::RefCell;
 use std::future::Future;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::rc::Rc;
 use tokio::sync::Notify;
 use tokio::time::Duration;
 
@@ -42,7 +42,7 @@ impl<'a> Sim<'a> {
 
         {
             let world = RefCell::get_mut(&mut self.world);
-            let notify = Arc::new(Notify::new());
+            let notify = Rc::new(Notify::new());
 
             // Register host state with the world
             world.register(addr, epoch, notify.clone());
@@ -70,7 +70,7 @@ impl<'a> Sim<'a> {
 
         {
             let world = RefCell::get_mut(&mut self.world);
-            let notify = Arc::new(Notify::new());
+            let notify = Rc::new(Notify::new());
 
             // Register host state with the world
             world.register(addr, epoch, notify.clone());
