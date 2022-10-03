@@ -135,7 +135,6 @@ impl World {
         let (sender, receiver) = oneshot::channel();
         let syn = Syn { notify: sender };
 
-        // Bump the version to uniquely identify the new connection
         let dot = self.current_host_mut().bump();
         let elapsed = self.current_host().elapsed();
 
@@ -198,13 +197,15 @@ impl World {
     /// This begins the message's journey, queuing it on the destination inbox,
     /// but it may still be "on the network" depending on the current toplogy.
     pub(crate) fn embark(&mut self, dst: SocketAddr, message: Box<dyn Message>) {
-        let host = self.current_host().addr;
+        let host = self.current_host_mut();
+        let elapsed = host.elapsed();
 
-        match self.topology.embark_one(&mut self.rng, host, dst) {
+        // Log takes a message ref, so we bump here to emit the correct value
+        // before embarking.
+        let dot = host.bump();
+
+        match self.topology.embark_one(&mut self.rng, dot.host, dst) {
             it @ Embark::Delay(_) | it @ Embark::Hold => {
-                let host = &self.hosts[&host];
-                let dot = host.dot();
-
                 let delay = if let Embark::Delay(d) = it {
                     Some(d)
                 } else {
@@ -212,30 +213,29 @@ impl World {
                 };
 
                 self.log
-                    .send(&self.dns, dot, host.elapsed(), dst, delay, false, &*message);
+                    .send(&self.dns, dot, elapsed, dst, delay, false, &*message);
 
                 self.hosts[&dst].embark(dot, delay, message);
             }
             Embark::Drop => {
-                let host = &self.hosts[&host];
-                let dot = host.dot();
-
                 self.log
-                    .send(&self.dns, dot, host.elapsed(), dst, None, true, &*message);
+                    .send(&self.dns, dot, elapsed, dst, None, true, &*message);
             }
         }
     }
 
     /// Embark a segment from the currently executing host to `pair`'s peer.
     pub(crate) fn embark_on(&mut self, pair: SocketPair, segment: Segment) {
-        let host = self.current_host().addr;
+        let host = self.current_host_mut();
         let dst = pair.peer.host;
+        let elapsed = host.elapsed();
 
-        match self.topology.embark_one(&mut self.rng, host, dst) {
+        // Log takes a message ref, so we bump here to emit the correct value
+        // before embarking.
+        let dot = host.bump();
+
+        match self.topology.embark_one(&mut self.rng, dot.host, dst) {
             it @ Embark::Delay(_) | it @ Embark::Hold => {
-                let host = &self.hosts[&host];
-                let dot = host.dot();
-
                 let delay = if let Embark::Delay(d) = it {
                     Some(d)
                 } else {
@@ -243,7 +243,7 @@ impl World {
                 };
 
                 self.log
-                    .send(&self.dns, dot, host.elapsed(), dst, delay, false, &segment);
+                    .send(&self.dns, dot, elapsed, dst, delay, false, &segment);
 
                 self.hosts[&pair.peer.host].embark_on(pair.flip(), delay, segment);
             }

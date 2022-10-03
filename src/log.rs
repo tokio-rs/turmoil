@@ -130,6 +130,7 @@ impl Log {
                 },
             )
             .unwrap();
+            write!(writer, "\n").unwrap();
         }
     }
 
@@ -156,6 +157,7 @@ impl Log {
                 },
             )
             .unwrap();
+            write!(writer, "\n").unwrap();
         }
     }
 
@@ -178,6 +180,7 @@ impl Log {
                 },
             )
             .unwrap();
+            write!(writer, "\n").unwrap();
         }
     }
 
@@ -248,6 +251,7 @@ impl Log {
                 },
             )
             .unwrap();
+            write!(writer, "\n").unwrap();
         }
     }
 }

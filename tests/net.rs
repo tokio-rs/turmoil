@@ -1,4 +1,4 @@
-use std::{io, rc::Rc, str::from_utf8, time::Duration};
+use std::{io, path::Path, rc::Rc, str::from_utf8, time::Duration};
 
 use bytes::Bytes;
 use tokio::{
@@ -146,7 +146,7 @@ fn hold_and_release_once_connected() {
 
 #[test]
 fn send_upon_accept() {
-    let mut sim = Builder::new().build();
+    let mut sim = Builder::new().log(Path::new("/tmp/net.trace")).build();
 
     sim.host("server", || async {
         let listener = net::Listener::bind().await.unwrap();

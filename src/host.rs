@@ -89,6 +89,7 @@ impl Host {
             deque: VecDeque::new(),
             notify: notify.clone(),
         });
+        self.version += 1;
 
         Ok(notify)
     }
@@ -96,6 +97,7 @@ impl Host {
     /// Unbind the host, dropping all pending connections.
     pub(crate) fn unbind(&mut self) {
         self.listener.take();
+        self.version += 1;
     }
 
     /// Returns how long the host has been executing for in virtual time
@@ -196,7 +198,6 @@ impl Host {
             instructions,
             message,
         });
-        self.version += 1;
 
         self.notify.notify_one();
     }
@@ -218,7 +219,6 @@ impl Host {
             instructions,
             segment,
         });
-        self.version += 1;
 
         inbox.notify.notify_one();
     }
