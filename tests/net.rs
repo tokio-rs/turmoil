@@ -146,7 +146,7 @@ fn hold_and_release_once_connected() {
 
 #[test]
 fn send_upon_accept() {
-    let mut sim = Builder::new().log(Path::new("/tmp/net.trace")).build();
+    let mut sim = Builder::new().build();
 
     sim.host("server", || async {
         let listener = net::Listener::bind().await.unwrap();
