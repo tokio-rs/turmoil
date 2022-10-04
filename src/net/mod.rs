@@ -2,6 +2,7 @@
 //!
 //! They mirror [tokio::net](https://docs.rs/tokio/latest/tokio/net/) to provide
 //! a high fidelity implementation.
+
 use crate::{envelope::DeliveryInstructions, version::Dot, Message};
 
 use tokio::sync::oneshot;
