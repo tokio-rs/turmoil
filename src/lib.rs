@@ -17,6 +17,9 @@ pub use dns::ToSocketAddr;
 mod envelope;
 use envelope::Envelope;
 
+mod error;
+pub use error::Result;
+
 mod host;
 use host::Host;
 

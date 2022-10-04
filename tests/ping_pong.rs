@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 use tokio::{sync::Semaphore, time::timeout};
-use turmoil::{io, Builder};
+use turmoil::{io, Builder, Result};
 
 #[derive(Debug)]
 enum Message {
@@ -20,7 +20,7 @@ impl turmoil::Message for Message {
 }
 
 #[test]
-fn ping_pong() {
+fn ping_pong() -> Result {
     let mut sim = Builder::new().build();
 
     sim.host("server", || async {
@@ -37,13 +37,15 @@ fn ping_pong() {
 
         let (pong, _) = io::recv().await;
         assert!(matches!(pong, Message::Pong));
+
+        Ok(())
     });
 
-    sim.run();
+    sim.run()
 }
 
 #[test]
-fn hold_and_release() {
+fn hold_and_release() -> Result {
     let mut sim = Builder::new().build();
 
     sim.host("server", || async {
@@ -69,13 +71,15 @@ fn hold_and_release() {
         turmoil::release("client", "server");
         let (pong, _) = io::recv().await;
         assert!(matches!(pong, Message::Pong));
+
+        Ok(())
     });
 
-    sim.run();
+    sim.run()
 }
 
 #[test]
-fn network_partition() {
+fn network_partition() -> Result {
     let mut sim = Builder::new().build();
 
     sim.host("server", || async {
@@ -95,13 +99,15 @@ fn network_partition() {
 
         let res = timeout(Duration::from_secs(1), io::recv::<Message>()).await;
         assert!(matches!(res, Err(_)));
+
+        Ok(())
     });
 
-    sim.run();
+    sim.run()
 }
 
 #[test]
-fn bounce() {
+fn bounce() -> Result {
     // The server publishes the number of requests it thinks it processed into
     // this usize. Importantly, it resets when the server is rebooted.
     let reqs = Rc::new(AtomicUsize::new(0));
@@ -129,18 +135,22 @@ fn bounce() {
 
             let (pong, _) = io::recv().await;
             assert!(matches!(pong, Message::Pong));
+
+            Ok(())
         });
 
-        sim.run();
+        sim.run()?;
 
         // The server always thinks it has only server 1 request.
         assert_eq!(1, reqs.load(Ordering::SeqCst));
         sim.bounce("server");
     }
+
+    Ok(())
 }
 
 #[test]
-fn multiple_clients_all_finish() {
+fn multiple_clients_all_finish() -> Result {
     let how_many = 3;
     let tick_ms = 10;
 
@@ -159,12 +169,16 @@ fn multiple_clients_all_finish() {
                 let ms = if run == client { 0 } else { 2 * tick_ms };
                 tokio::time::sleep(Duration::from_millis(ms)).await;
 
-                let p = ct.acquire().await.unwrap();
+                let p = ct.acquire().await?;
                 p.forget();
+
+                Ok(())
             });
         }
 
-        sim.run();
+        sim.run()?;
         assert_eq!(0, ct.available_permits());
     }
+
+    Ok(())
 }

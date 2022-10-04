@@ -1,4 +1,4 @@
-use crate::{Config, Role, Rt, ToSocketAddr, World};
+use crate::{Config, Result, Role, Rt, ToSocketAddr, World};
 
 use indexmap::IndexMap;
 use std::cell::RefCell;
@@ -31,10 +31,10 @@ impl<'a> Sim<'a> {
         }
     }
 
-    /// Register a client with the simulation
+    /// Register a client with the simulation.
     pub fn client<F>(&mut self, addr: impl ToSocketAddr, client: F)
     where
-        F: Future<Output = ()> + 'static,
+        F: Future<Output = Result> + 'static,
     {
         let rt = Rt::new();
         let epoch = rt.now();
@@ -53,7 +53,7 @@ impl<'a> Sim<'a> {
         self.rts.insert(addr, Role::client(rt, handle));
     }
 
-    /// Register a host with the simulation
+    /// Register a host with the simulation.
     ///
     /// This method takes a `Fn` that builds a future, as opposed to
     /// [`Sim::client`] which just takes a future. The reason for this is we
@@ -108,9 +108,7 @@ impl<'a> Sim<'a> {
             Role::Simulated { rt, software } => {
                 rt.cancel_tasks();
                 World::enter(&self.world, || {
-                    rt.with(|| {
-                        tokio::task::spawn_local(software());
-                    });
+                    rt.with(|| tokio::task::spawn_local(software()));
                 });
             }
         }
@@ -190,12 +188,15 @@ impl<'a> Sim<'a> {
     /// The turmoil APIs (such as [`crate::io::send`]) operate on the active
     /// host, and so we remember which host is active before yielding to user
     /// code.
-    pub fn run(&self) {
+    ///
+    /// If any client errors, the simulation returns early with that Error.
+    pub fn run(&mut self) -> Result {
         let mut elapsed = Duration::default();
         let tick = self.config.tick;
 
         loop {
             let mut is_finished = true;
+            let mut finished = vec![];
 
             for (&addr, rt) in self.rts.iter() {
                 // Set the current host (see method docs)
@@ -210,19 +211,64 @@ impl<'a> Sim<'a> {
                 world.tick(addr, now);
 
                 if let Role::Client { handle, .. } = rt {
+                    if handle.is_finished() {
+                        finished.push(addr);
+                    }
                     is_finished = is_finished && handle.is_finished();
                 }
             }
 
+            // Check finished clients for err results. Runtimes are removed at
+            // this stage.
+            for addr in finished.iter() {
+                if let Some(Role::Client { rt, handle }) = self.rts.remove(addr) {
+                    rt.block_on(handle)??;
+                }
+            }
+
             if is_finished {
-                return;
+                return Ok(());
             }
 
             elapsed += tick;
 
             if elapsed > self.config.duration {
-                panic!("Ran for {:?} without completing", self.config.duration);
+                Err(format!(
+                    "Ran for {:?} without completing",
+                    self.config.duration
+                ))?;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use std::time::Duration;
+
+    use crate::Builder;
+
+    #[test]
+    fn client_error() {
+        let mut sim = Builder::new().build();
+
+        sim.client("doomed", async { Err("An Error")? });
+
+        assert!(sim.run().is_err());
+    }
+
+    #[test]
+    fn timeout() {
+        let mut sim = Builder::new()
+            .simulation_duration(Duration::from_millis(500))
+            .build();
+
+        sim.client("timeout", async {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+
+            Ok(())
+        });
+
+        assert!(sim.run().is_err());
     }
 }

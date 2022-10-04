@@ -1,5 +1,6 @@
 use std::mem;
 
+use futures::Future;
 use tokio::runtime::Runtime;
 use tokio::task::LocalSet;
 use tokio::time::{sleep, Duration, Instant};
@@ -38,9 +39,12 @@ impl Rt {
         }
     }
 
+    pub(crate) fn block_on<R>(&self, f: impl Future<Output = R>) -> R {
+        self.tokio.block_on(f)
+    }
+
     pub(crate) fn with<R>(&self, f: impl FnOnce() -> R) -> R {
-        self.tokio
-            .block_on(async { self.local.run_until(async { f() }).await })
+        self.block_on(async { self.local.run_until(async { f() }).await })
     }
 
     pub(crate) fn now(&self) -> Instant {
@@ -71,7 +75,7 @@ impl Rt {
     // that step 3 exceeds the intended duration. For this reason, we return the
     // finish time and store that in [`crate::Host::now`].
     pub(crate) fn tick(&self, duration: Duration) -> Instant {
-        self.tokio.block_on(async {
+        self.block_on(async {
             self.local
                 .run_until(async {
                     sleep(duration).await;

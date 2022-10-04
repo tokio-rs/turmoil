@@ -59,6 +59,8 @@ sim.client("client", async {
 
     let (echo, _) = io::recv::<Echo>().await;
     assert_eq!("hello, server!", echo.0);
+
+    Ok(())
 });
 
 // run the simulation

@@ -3,7 +3,7 @@ use std::{pin::Pin, time::Duration};
 use futures::Future;
 use tokio::{task::JoinHandle, time::Instant};
 
-use crate::rt::Rt;
+use crate::{rt::Rt, Result};
 
 // To support re-creation, we need to store a factory of the future that
 // represents the software. This is somewhat annoying in that it requires
@@ -13,14 +13,14 @@ type Software<'a> = Box<dyn Fn() -> Pin<Box<dyn Future<Output = ()>>> + 'a>;
 /// Differentiates runtime fields for different host types
 pub(crate) enum Role<'a> {
     /// A client handle
-    Client { rt: Rt, handle: JoinHandle<()> },
+    Client { rt: Rt, handle: JoinHandle<Result> },
 
     /// A simulated host
     Simulated { rt: Rt, software: Software<'a> },
 }
 
 impl<'a> Role<'a> {
-    pub(crate) fn client(rt: Rt, handle: JoinHandle<()>) -> Self {
+    pub(crate) fn client(rt: Rt, handle: JoinHandle<Result>) -> Self {
         Self::Client { rt, handle }
     }
 
