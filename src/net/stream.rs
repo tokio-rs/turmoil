@@ -19,13 +19,13 @@ use super::{Segment, SocketPair};
 /// A simulated connection between two hosts.
 ///
 /// All methods must be called from a host within a Turmoil simulation.
-pub struct Stream {
+pub struct TcpStream {
     pub(crate) pair: SocketPair,
     notify: Arc<Notify>,
     read_fut: Option<ReusableBoxFuture<'static, ()>>,
 }
 
-impl Stream {
+impl TcpStream {
     pub(crate) fn new(pair: SocketPair, notify: Arc<Notify>) -> Self {
         Self {
             pair,
@@ -51,7 +51,7 @@ impl Stream {
         let pair = SocketPair { local, peer };
         let notify = World::current(|world| world.current_host_mut().finish_connect(pair));
 
-        Ok(Stream::new(pair, notify))
+        Ok(Self::new(pair, notify))
     }
 
     fn poll_read_priv(
@@ -115,7 +115,7 @@ impl Stream {
     }
 }
 
-impl AsyncRead for Stream {
+impl AsyncRead for TcpStream {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -125,7 +125,7 @@ impl AsyncRead for Stream {
     }
 }
 
-impl AsyncWrite for Stream {
+impl AsyncWrite for TcpStream {
     fn poll_write(
         self: Pin<&mut Self>,
         _cx: &mut Context<'_>,

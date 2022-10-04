@@ -4,22 +4,22 @@ use tokio::sync::Notify;
 
 use crate::world::World;
 
-use super::Stream;
+use super::TcpStream;
 
 /// A simulated socket server, listening for connections.
 ///
 /// All methods must be called from a host within a Turmoil simulation.
-pub struct Listener {
+pub struct TcpListener {
     notify: Arc<Notify>,
 }
 
-impl Listener {
+impl TcpListener {
     /// Creates a new listener, which will be bound to the currently executing
     /// host's address.
     ///
     /// The returned listener is ready for accepting connections.
     pub async fn bind() -> io::Result<Self> {
-        Ok(Listener {
+        Ok(Self {
             notify: World::current(|world| {
                 let ret = world.current_host_mut().bind();
 
@@ -34,7 +34,7 @@ impl Listener {
     }
 
     /// Accepts a new incoming connection from this listener.
-    pub async fn accept(&self) -> io::Result<(Stream, SocketAddr)> {
+    pub async fn accept(&self) -> io::Result<(TcpStream, SocketAddr)> {
         loop {
             let maybe_accept = World::current(|world| world.accept());
 
@@ -47,7 +47,7 @@ impl Listener {
     }
 }
 
-impl Drop for Listener {
+impl Drop for TcpListener {
     fn drop(&mut self) {
         World::current_if_set(|world| {
             world.current_host_mut().unbind();

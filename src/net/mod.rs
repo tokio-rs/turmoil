@@ -9,10 +9,10 @@ use tokio::sync::oneshot;
 mod listener;
 
 use bytes::Bytes;
-pub use listener::Listener;
+pub use listener::TcpListener;
 
 mod stream;
-pub use stream::Stream;
+pub use stream::TcpStream;
 
 /// Uniquely identifies a connection between two hosts.
 ///

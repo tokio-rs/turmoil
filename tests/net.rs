@@ -10,11 +10,11 @@ use turmoil::{net, Builder};
 
 /// Augments a stream with a simple ping/pong protocol.
 struct Connection {
-    stream: net::Stream,
+    stream: net::TcpStream,
 }
 
 impl Connection {
-    fn new(stream: net::Stream) -> Self {
+    fn new(stream: net::TcpStream) -> Self {
         Self { stream }
     }
 
@@ -48,7 +48,7 @@ fn network_partitions() {
     let mut sim = Builder::new().build();
 
     sim.host("server", || async {
-        let listener = net::Listener::bind().await.unwrap();
+        let listener = net::TcpListener::bind().await.unwrap();
         loop {
             let _ = listener.accept().await;
         }
@@ -58,7 +58,7 @@ fn network_partitions() {
         turmoil::partition("client", "server");
 
         assert_error_kind(
-            net::Stream::connect("server").await,
+            net::TcpStream::connect("server").await,
             io::ErrorKind::ConnectionRefused,
         );
 
@@ -67,7 +67,7 @@ fn network_partitions() {
         turmoil::hold("client", "server");
 
         assert!(
-            timeout(Duration::from_secs(1), net::Stream::connect("server"))
+            timeout(Duration::from_secs(1), net::TcpStream::connect("server"))
                 .await
                 .is_err()
         );
@@ -83,7 +83,7 @@ fn hold_and_release_on_connect() {
     let timeout_secs = 1;
 
     sim.client("server", async move {
-        let listener = net::Listener::bind().await.unwrap();
+        let listener = net::TcpListener::bind().await.unwrap();
 
         assert!(
             timeout(Duration::from_secs(timeout_secs * 2), listener.accept())
@@ -97,7 +97,7 @@ fn hold_and_release_on_connect() {
 
         assert!(timeout(
             Duration::from_secs(timeout_secs),
-            net::Stream::connect("server")
+            net::TcpStream::connect("server")
         )
         .await
         .is_err());
@@ -116,7 +116,7 @@ fn hold_and_release_once_connected() {
     let wait = notify.clone();
 
     sim.client("server", async move {
-        let listener = net::Listener::bind().await.unwrap();
+        let listener = net::TcpListener::bind().await.unwrap();
         let (s, _) = listener.accept().await.unwrap();
         let mut c = Connection::new(s);
 
@@ -125,7 +125,7 @@ fn hold_and_release_once_connected() {
     });
 
     sim.client("client", async move {
-        let s = net::Stream::connect("server").await.unwrap();
+        let s = net::TcpStream::connect("server").await.unwrap();
         let mut c = Connection::new(s);
 
         turmoil::hold("server", "client");
@@ -149,7 +149,7 @@ fn send_upon_accept() {
     let mut sim = Builder::new().build();
 
     sim.host("server", || async {
-        let listener = net::Listener::bind().await.unwrap();
+        let listener = net::TcpListener::bind().await.unwrap();
 
         while let Ok((s, _)) = listener.accept().await {
             let mut c = Connection::new(s);
@@ -158,7 +158,7 @@ fn send_upon_accept() {
     });
 
     sim.client("client", async {
-        let s = net::Stream::connect("server").await.unwrap();
+        let s = net::TcpStream::connect("server").await.unwrap();
         let mut c = Connection::new(s);
 
         assert!(c.recv_ping().await.is_ok());
@@ -172,7 +172,7 @@ fn n_responses() {
     let mut sim = Builder::new().build();
 
     sim.host("server", || async {
-        let listener = net::Listener::bind().await.unwrap();
+        let listener = net::TcpListener::bind().await.unwrap();
 
         while let Ok((s, _)) = listener.accept().await {
             let mut c = Connection::new(s);
@@ -188,7 +188,7 @@ fn n_responses() {
     });
 
     sim.client("client", async {
-        let s = net::Stream::connect("server").await.unwrap();
+        let s = net::TcpStream::connect("server").await.unwrap();
         let mut c = Connection::new(s);
 
         let how_many = 3;
@@ -207,7 +207,7 @@ fn server_concurrency() {
     let mut sim = Builder::new().build();
 
     sim.host("server", || async {
-        let listener = net::Listener::bind().await.unwrap();
+        let listener = net::TcpListener::bind().await.unwrap();
 
         while let Ok((s, _)) = listener.accept().await {
             let mut c = Connection::new(s);
@@ -226,7 +226,7 @@ fn server_concurrency() {
 
     for i in 0..how_many {
         sim.client(format!("client-{}", i), async move {
-            let s = net::Stream::connect("server").await.unwrap();
+            let s = net::TcpStream::connect("server").await.unwrap();
             let mut c = Connection::new(s);
 
             assert!(c.send_ping(how_many).await.is_ok());
@@ -253,7 +253,7 @@ fn drop_listener() {
         let notify = notify.clone();
 
         async move {
-            let listener = net::Listener::bind().await.unwrap();
+            let listener = net::TcpListener::bind().await.unwrap();
 
             for _ in 0..how_many_conns {
                 let (s, _) = listener.accept().await.unwrap();
@@ -277,7 +277,7 @@ fn drop_listener() {
         let mut conns = vec![];
 
         for _ in 0..how_many_conns {
-            let s = net::Stream::connect("server").await.unwrap();
+            let s = net::TcpStream::connect("server").await.unwrap();
             conns.push(Connection::new(s));
         }
 
@@ -293,7 +293,7 @@ fn drop_listener() {
         }
 
         assert_error_kind(
-            net::Stream::connect("server").await,
+            net::TcpStream::connect("server").await,
             io::ErrorKind::ConnectionRefused,
         );
     });
@@ -315,7 +315,7 @@ fn drop_listener_with_non_empty_queue() {
         let wait = wait.clone();
 
         async move {
-            let listener = net::Listener::bind().await.unwrap();
+            let listener = net::TcpListener::bind().await.unwrap();
             wait.notified().await;
             drop(listener);
         }
@@ -325,7 +325,7 @@ fn drop_listener_with_non_empty_queue() {
         let mut conns = vec![];
 
         for _ in 0..how_many_conns {
-            conns.push(tokio::task::spawn_local(net::Stream::connect("server")));
+            conns.push(tokio::task::spawn_local(net::TcpStream::connect("server")));
         }
 
         // sleep for one iteration to land syns in the listener

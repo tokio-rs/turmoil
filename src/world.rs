@@ -1,4 +1,4 @@
-use crate::net::{Segment, SocketPair, Stream, Syn};
+use crate::net::{Segment, SocketPair, Syn, TcpStream};
 use crate::top::Embark;
 use crate::{config, message, version, Dns, Envelope, Host, Log, Message, ToSocketAddr, Topology};
 
@@ -161,7 +161,7 @@ impl World {
     }
 
     /// Accept a new incoming connection on the currently executing host.
-    pub(crate) fn accept(&mut self) -> Option<(Stream, SocketAddr)> {
+    pub(crate) fn accept(&mut self) -> Option<(TcpStream, SocketAddr)> {
         let ret = self.current_host_mut().accept();
 
         if let Some(Envelope { src, message, .. }) = ret {
@@ -186,7 +186,7 @@ impl World {
             // hasn't seen the ack yet.
             self.hosts[&src.host].register_connection(pair.flip());
 
-            return Some((Stream::new(pair, notify), src.host));
+            return Some((TcpStream::new(pair, notify), src.host));
         }
 
         None
