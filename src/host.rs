@@ -89,7 +89,7 @@ impl Host {
             deque: VecDeque::new(),
             notify: notify.clone(),
         });
-        self.version += 1;
+        self.bump_version();
 
         Ok(notify)
     }
@@ -97,7 +97,7 @@ impl Host {
     /// Unbind the host, dropping all pending connections.
     pub(crate) fn unbind(&mut self) {
         self.listener.take();
-        self.version += 1;
+        self.bump_version();
     }
 
     /// Returns how long the host has been executing for in virtual time
@@ -109,8 +109,12 @@ impl Host {
     ///
     /// Called when a host establishes a new connection with a remote peer.
     pub(crate) fn bump(&mut self) -> version::Dot {
-        self.version += 1;
+        self.bump_version();
         self.dot()
+    }
+
+    fn bump_version(&mut self) {
+        self.version += 1;
     }
 
     /// Returns a dot for the host at its current version
@@ -130,13 +134,17 @@ impl Host {
                 instructions: DeliveryInstructions::DeliverAt(time),
                 ..
             }) if *time <= now => {
-                self.version += 1;
-                deque.pop_front()
+                let ret = deque.pop_front();
+                self.bump_version();
+                ret
             }
             _ => None,
         }
     }
 
+    // If the host is not bound we simply do nothing, dropping the `Syn`. The
+    // peer who initiated the connection is awaiting the receiver of the syn's
+    // oneshot, which triggers a "connection refused" error.
     pub(crate) fn syn(&mut self, src: version::Dot, delay: Option<Duration>, syn: Syn) {
         if let Some(listener) = self.listener.as_mut() {
             let instructions = match delay {
@@ -152,8 +160,6 @@ impl Host {
 
             listener.notify.notify_one();
         }
-
-        // notify drops, connection is refused
     }
 
     /// Finalize the connection, returning a `Notify` to build the stream.
@@ -170,16 +176,19 @@ impl Host {
     }
 
     pub(crate) fn register_connection(&mut self, pair: SocketPair) {
-        assert!(self
-            .connections
-            .insert(
-                pair,
-                Inbox {
-                    deque: VecDeque::new(),
-                    notify: Arc::new(Notify::new()),
-                }
-            )
-            .is_none());
+        assert!(
+            self.connections
+                .insert(
+                    pair,
+                    Inbox {
+                        deque: VecDeque::new(),
+                        notify: Arc::new(Notify::new()),
+                    }
+                )
+                .is_none(),
+            "{:?} is already registered",
+            pair
+        );
     }
 
     pub(crate) fn embark(
@@ -233,8 +242,9 @@ impl Host {
                     instructions: DeliveryInstructions::DeliverAt(time),
                     ..
                 }) if *time <= now => {
-                    self.version += 1;
-                    return (deque.pop_front(), notify);
+                    let ret = (deque.pop_front(), notify);
+                    self.bump_version();
+                    return ret;
                 }
                 _ => continue,
             }
@@ -254,8 +264,9 @@ impl Host {
                 instructions: DeliveryInstructions::DeliverAt(time),
                 ..
             }) if *time <= now => {
-                self.version += 1;
-                (deque.pop_front(), notify)
+                let ret = (deque.pop_front(), notify);
+                self.bump_version();
+                ret
             }
             _ => (None, notify),
         }
@@ -275,8 +286,9 @@ impl Host {
                 instructions: DeliveryInstructions::DeliverAt(time),
                 ..
             }) if *time <= now => {
-                self.version += 1;
-                deque.pop_front().map(|e| e.segment)
+                let ret = deque.pop_front().map(|e| e.segment);
+                self.bump_version();
+                ret
             }
             _ => None,
         }

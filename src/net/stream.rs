@@ -3,7 +3,7 @@ use std::{
     io,
     pin::Pin,
     sync::Arc,
-    task::{Context, Poll},
+    task::{ready, Context, Poll},
 };
 use tokio_util::sync::ReusableBoxFuture;
 
@@ -76,29 +76,20 @@ impl Stream {
             }
         };
 
-        match read_fut.poll(cx) {
-            Poll::Ready(_) => {
-                // Loop until we recv a segment from the host or the read future
-                // is pending. This is necessary as we might be notified, but
-                // the segment is still "on the network" and we need to continue
-                // polling.
-                loop {
-                    let notify = Arc::clone(&self.notify);
-                    read_fut.set(async move { notify.notified().await });
+        let _ = ready!(read_fut.poll(cx));
 
-                    match Self::recv(self.pair, buf) {
-                        Some(res) => return Poll::Ready(res),
-                        _ => {
-                            if let Poll::Pending = read_fut.poll(cx) {
-                                break;
-                            }
-                        }
-                    }
-                }
+        // Loop until we recv a segment from the host or the read future
+        // is pending. This is necessary as we might be notified, but
+        // the segment is still "on the network" and we need to continue
+        // polling.
+        loop {
+            let notify = Arc::clone(&self.notify);
+            read_fut.set(async move { notify.notified().await });
 
-                Poll::Pending
+            match Self::recv(self.pair, buf) {
+                Some(res) => return Poll::Ready(res),
+                _ => ready!(read_fut.poll(cx)),
             }
-            Poll::Pending => Poll::Pending,
         }
     }
 
@@ -122,10 +113,6 @@ impl Stream {
 
         Poll::Ready(Ok(buf.len()))
     }
-}
-
-impl Drop for Stream {
-    fn drop(&mut self) {}
 }
 
 impl AsyncRead for Stream {
