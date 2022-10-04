@@ -28,6 +28,8 @@ use log::Log;
 mod message;
 pub use message::Message;
 
+pub mod net;
+
 mod role;
 use role::Role;
 
