@@ -44,7 +44,7 @@ fn assert_error_kind<T>(res: io::Result<T>, kind: io::ErrorKind) {
 }
 
 #[test]
-fn network_partitions() {
+fn network_partitions() -> turmoil::Result {
     let mut sim = Builder::new().build();
 
     sim.host("server", || async {
@@ -71,25 +71,29 @@ fn network_partitions() {
                 .await
                 .is_err()
         );
+
+        Ok(())
     });
 
-    sim.run();
+    sim.run()
 }
 
 #[test]
-fn hold_and_release_on_connect() {
+fn hold_and_release_on_connect() -> turmoil::Result {
     let mut sim = Builder::new().build();
 
     let timeout_secs = 1;
 
     sim.client("server", async move {
-        let listener = net::TcpListener::bind().await.unwrap();
+        let listener = net::TcpListener::bind().await?;
 
         assert!(
             timeout(Duration::from_secs(timeout_secs * 2), listener.accept())
                 .await
                 .is_err()
         );
+
+        Ok(())
     });
 
     sim.client("client", async move {
@@ -103,29 +107,33 @@ fn hold_and_release_on_connect() {
         .is_err());
 
         turmoil::release("client", "server");
+
+        Ok(())
     });
 
-    sim.run();
+    sim.run()
 }
 
 #[test]
-fn hold_and_release_once_connected() {
+fn hold_and_release_once_connected() -> turmoil::Result {
     let mut sim = Builder::new().build();
 
     let notify = Rc::new(Notify::new());
     let wait = notify.clone();
 
     sim.client("server", async move {
-        let listener = net::TcpListener::bind().await.unwrap();
-        let (s, _) = listener.accept().await.unwrap();
+        let listener = net::TcpListener::bind().await?;
+        let (s, _) = listener.accept().await?;
         let mut c = Connection::new(s);
 
         wait.notified().await;
-        let _ = c.send_ping(1).await;
+        let _ = c.send_ping(1).await?;
+
+        Ok(())
     });
 
     sim.client("client", async move {
-        let s = net::TcpStream::connect("server").await.unwrap();
+        let s = net::TcpStream::connect("server").await?;
         let mut c = Connection::new(s);
 
         turmoil::hold("server", "client");
@@ -139,13 +147,15 @@ fn hold_and_release_once_connected() {
         turmoil::release("server", "client");
 
         assert!(c.recv_ping().await.is_ok());
+
+        Ok(())
     });
 
-    sim.run();
+    sim.run()
 }
 
 #[test]
-fn send_upon_accept() {
+fn send_upon_accept() -> turmoil::Result {
     let mut sim = Builder::new().build();
 
     sim.host("server", || async {
@@ -158,17 +168,19 @@ fn send_upon_accept() {
     });
 
     sim.client("client", async {
-        let s = net::TcpStream::connect("server").await.unwrap();
+        let s = net::TcpStream::connect("server").await?;
         let mut c = Connection::new(s);
 
         assert!(c.recv_ping().await.is_ok());
+
+        Ok(())
     });
 
-    sim.run();
+    sim.run()
 }
 
 #[test]
-fn n_responses() {
+fn n_responses() -> turmoil::Result {
     let mut sim = Builder::new().build();
 
     sim.host("server", || async {
@@ -188,7 +200,7 @@ fn n_responses() {
     });
 
     sim.client("client", async {
-        let s = net::TcpStream::connect("server").await.unwrap();
+        let s = net::TcpStream::connect("server").await?;
         let mut c = Connection::new(s);
 
         let how_many = 3;
@@ -197,13 +209,15 @@ fn n_responses() {
         for _ in 0..how_many {
             assert!(c.recv_pong().await.is_ok());
         }
+
+        Ok(())
     });
 
-    sim.run();
+    sim.run()
 }
 
 #[test]
-fn server_concurrency() {
+fn server_concurrency() -> turmoil::Result {
     let mut sim = Builder::new().build();
 
     sim.host("server", || async {
@@ -226,7 +240,7 @@ fn server_concurrency() {
 
     for i in 0..how_many {
         sim.client(format!("client-{}", i), async move {
-            let s = net::TcpStream::connect("server").await.unwrap();
+            let s = net::TcpStream::connect("server").await?;
             let mut c = Connection::new(s);
 
             assert!(c.send_ping(how_many).await.is_ok());
@@ -234,14 +248,16 @@ fn server_concurrency() {
             for _ in 0..how_many {
                 assert!(c.recv_pong().await.is_ok());
             }
+
+            Ok(())
         });
     }
 
-    sim.run();
+    sim.run()
 }
 
 #[test]
-fn drop_listener() {
+fn drop_listener() -> turmoil::Result {
     let how_many_conns = 3;
 
     let wait = Rc::new(Notify::new());
@@ -277,7 +293,7 @@ fn drop_listener() {
         let mut conns = vec![];
 
         for _ in 0..how_many_conns {
-            let s = net::TcpStream::connect("server").await.unwrap();
+            let s = net::TcpStream::connect("server").await?;
             conns.push(Connection::new(s));
         }
 
@@ -296,13 +312,15 @@ fn drop_listener() {
             net::TcpStream::connect("server").await,
             io::ErrorKind::ConnectionRefused,
         );
+
+        Ok(())
     });
 
-    sim.run();
+    sim.run()
 }
 
 #[test]
-fn drop_listener_with_non_empty_queue() {
+fn drop_listener_with_non_empty_queue() -> turmoil::Result {
     let how_many_conns = 3;
 
     let notify = Rc::new(Notify::new());
@@ -333,9 +351,11 @@ fn drop_listener_with_non_empty_queue() {
         notify.notify_one();
 
         for fut in conns {
-            assert_error_kind(fut.await.unwrap(), io::ErrorKind::ConnectionRefused);
+            assert_error_kind(fut.await?, io::ErrorKind::ConnectionRefused);
         }
+
+        Ok(())
     });
 
-    sim.run();
+    sim.run()
 }
