@@ -156,6 +156,9 @@ fn hold_and_release_once_connected() -> turmoil::Result {
 
 #[test]
 fn accept_front_of_line_blocking() -> turmoil::Result {
+    let wait = Rc::new(Notify::new());
+    let notify = wait.clone();
+
     let mut sim = Builder::new().build();
 
     // We setup the simulation with hosts A, B, and C
@@ -169,7 +172,7 @@ fn accept_front_of_line_blocking() -> turmoil::Result {
     });
 
     // Hold all traffic from A:B
-    sim.client("A", async {
+    sim.client("A", async move {
         hold("A", "B");
 
         assert!(
@@ -177,13 +180,16 @@ fn accept_front_of_line_blocking() -> turmoil::Result {
                 .await
                 .is_err()
         );
+        notify.notify_one();
 
         Ok(())
     });
 
     // C:B should succeed, and should not be blocked behind the A:B, which is
     // not eligible for delivery
-    sim.client("C", async {
+    sim.client("C", async move {
+        wait.notified().await;
+
         let _ = net::TcpStream::connect("B").await?;
 
         Ok(())
