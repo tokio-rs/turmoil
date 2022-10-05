@@ -32,7 +32,7 @@ turmoil = "0.2"
 Next, create a test file and add a test:
 
 ```rust
-use turmoil::{io, Builder};
+use turmoil::{net, Builder};
 
 #[derive(Debug)]
 struct Echo(String);
@@ -48,16 +48,16 @@ let mut sim = Builder::new().build();
 // register a host
 sim.host("server", || async {
     loop {
-        let (msg, src) = io::recv::<Echo>().await;
-        io::send(src, msg);
+        let (msg, src) = net::recv::<Echo>().await;
+        net::send(src, msg);
     }
 });
 
 // register a client (this is the test code)
 sim.client("client", async {
-    io::send("server", Echo("hello, server!".to_string()));
+    net::send("server", Echo("hello, server!".to_string()));
 
-    let (echo, _) = io::recv::<Echo>().await;
+    let (echo, _) = net::recv::<Echo>().await;
     assert_eq!("hello, server!", echo.0);
 
     Ok(())

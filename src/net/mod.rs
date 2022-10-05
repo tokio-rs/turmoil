@@ -15,6 +15,9 @@ pub use listener::TcpListener;
 mod stream;
 pub use stream::TcpStream;
 
+mod udp;
+pub use udp::{recv, recv_from, send};
+
 /// Uniquely identifies a connection between two hosts.
 ///
 /// Using `Dot` allows us to support multiple connections between the same two

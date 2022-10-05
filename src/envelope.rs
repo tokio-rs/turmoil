@@ -2,6 +2,7 @@ use crate::{version, Message};
 
 use tokio::time::Instant;
 
+#[derive(Debug)]
 pub(crate) struct Envelope {
     /// Who sent the message
     pub(crate) src: version::Dot,
@@ -13,6 +14,7 @@ pub(crate) struct Envelope {
     pub(crate) message: Box<dyn Message>,
 }
 
+#[derive(Debug)]
 pub(crate) enum DeliveryInstructions {
     ExplicitlyHeld,
     DeliverAt(Instant),

@@ -23,8 +23,6 @@ pub use error::Result;
 mod host;
 use host::Host;
 
-pub mod io;
-
 mod log;
 use log::Log;
 
@@ -124,7 +122,7 @@ macro_rules! info {
 
 #[macro_export]
 macro_rules! debug {
-    () => {
+    ( $($t:tt)* ) => {
         if $crate::log_enabled() {
             let line = format!( $($t)* );
             $crate::log(true, &line);

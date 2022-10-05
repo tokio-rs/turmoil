@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 use tokio::{sync::Semaphore, time::timeout};
-use turmoil::{io, Builder, Result};
+use turmoil::{net, Builder, Result};
 
 #[derive(Debug)]
 enum Message {
@@ -25,17 +25,17 @@ fn ping_pong() -> Result {
 
     sim.host("server", || async {
         loop {
-            let (ping, src) = io::recv().await;
+            let (ping, src) = net::recv().await;
             assert!(matches!(ping, Message::Ping));
 
-            io::send(src, Message::Pong);
+            net::send(src, Message::Pong);
         }
     });
 
     sim.client("client", async {
-        io::send("server", Message::Ping);
+        net::send("server", Message::Ping);
 
-        let (pong, _) = io::recv().await;
+        let (pong, _) = net::recv().await;
         assert!(matches!(pong, Message::Pong));
 
         Ok(())
@@ -50,10 +50,10 @@ fn hold_and_release() -> Result {
 
     sim.host("server", || async {
         loop {
-            let (ping, src) = io::recv().await;
+            let (ping, src) = net::recv().await;
             assert!(matches!(ping, Message::Ping));
 
-            io::send(src, Message::Pong);
+            net::send(src, Message::Pong);
         }
     });
 
@@ -61,15 +61,15 @@ fn hold_and_release() -> Result {
         // pause delivery of packets between the client and server
         turmoil::hold("client", "server");
 
-        io::send("server", Message::Ping);
+        net::send("server", Message::Ping);
 
-        let res = timeout(Duration::from_secs(1), io::recv::<Message>()).await;
+        let res = timeout(Duration::from_secs(1), net::recv::<Message>()).await;
         assert!(matches!(res, Err(_)));
 
         // resume the network. note that the client ping does not have to be
         // resent.
         turmoil::release("client", "server");
-        let (pong, _) = io::recv().await;
+        let (pong, _) = net::recv().await;
         assert!(matches!(pong, Message::Pong));
 
         Ok(())
@@ -84,10 +84,10 @@ fn network_partition() -> Result {
 
     sim.host("server", || async {
         loop {
-            let (ping, src) = io::recv().await;
+            let (ping, src) = net::recv().await;
             assert!(matches!(ping, Message::Ping));
 
-            io::send(src, Message::Pong);
+            net::send(src, Message::Pong);
         }
     });
 
@@ -95,9 +95,9 @@ fn network_partition() -> Result {
         // introduce the partition
         turmoil::partition("client", "server");
 
-        io::send("server", Message::Ping);
+        net::send("server", Message::Ping);
 
-        let res = timeout(Duration::from_secs(1), io::recv::<Message>()).await;
+        let res = timeout(Duration::from_secs(1), net::recv::<Message>()).await;
         assert!(matches!(res, Err(_)));
 
         Ok(())
@@ -119,21 +119,21 @@ fn bounce() -> Result {
         let mut reqs = 0;
         async move {
             loop {
-                let (ping, src) = io::recv().await;
+                let (ping, src) = net::recv().await;
                 assert!(matches!(ping, Message::Ping));
                 reqs += 1;
                 publish.store(reqs, Ordering::SeqCst);
 
-                io::send(src, Message::Pong);
+                net::send(src, Message::Pong);
             }
         }
     });
 
     for i in 0..3 {
         sim.client(format!("client-{}", i), async {
-            io::send("server", Message::Ping);
+            net::send("server", Message::Ping);
 
-            let (pong, _) = io::recv().await;
+            let (pong, _) = net::recv().await;
             assert!(matches!(pong, Message::Pong));
 
             Ok(())

@@ -14,10 +14,10 @@ use tokio::time::{Duration, Instant};
 /// A host in the simulated network.
 ///
 /// Hosts support two networking modes:
-/// - Datagram via [`crate::io::send`] and [`crate::io::recv`]
-/// - Stream via [`crate::net::Listener`] and [`crate::net::Stream`]
+/// - Datagram
+/// - Stream
 ///
-/// Both modes may be used by host software simulatanesouly.
+/// Both modes may be used by host software simultaneously.
 pub(crate) struct Host {
     /// Host address
     pub(crate) addr: SocketAddr,
@@ -49,10 +49,10 @@ pub(crate) struct Host {
 
 /// A simple unbounded channel.
 struct Inbox<T> {
-    /// Pending connections
+    /// Queued items
     deque: VecDeque<T>,
 
-    /// Signaled when an item is available
+    /// Signaled when an item is available to recv
     notify: Arc<Notify>,
 }
 
@@ -127,19 +127,25 @@ impl Host {
 
     pub(crate) fn accept(&mut self) -> Option<Envelope> {
         let now = Instant::now();
-        let deque = &mut self.listener.as_mut()?.deque;
+        let deque = &self.listener.as_ref()?.deque;
 
-        match deque.front() {
-            Some(Envelope {
-                instructions: DeliveryInstructions::DeliverAt(time),
-                ..
-            }) if *time <= now => {
-                let ret = deque.pop_front();
-                self.bump_version();
-                ret
+        // Iterate in order, skipping "held" envelopes, which is necessary to
+        // avoid front-of-line blocking.
+        for (index, envelope) in deque.iter().enumerate() {
+            match envelope {
+                Envelope {
+                    instructions: DeliveryInstructions::DeliverAt(time),
+                    ..
+                } if *time <= now => {
+                    self.bump_version();
+                    let deque_mut = &mut self.listener.as_mut()?.deque;
+                    return deque_mut.remove(index);
+                }
+                _ => continue,
             }
-            _ => None,
         }
+
+        None
     }
 
     // If the host is not bound we simply do nothing, dropping the `Syn`. The
@@ -162,33 +168,21 @@ impl Host {
         }
     }
 
-    /// Finalize the connection, returning a `Notify` to build the stream.
-    ///
-    /// This is idempotent. If the connection has already been initialized, the
-    /// `Notify` is simply cloned and returned.
-    pub(crate) fn finish_connect(&mut self, pair: SocketPair) -> Arc<Notify> {
-        let inbox = self.connections.entry(pair).or_insert_with(|| Inbox {
+    /// Setup a new connection for the `pair`.
+    pub(crate) fn setup(&mut self, pair: SocketPair) {
+        let inbox = Inbox {
             deque: VecDeque::new(),
             notify: Arc::new(Notify::new()),
-        });
+        };
 
-        inbox.notify.clone()
+        let contains_pair = self.connections.insert(pair, inbox).is_some();
+
+        assert!(!contains_pair, "{:?} is already registered", pair);
     }
 
-    pub(crate) fn register_connection(&mut self, pair: SocketPair) {
-        assert!(
-            self.connections
-                .insert(
-                    pair,
-                    Inbox {
-                        deque: VecDeque::new(),
-                        notify: Arc::new(Notify::new()),
-                    }
-                )
-                .is_none(),
-            "{:?} is already registered",
-            pair
-        );
+    /// Receive notifications for `pair`'s connection.
+    pub(crate) fn subscribe(&self, pair: SocketPair) -> Arc<Notify> {
+        self.connections[&pair].notify.clone()
     }
 
     pub(crate) fn embark(
@@ -346,13 +340,16 @@ impl Host {
         self.now = now;
 
         if let Some(listener) = self.listener.as_ref() {
-            if let Some(Envelope {
-                instructions: DeliveryInstructions::DeliverAt(time),
-                ..
-            }) = listener.deque.front()
-            {
-                if *time <= now {
-                    listener.notify.notify_one();
+            for envelope in listener.deque.iter() {
+                if let Envelope {
+                    instructions: DeliveryInstructions::DeliverAt(time),
+                    ..
+                } = envelope
+                {
+                    if *time <= now {
+                        listener.notify.notify_one();
+                        break;
+                    }
                 }
             }
         }
