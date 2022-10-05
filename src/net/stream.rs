@@ -49,7 +49,7 @@ impl TcpStream {
             .map_err(|_| io::Error::new(io::ErrorKind::ConnectionRefused, dst.to_string()))?;
 
         let pair = SocketPair { local, peer };
-        let notify = World::current(|world| world.current_host_mut().finish_connect(pair));
+        let notify = World::current(|world| world.current_host().subscribe(pair));
 
         Ok(Self::new(pair, notify))
     }

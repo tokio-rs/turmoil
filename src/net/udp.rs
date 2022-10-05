@@ -1,7 +1,8 @@
-// TODO: Move this to the net mod and rename
 use crate::{lookup, message, Message, ToSocketAddr, World};
 
 use std::net::SocketAddr;
+
+// TODO: Build out a simulated UdpSocket
 
 /// Send a message to `dst`.
 ///

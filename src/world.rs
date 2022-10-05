@@ -171,12 +171,14 @@ impl World {
             let local = host.dot();
             let elapsed = host.elapsed();
 
-            // notify the peer, returning early if they have hung up to avoid
-            // host mutations
+            // Notify the peer, returning early if they have hung up to avoid
+            // host mutations.
             syn.notify.send(local).ok()?;
 
             let pair = SocketPair { local, peer: src };
-            let notify = self.current_host_mut().finish_connect(pair);
+            let host_mut = self.current_host_mut();
+            host_mut.setup(pair);
+            let notify = host_mut.subscribe(pair);
 
             self.log.syn_ack(&self.dns, local, elapsed, src);
 
@@ -184,7 +186,7 @@ impl World {
             // accept side because as soon as this returns the currently
             // executing host may use the stream, even though initiating host
             // hasn't seen the ack yet.
-            self.hosts[&src.host].register_connection(pair.flip());
+            self.hosts[&src.host].setup(pair.flip());
 
             return Some((TcpStream::new(pair, notify), src.host));
         }

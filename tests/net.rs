@@ -6,7 +6,7 @@ use tokio::{
     sync::Notify,
     time::timeout,
 };
-use turmoil::{net, Builder};
+use turmoil::{debug, hold, net, Builder};
 
 /// Augments a stream with a simple ping/pong protocol.
 struct Connection {
@@ -147,6 +147,44 @@ fn hold_and_release_once_connected() -> turmoil::Result {
         turmoil::release("server", "client");
 
         assert!(c.recv_ping().await.is_ok());
+
+        Ok(())
+    });
+
+    sim.run()
+}
+
+#[test]
+fn accept_front_of_line_blocking() -> turmoil::Result {
+    let mut sim = Builder::new().build();
+
+    // We setup the simulation with hosts A, B, and C
+
+    sim.host("B", || async {
+        let listener = net::TcpListener::bind().await.unwrap();
+
+        while let Ok((_, peer)) = listener.accept().await {
+            debug!("peer {}", peer);
+        }
+    });
+
+    // Hold all traffic from A:B
+    sim.client("A", async {
+        hold("A", "B");
+
+        assert!(
+            timeout(Duration::from_secs(1), net::TcpStream::connect("B"))
+                .await
+                .is_err()
+        );
+
+        Ok(())
+    });
+
+    // C:B should succeed, and should not be blocked behind the A:B, which is
+    // not eligible for delivery
+    sim.client("C", async {
+        let _ = net::TcpStream::connect("B").await?;
 
         Ok(())
     });
