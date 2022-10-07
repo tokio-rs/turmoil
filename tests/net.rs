@@ -421,8 +421,8 @@ fn hangup() -> turmoil::Result {
         // be writable for a period of time due to the FIN-ACK packets flying in
         // both directions, which we ignore today. The single host execution
         // also makes this worse as the peer has already sent a FIN and
-        // disconnected the link. We plan to decouple host and network, which
-        // make fully implementing this much simpler.
+        // disconnected the link when this runs. We plan to decouple host and
+        // network, which makes fully implementing this much simpler.
         assert_error_kind(s.write_u8(1).await, io::ErrorKind::BrokenPipe);
 
         Ok(())
