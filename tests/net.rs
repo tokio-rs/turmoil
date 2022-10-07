@@ -483,3 +483,32 @@ fn shutdown_write() -> turmoil::Result {
 
     sim.run()
 }
+
+#[test]
+fn write_zero_bytes() -> turmoil::Result {
+    let mut sim = Builder::new().build();
+
+    sim.client("server", async move {
+        let listener = net::TcpListener::bind().await?;
+        let (mut s, _) = listener.accept().await?;
+
+        assert_eq!(1, s.read_u8().await?);
+
+        Ok(())
+    });
+
+    sim.client("client", async move {
+        let mut s = net::TcpStream::connect("server").await?;
+
+        // no-op
+        let buf = [0; 0];
+        s.write(&buf).await?;
+
+        // actual write to ensure server:read_u8 is not EOF
+        s.write_u8(1).await?;
+
+        Ok(())
+    });
+
+    sim.run()
+}

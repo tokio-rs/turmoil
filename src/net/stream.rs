@@ -123,6 +123,10 @@ impl TcpStream {
     }
 
     fn poll_write_priv(&self, buf: &[u8]) -> Poll<Result<usize, io::Error>> {
+        if buf.len() == 0 {
+            return Poll::Ready(Ok(0));
+        }
+
         if self.is_shutdown {
             return Poll::Ready(Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
