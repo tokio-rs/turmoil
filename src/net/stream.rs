@@ -23,6 +23,10 @@ pub struct TcpStream {
     pub(crate) pair: SocketPair,
     notify: Arc<Notify>,
     read_fut: Option<ReusableBoxFuture<'static, ()>>,
+    /// FIN received, closed for read
+    is_closed: bool,
+    /// Shutdown initiated, FIN sent, closed for write
+    is_shutdown: bool,
 }
 
 impl TcpStream {
@@ -31,6 +35,8 @@ impl TcpStream {
             pair,
             notify,
             read_fut: None,
+            is_closed: false,
+            is_shutdown: false,
         }
     }
 
@@ -59,13 +65,18 @@ impl TcpStream {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
+        if self.is_closed || buf.capacity() == 0 {
+            return Poll::Ready(Ok(()));
+        }
+
         let read_fut = match self.read_fut.as_mut() {
             Some(fut) => fut,
             None => {
                 // fast path if we can recv immediately
                 let maybe = Self::recv(self.pair, buf);
                 if let Some(res) = maybe {
-                    return Poll::Ready(res);
+                    self.is_closed = res == 0;
+                    return Poll::Ready(Ok(()));
                 }
 
                 let notify = Arc::clone(&self.notify);
@@ -87,31 +98,72 @@ impl TcpStream {
             read_fut.set(async move { notify.notified().await });
 
             match Self::recv(self.pair, buf) {
-                Some(res) => return Poll::Ready(res),
+                Some(res) => {
+                    self.is_closed = res == 0;
+                    return Poll::Ready(Ok(()));
+                }
                 _ => ready!(read_fut.poll(cx)),
             }
         }
     }
 
-    fn recv(pair: SocketPair, buf: &mut ReadBuf<'_>) -> Option<io::Result<()>> {
+    fn recv(pair: SocketPair, buf: &mut ReadBuf<'_>) -> Option<usize> {
         match World::current(|world| world.recv_on(pair)) {
-            Some(seg) => match seg {
-                Segment::Data(bytes) => {
-                    buf.put_slice(bytes.as_ref());
-                    return Some(Ok(()));
-                }
-            },
+            Some(seg) => {
+                let bytes = match seg {
+                    Segment::Data(bytes) => bytes,
+                    Segment::Fin => Bytes::new(), // EOF == 0 bytes
+                };
+
+                buf.put_slice(bytes.as_ref());
+                return Some(bytes.len());
+            }
             _ => None,
         }
     }
 
     fn poll_write_priv(&self, buf: &[u8]) -> Poll<Result<usize, io::Error>> {
-        World::current(|world| {
+        if self.is_shutdown {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "Broken pipe",
+            )));
+        }
+
+        let res = World::current(|world| {
             let bytes = Bytes::copy_from_slice(buf);
-            world.embark_on(self.pair, Segment::Data(bytes))
+            world
+                .embark_on(self.pair, Segment::Data(bytes))
+                .then(|| buf.len())
+                .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "Broken pipe"))
         });
 
-        Poll::Ready(Ok(buf.len()))
+        Poll::Ready(res)
+    }
+
+    fn poll_shutdown_priv(&mut self) -> Poll<Result<(), io::Error>> {
+        if self.is_shutdown {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "Socket is not connected",
+            )));
+        }
+
+        World::current(|world| {
+            world.embark_on(self.pair, Segment::Fin);
+            self.is_shutdown = true;
+        });
+
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl Drop for TcpStream {
+    fn drop(&mut self) {
+        World::current_if_set(|world| {
+            world.embark_on(self.pair, Segment::Fin);
+            world.current_host_mut().disconnect(self.pair)
+        })
     }
 }
 
@@ -138,7 +190,10 @@ impl AsyncWrite for TcpStream {
         Poll::Ready(Ok(()))
     }
 
-    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
-        unimplemented!("shutdown is not implemented yet")
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Result<(), io::Error>> {
+        self.poll_shutdown_priv()
     }
 }

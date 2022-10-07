@@ -227,7 +227,10 @@ impl World {
     }
 
     /// Embark a segment from the currently executing host to `pair`'s peer.
-    pub(crate) fn embark_on(&mut self, pair: SocketPair, segment: Segment) {
+    ///
+    /// Returns `true` if the segment was enqueued, otherwise `false` if the
+    /// connection has been disconnected.
+    pub(crate) fn embark_on(&mut self, pair: SocketPair, segment: Segment) -> bool {
         let host = self.current_host_mut();
         let dst = pair.peer.host;
         let elapsed = host.elapsed();
@@ -247,7 +250,7 @@ impl World {
                 self.log
                     .send(&self.dns, dot, elapsed, dst, delay, false, &segment);
 
-                self.hosts[&pair.peer.host].embark_on(pair.flip(), delay, segment);
+                self.hosts[&pair.peer.host].embark_on(pair.flip(), delay, segment)
             }
             _ => unimplemented!("Drop is not supported yet"),
         }

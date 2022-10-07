@@ -185,6 +185,10 @@ impl Host {
         self.connections[&pair].notify.clone()
     }
 
+    pub(crate) fn disconnect(&mut self, pair: SocketPair) {
+        self.connections.remove(&pair);
+    }
+
     pub(crate) fn embark(
         &mut self,
         src: version::Dot,
@@ -210,20 +214,24 @@ impl Host {
         pair: SocketPair,
         delay: Option<Duration>,
         segment: Segment,
-    ) {
-        let inbox = self.connections.get_mut(&pair).expect("no connection");
+    ) -> bool {
+        match self.connections.get_mut(&pair) {
+            Some(inbox) => {
+                let instructions = match delay {
+                    Some(d) => DeliveryInstructions::DeliverAt(self.now + d),
+                    None => DeliveryInstructions::ExplicitlyHeld,
+                };
 
-        let instructions = match delay {
-            Some(d) => DeliveryInstructions::DeliverAt(self.now + d),
-            None => DeliveryInstructions::ExplicitlyHeld,
-        };
+                inbox.deque.push_back(StreamEnvelope {
+                    instructions,
+                    segment,
+                });
 
-        inbox.deque.push_back(StreamEnvelope {
-            instructions,
-            segment,
-        });
-
-        inbox.notify.notify_one();
+                inbox.notify.notify_one();
+                true
+            }
+            None => false,
+        }
     }
 
     pub(crate) fn recv(&mut self) -> (Option<Envelope>, Rc<Notify>) {

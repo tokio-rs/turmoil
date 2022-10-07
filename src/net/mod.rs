@@ -68,12 +68,15 @@ pub(crate) struct StreamEnvelope {
 #[derive(Debug)]
 pub(crate) enum Segment {
     Data(Bytes),
+    // Rst,
+    Fin,
 }
 
 impl Message for Segment {
     fn write_json(&self, dst: &mut dyn std::io::Write) {
         match self {
             Segment::Data(_) => write!(dst, "Data").unwrap(),
+            Segment::Fin => write!(dst, "Fin").unwrap(),
         }
     }
 }

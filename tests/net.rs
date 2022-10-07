@@ -403,3 +403,83 @@ fn drop_listener_with_non_empty_queue() -> turmoil::Result {
 
     sim.run()
 }
+
+#[test]
+fn hangup() -> turmoil::Result {
+    let mut sim = Builder::new().build();
+
+    sim.client("server", async move {
+        let listener = net::TcpListener::bind().await?;
+        let (mut s, _) = listener.accept().await?;
+
+        let mut buf = [0; 8];
+        assert!(matches!(s.read(&mut buf).await, Ok(0)));
+        // Read again to ensure EOF
+        assert!(matches!(s.read(&mut buf).await, Ok(0)));
+
+        // This diverges from reality (tokio::net) in that the socket may still
+        // be writable for a period of time due to the FIN-ACK packets flying in
+        // both directions, which we ignore today. The single host execution
+        // also makes this worse as the peer has already sent a FIN and
+        // disconnected the link. We plan to decouple host and network, which
+        // make fully implementing this much simpler.
+        assert_error_kind(s.write_u8(1).await, io::ErrorKind::BrokenPipe);
+
+        Ok(())
+    });
+
+    sim.client("client", async move {
+        let s = net::TcpStream::connect("server").await?;
+
+        drop(s);
+
+        Ok(())
+    });
+
+    sim.run()
+}
+
+#[test]
+fn shutdown_write() -> turmoil::Result {
+    let mut sim = Builder::new().build();
+
+    sim.client("server", async move {
+        let listener = net::TcpListener::bind().await?;
+        let (mut s, _) = listener.accept().await?;
+
+        for i in 1..=3 {
+            assert_eq!(i, s.read_u8().await?);
+        }
+
+        let mut buf = [0; 8];
+        assert!(matches!(s.read(&mut buf).await, Ok(0)));
+
+        for i in 1..=3 {
+            s.write_u8(i).await?;
+        }
+
+        Ok(())
+    });
+
+    sim.client("client", async move {
+        let mut s = net::TcpStream::connect("server").await?;
+
+        for i in 1..=3 {
+            s.write_u8(i).await?;
+        }
+
+        s.shutdown().await?;
+
+        assert_error_kind(s.shutdown().await, io::ErrorKind::NotConnected);
+        assert_error_kind(s.write_u8(1).await, io::ErrorKind::BrokenPipe);
+
+        // Ensure the other half is still open
+        for i in 1..=3 {
+            assert_eq!(i, s.read_u8().await?);
+        }
+
+        Ok(())
+    });
+
+    sim.run()
+}
