@@ -61,12 +61,6 @@ impl World {
         self.hosts.get(&addr).expect("host missing")
     }
 
-    /// Return a mutable reference to the currently executing host.
-    pub(crate) fn current_host_mut(&mut self) -> &mut Host {
-        let addr = self.current.expect("current host missing");
-        self.hosts.get_mut(&addr).expect("host missing")
-    }
-
     pub(crate) fn lookup(&mut self, host: impl ToSocketAddr) -> SocketAddr {
         self.dns.lookup(host)
     }
@@ -112,13 +106,9 @@ impl World {
     /// This begins the message's journey, queuing it on the destination inbox,
     /// but it may still be "on the network" depending on the current toplogy.
     pub(crate) fn embark(&mut self, dst: SocketAddr, message: Box<dyn Message>) {
-        let host = self.current_host_mut();
+        let src = self.current_host().addr;
 
-        // Log takes a message ref, so we bump here to emit the correct value
-        // before embarking.
-        let dot = host.bump();
-
-        match self.topology.embark_one(&mut self.rng, dot.host, dst) {
+        match self.topology.embark_one(&mut self.rng, src, dst) {
             it @ Embark::Delay(_) | it @ Embark::Hold => {
                 let delay = if let Embark::Delay(d) = it {
                     Some(d)
@@ -126,7 +116,7 @@ impl World {
                     None
                 };
 
-                self.hosts[&dst].embark(dot, delay, message);
+                self.hosts[&dst].embark(src, delay, message);
             }
             _ => {}
         }

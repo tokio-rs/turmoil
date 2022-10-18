@@ -23,7 +23,7 @@ pub async fn recv<M: Message>() -> (M, SocketAddr) {
 
         if let Some(envelope) = maybe_envelope {
             let message = message::downcast::<M>(envelope.message);
-            return (message, envelope.src.host);
+            return (message, envelope.src);
         }
 
         notify.notified().await;

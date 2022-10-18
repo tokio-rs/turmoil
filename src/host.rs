@@ -1,5 +1,5 @@
 use crate::envelope::DeliveryInstructions;
-use crate::{version, Envelope, Message};
+use crate::{Envelope, Message};
 
 use indexmap::IndexMap;
 use std::collections::VecDeque;
@@ -30,10 +30,6 @@ pub(crate) struct Host {
     pub(crate) now: Instant,
 
     _epoch: Instant,
-
-    /// Current host version. This is incremented each time a network operation
-    /// occurs.
-    pub(crate) version: u64,
 }
 
 impl Host {
@@ -44,7 +40,6 @@ impl Host {
             notify,
             now,
             _epoch: now,
-            version: 0,
         }
     }
 
@@ -53,29 +48,9 @@ impl Host {
         self.now - self._epoch
     }
 
-    /// Bump the version for this host and return a dot.
-    ///
-    /// Called when a host establishes a new connection with a remote peer.
-    pub(crate) fn bump(&mut self) -> version::Dot {
-        self.bump_version();
-        self.dot()
-    }
-
-    fn bump_version(&mut self) {
-        self.version += 1;
-    }
-
-    /// Returns a dot for the host at its current version
-    pub(crate) fn dot(&self) -> version::Dot {
-        version::Dot {
-            host: self.addr,
-            version: self.version,
-        }
-    }
-
     pub(crate) fn embark(
         &mut self,
-        src: version::Dot,
+        src: SocketAddr,
         delay: Option<Duration>,
         message: Box<dyn Message>,
     ) {
@@ -84,7 +59,7 @@ impl Host {
             None => DeliveryInstructions::ExplicitlyHeld,
         };
 
-        self.inbox.entry(src.host).or_default().push_back(Envelope {
+        self.inbox.entry(src).or_default().push_back(Envelope {
             src,
             instructions,
             message,
@@ -103,9 +78,7 @@ impl Host {
                     instructions: DeliveryInstructions::DeliverAt(time),
                     ..
                 }) if *time <= now => {
-                    let ret = (deque.pop_front(), notify);
-                    self.bump_version();
-                    return ret;
+                    return (deque.pop_front(), notify);
                 }
                 _ => continue,
             }
@@ -125,9 +98,7 @@ impl Host {
                 instructions: DeliveryInstructions::DeliverAt(time),
                 ..
             }) if *time <= now => {
-                let ret = (deque.pop_front(), notify);
-                self.bump_version();
-                ret
+                return (deque.pop_front(), notify);
             }
             _ => (None, notify),
         }

@@ -40,8 +40,6 @@ pub use sim::Sim;
 mod top;
 use top::Topology;
 
-mod version;
-
 mod world;
 use world::World;
 

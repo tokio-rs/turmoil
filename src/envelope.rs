@@ -1,11 +1,13 @@
-use crate::{version, Message};
+use std::net::SocketAddr;
+
+use crate::Message;
 
 use tokio::time::Instant;
 
 #[derive(Debug)]
 pub(crate) struct Envelope {
     /// Who sent the message
-    pub(crate) src: version::Dot,
+    pub(crate) src: SocketAddr,
 
     /// When (or if) to deliver the message
     pub(crate) instructions: DeliveryInstructions,
