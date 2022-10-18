@@ -22,7 +22,7 @@ impl Dns {
         addr.to_socket_addr(self)
     }
 
-    pub(crate) fn reverse(&self, addr: SocketAddr) -> &str {
+    pub(crate) fn _reverse(&self, addr: SocketAddr) -> &str {
         self.names
             .iter()
             .find(|(_, a)| **a == addr)

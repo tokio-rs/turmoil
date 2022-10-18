@@ -1,5 +1,5 @@
 use crate::top::Embark;
-use crate::{config, Dns, Envelope, Host, Log, Message, ToSocketAddr, Topology};
+use crate::{config, Dns, Envelope, Host, Message, ToSocketAddr, Topology};
 
 use indexmap::IndexMap;
 use rand::RngCore;
@@ -24,9 +24,6 @@ pub(crate) struct World {
     /// If set, this is the current host being executed.
     pub(crate) current: Option<SocketAddr>,
 
-    /// Handle to the logger
-    pub(crate) log: Log,
-
     /// Random number generator used for all decisions. To make execution
     /// determinstic, reuse the same seed.
     rng: Box<dyn RngCore>,
@@ -36,13 +33,12 @@ scoped_thread_local!(static CURRENT: RefCell<World>);
 
 impl World {
     /// Initialize a new world.
-    pub(crate) fn new(link: config::Link, log: Log, rng: Box<dyn RngCore>) -> World {
+    pub(crate) fn new(link: config::Link, rng: Box<dyn RngCore>) -> World {
         World {
             hosts: IndexMap::new(),
             topology: Topology::new(link),
             dns: Dns::new(),
             current: None,
-            log,
             rng,
         }
     }
@@ -69,11 +65,6 @@ impl World {
     pub(crate) fn current_host_mut(&mut self) -> &mut Host {
         let addr = self.current.expect("current host missing");
         self.hosts.get_mut(&addr).expect("host missing")
-    }
-
-    /// Return a reference to the host at `addr`.
-    pub(crate) fn host(&self, addr: SocketAddr) -> &Host {
-        self.hosts.get(&addr).expect("host missing")
     }
 
     pub(crate) fn lookup(&mut self, host: impl ToSocketAddr) -> SocketAddr {
@@ -122,7 +113,6 @@ impl World {
     /// but it may still be "on the network" depending on the current toplogy.
     pub(crate) fn embark(&mut self, dst: SocketAddr, message: Box<dyn Message>) {
         let host = self.current_host_mut();
-        let elapsed = host.elapsed();
 
         // Log takes a message ref, so we bump here to emit the correct value
         // before embarking.
@@ -136,15 +126,9 @@ impl World {
                     None
                 };
 
-                self.log
-                    .send(&self.dns, dot, elapsed, dst, delay, false, &*message);
-
                 self.hosts[&dst].embark(dot, delay, message);
             }
-            Embark::Drop => {
-                self.log
-                    .send(&self.dns, dot, elapsed, dst, None, true, &*message);
-            }
+            _ => {}
         }
     }
 
@@ -152,28 +136,14 @@ impl World {
     pub(crate) fn recv(&mut self) -> (Option<Envelope>, Rc<Notify>) {
         let addr = self.current_host().addr;
         let host = &mut self.hosts[&addr];
-        let ret = host.recv();
-
-        if let Some(Envelope { src, message, .. }) = &ret.0 {
-            self.log
-                .recv(&self.dns, host.dot(), host.elapsed(), *src, &**message);
-        }
-
-        ret
+        host.recv()
     }
 
     /// Receive a message on the currently executing host from a `peer`.
     pub(crate) fn recv_from(&mut self, peer: SocketAddr) -> (Option<Envelope>, Rc<Notify>) {
         let addr = self.current_host().addr;
         let host = &mut self.hosts[&addr];
-        let ret = host.recv_from(peer);
-
-        if let Some(Envelope { src, message, .. }) = &ret.0 {
-            self.log
-                .recv(&self.dns, host.dot(), host.elapsed(), *src, &**message);
-        }
-
-        ret
+        host.recv_from(peer)
     }
 
     /// Tick the host at `addr` to `now`.

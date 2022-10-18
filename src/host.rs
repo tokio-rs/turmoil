@@ -29,7 +29,7 @@ pub(crate) struct Host {
     /// Current instant at the host.
     pub(crate) now: Instant,
 
-    epoch: Instant,
+    _epoch: Instant,
 
     /// Current host version. This is incremented each time a network operation
     /// occurs.
@@ -43,14 +43,14 @@ impl Host {
             inbox: IndexMap::new(),
             notify,
             now,
-            epoch: now,
+            _epoch: now,
             version: 0,
         }
     }
 
     /// Returns how long the host has been executing for in virtual time
-    pub(crate) fn elapsed(&self) -> Duration {
-        self.now - self.epoch
+    pub(crate) fn _elapsed(&self) -> Duration {
+        self.now - self._epoch
     }
 
     /// Bump the version for this host and return a dot.
