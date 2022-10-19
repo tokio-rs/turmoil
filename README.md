@@ -32,33 +32,37 @@ turmoil = "0.2"
 Next, create a test file and add a test:
 
 ```rust
-use turmoil::{net, Builder};
+use std::net::{IpAddr, Ipv4Addr};
 
-#[derive(Debug)]
-struct Echo(String);
+use turmoil::{lookup, net, Builder};
 
-impl turmoil::Message for Echo {
-    fn write_json(&self, _dst: &mut dyn std::io::Write) {
-        unimplemented!()
-    }
-}
+let port = 1234;
+let unspecified = IpAddr::from(Ipv4Addr::UNSPECIFIED);
 
 let mut sim = Builder::new().build();
 
 // register a host
-sim.host("server", || async {
+sim.host("server", || async move {
+    let sock = net::UdpSocket::bind((unspecified, port)).await.unwrap();
+
     loop {
-        let (msg, src) = net::recv::<Echo>().await;
-        net::send(src, msg);
+        let mut buf = vec![0; 12];
+        let (_, origin) = sock.recv_from(&mut buf).await.unwrap();
+
+        let _ = sock.send_to(&buf, origin).await;
     }
 });
 
 // register a client (this is the test code)
-sim.client("client", async {
-    net::send("server", Echo("hello, server!".to_string()));
+sim.client("client", async move {
+    let sock = net::UdpSocket::bind((unspecified, port)).await?;
 
-    let (echo, _) = net::recv::<Echo>().await;
-    assert_eq!("hello, server!", echo.0);
+    let server_addr = lookup("server");
+    sock.send_to(b"hello, world", (server_addr, port)).await?;
+
+    let mut buf = vec![0; 12];
+    let _ = sock.recv_from(&mut buf).await?;
+    assert_eq!(b"hello, world", &buf[..]);
 
     Ok(())
 });
