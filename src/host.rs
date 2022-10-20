@@ -1,8 +1,7 @@
-use crate::envelope::Protocol;
+use crate::envelope::{Datagram, Protocol};
 use crate::net::UdpSocket;
-use crate::Envelope;
+use crate::{trace, Envelope};
 
-use bytes::Bytes;
 use indexmap::IndexMap;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
@@ -44,6 +43,8 @@ impl Host {
     pub(crate) fn receive_from_network(&mut self, envelope: Envelope) {
         let Envelope { src, dst, message } = envelope;
 
+        trace!("Delivered {} {} {}", dst, src, message);
+
         match message {
             Protocol::Udp(datagram) => self.udp.receive_from_network(src, dst, datagram),
         }
@@ -57,7 +58,7 @@ impl Host {
 /// Simulated UDP host software.
 pub(crate) struct Udp {
     /// Bound udp sockets
-    binds: IndexMap<SocketAddr, mpsc::UnboundedSender<(Bytes, SocketAddr)>>,
+    binds: IndexMap<SocketAddr, mpsc::UnboundedSender<(Datagram, SocketAddr)>>,
 }
 
 impl Udp {
@@ -77,7 +78,7 @@ impl Udp {
         Ok(UdpSocket::new(addr, rx))
     }
 
-    fn receive_from_network(&mut self, src: SocketAddr, dst: SocketAddr, datagram: Bytes) {
+    fn receive_from_network(&mut self, src: SocketAddr, dst: SocketAddr, datagram: Datagram) {
         match self.binds.get_mut(&dst) {
             Some(s) => {
                 let _ = s.send((datagram, src));

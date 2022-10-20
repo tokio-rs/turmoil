@@ -37,6 +37,8 @@ pub use sim::Sim;
 mod top;
 use top::Topology;
 
+mod tracing;
+
 mod world;
 use world::World;
 
