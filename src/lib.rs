@@ -3,7 +3,7 @@ mod readme;
 
 mod builder;
 
-use std::net::SocketAddr;
+use std::net::IpAddr;
 
 pub use builder::Builder;
 
@@ -12,7 +12,7 @@ use config::Config;
 
 mod dns;
 use dns::Dns;
-pub use dns::ToSocketAddr;
+pub use dns::{ToIpAddr, ToSocketAddr};
 
 mod envelope;
 use envelope::Envelope;
@@ -22,9 +22,6 @@ pub use error::Result;
 
 mod host;
 use host::Host;
-
-mod message;
-pub use message::Message;
 
 pub mod net;
 
@@ -43,17 +40,17 @@ use top::Topology;
 mod world;
 use world::World;
 
-/// Lookup a socket address by host name.
+/// Lookup an ip address by host name.
 ///
 /// Must be called from within a Turmoil simulation.
-pub fn lookup(addr: impl ToSocketAddr) -> SocketAddr {
+pub fn lookup(addr: impl ToIpAddr) -> IpAddr {
     World::current(|world| world.lookup(addr))
 }
 
 /// Hold messages two hosts, until [`release`] is called.
 ///
 /// Must be called from within a Turmoil simulation.
-pub fn hold(a: impl ToSocketAddr, b: impl ToSocketAddr) {
+pub fn hold(a: impl ToIpAddr, b: impl ToIpAddr) {
     World::current(|world| {
         let a = world.lookup(a);
         let b = world.lookup(b);
@@ -65,7 +62,7 @@ pub fn hold(a: impl ToSocketAddr, b: impl ToSocketAddr) {
 /// The opposite of [`hold`]. All held messages are immediately delivered.
 ///
 /// Must be called from within a Turmoil simulation.
-pub fn release(a: impl ToSocketAddr, b: impl ToSocketAddr) {
+pub fn release(a: impl ToIpAddr, b: impl ToIpAddr) {
     World::current(|world| {
         let a = world.lookup(a);
         let b = world.lookup(b);
@@ -78,7 +75,7 @@ pub fn release(a: impl ToSocketAddr, b: impl ToSocketAddr) {
 /// dropped.
 ///
 /// Must be called from within a Turmoil simulation.
-pub fn partition(a: impl ToSocketAddr, b: impl ToSocketAddr) {
+pub fn partition(a: impl ToIpAddr, b: impl ToIpAddr) {
     World::current(|world| {
         let a = world.lookup(a);
         let b = world.lookup(b);
@@ -91,7 +88,7 @@ pub fn partition(a: impl ToSocketAddr, b: impl ToSocketAddr) {
 /// delivered.
 ///
 /// Must be called from within a Turmoil simulation.
-pub fn repair(a: impl ToSocketAddr, b: impl ToSocketAddr) {
+pub fn repair(a: impl ToIpAddr, b: impl ToIpAddr) {
     World::current(|world| {
         let a = world.lookup(a);
         let b = world.lookup(b);

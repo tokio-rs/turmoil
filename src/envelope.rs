@@ -1,23 +1,15 @@
 use std::net::SocketAddr;
 
-use crate::Message;
-
-use tokio::time::Instant;
+use bytes::Bytes;
 
 #[derive(Debug)]
 pub(crate) struct Envelope {
-    /// Who sent the message
     pub(crate) src: SocketAddr,
-
-    /// When (or if) to deliver the message
-    pub(crate) instructions: DeliveryInstructions,
-
-    /// Message value
-    pub(crate) message: Box<dyn Message>,
+    pub(crate) dst: SocketAddr,
+    pub(crate) message: Protocol,
 }
 
 #[derive(Debug)]
-pub(crate) enum DeliveryInstructions {
-    ExplicitlyHeld,
-    DeliverAt(Instant),
+pub(crate) enum Protocol {
+    Udp(Bytes),
 }

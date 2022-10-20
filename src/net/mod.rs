@@ -10,4 +10,4 @@ mod stream;
 pub use stream::TcpStream;
 
 mod udp;
-pub use udp::{recv, recv_from, send};
+pub use udp::UdpSocket;

@@ -1,11 +1,10 @@
-use crate::{Config, Result, Role, Rt, ToSocketAddr, World};
+use crate::{Config, Result, Role, Rt, ToIpAddr, World};
 
 use indexmap::IndexMap;
 use std::cell::RefCell;
 use std::future::Future;
-use std::net::SocketAddr;
-use std::rc::Rc;
-use tokio::sync::Notify;
+use std::net::IpAddr;
+use std::ops::DerefMut;
 use tokio::time::Duration;
 
 /// Network simulation
@@ -19,7 +18,7 @@ pub struct Sim<'a> {
     world: RefCell<World>,
 
     /// Per simulated host runtimes
-    rts: IndexMap<SocketAddr, Role<'a>>,
+    rts: IndexMap<IpAddr, Role<'a>>,
 }
 
 impl<'a> Sim<'a> {
@@ -32,7 +31,7 @@ impl<'a> Sim<'a> {
     }
 
     /// Register a client with the simulation.
-    pub fn client<F>(&mut self, addr: impl ToSocketAddr, client: F)
+    pub fn client<F>(&mut self, addr: impl ToIpAddr, client: F)
     where
         F: Future<Output = Result> + 'static,
     {
@@ -42,10 +41,9 @@ impl<'a> Sim<'a> {
 
         {
             let world = RefCell::get_mut(&mut self.world);
-            let notify = Rc::new(Notify::new());
 
             // Register host state with the world
-            world.register(addr, epoch, notify.clone());
+            world.register(addr, epoch);
         }
 
         let handle = World::enter(&self.world, || rt.with(|| tokio::task::spawn_local(client)));
@@ -59,7 +57,7 @@ impl<'a> Sim<'a> {
     /// [`Sim::client`] which just takes a future. The reason for this is we
     /// might restart the host, and so need to be able to call the future
     /// multiple times.
-    pub fn host<F, Fut>(&mut self, addr: impl ToSocketAddr, host: F)
+    pub fn host<F, Fut>(&mut self, addr: impl ToIpAddr, host: F)
     where
         F: Fn() -> Fut + 'a,
         Fut: Future<Output = ()> + 'static,
@@ -70,10 +68,9 @@ impl<'a> Sim<'a> {
 
         {
             let world = RefCell::get_mut(&mut self.world);
-            let notify = Rc::new(Notify::new());
 
             // Register host state with the world
-            world.register(addr, epoch, notify.clone());
+            world.register(addr, epoch);
         }
 
         World::enter(&self.world, || {
@@ -87,54 +84,41 @@ impl<'a> Sim<'a> {
 
     /// Crash a host. Nothing will be running on the host after this method. You
     /// can use [`Sim::bounce`] to start the host up again.
-    pub fn crash(&mut self, addr: impl ToSocketAddr) {
-        let h = self.world.borrow_mut().lookup(addr);
-        let rt = self.rts.get_mut(&h).expect("missing host");
-        match rt {
+    pub fn crash(&mut self, addr: impl ToIpAddr) {
+        self.run_with_host(addr, |rt| match rt {
             Role::Client { .. } => panic!("can only bounce hosts, not clients"),
             Role::Simulated { rt, .. } => {
                 rt.cancel_tasks();
             }
-        }
+        });
     }
 
     /// Bounce a host. The software is restarted.
-    // TODO: Should the host's version be bumped or reset?
-    pub fn bounce(&mut self, addr: impl ToSocketAddr) {
-        let h = self.world.borrow_mut().lookup(addr);
-        let rt = self.rts.get_mut(&h).expect("missing host");
-        match rt {
+    pub fn bounce(&mut self, addr: impl ToIpAddr) {
+        self.run_with_host(addr, |rt| match rt {
             Role::Client { .. } => panic!("can only bounce hosts, not clients"),
             Role::Simulated { rt, software } => {
                 rt.cancel_tasks();
-                World::enter(&self.world, || {
-                    rt.with(|| tokio::task::spawn_local(software()));
-                });
+                rt.with(|| tokio::task::spawn_local(software()));
             }
-        }
+        });
     }
 
-    /// Lookup a socket address by host name
-    pub fn lookup(&self, addr: impl ToSocketAddr) -> SocketAddr {
+    // Run `f` with the host at `addr` set on the world.
+    fn run_with_host(&mut self, addr: impl ToIpAddr, f: impl FnOnce(&mut Role) -> ()) {
+        let h = self.world.borrow_mut().lookup(addr);
+        let rt = self.rts.get_mut(&h).expect("missing host");
+
+        self.world.borrow_mut().current = Some(h);
+
+        World::enter(&self.world, || f(rt));
+
+        self.world.borrow_mut().current = None;
+    }
+
+    /// Lookup an ip address by host name.
+    pub fn lookup(&self, addr: impl ToIpAddr) -> IpAddr {
         self.world.borrow_mut().lookup(addr)
-    }
-
-    // Introduce a full network partition between two hosts
-    pub fn partition(&self, a: impl ToSocketAddr, b: impl ToSocketAddr) {
-        let mut world = self.world.borrow_mut();
-        let a = world.lookup(a);
-        let b = world.lookup(b);
-
-        world.partition(a, b);
-    }
-
-    // Repair a partition between two hosts
-    pub fn repair(&self, a: impl ToSocketAddr, b: impl ToSocketAddr) {
-        let mut world = self.world.borrow_mut();
-        let a = world.lookup(a);
-        let b = world.lookup(b);
-
-        world.repair(a, b);
     }
 
     /// Set the max message latency
@@ -147,8 +131,8 @@ impl<'a> Sim<'a> {
 
     pub fn set_link_max_message_latency(
         &self,
-        a: impl ToSocketAddr,
-        b: impl ToSocketAddr,
+        a: impl ToIpAddr,
+        b: impl ToIpAddr,
         value: Duration,
     ) {
         let mut world = self.world.borrow_mut();
@@ -173,7 +157,7 @@ impl<'a> Sim<'a> {
         self.world.borrow_mut().topology.set_fail_rate(value);
     }
 
-    pub fn set_link_fail_rate(&mut self, a: impl ToSocketAddr, b: impl ToSocketAddr, value: f64) {
+    pub fn set_link_fail_rate(&mut self, a: impl ToIpAddr, b: impl ToIpAddr, value: f64) {
         let mut world = self.world.borrow_mut();
         let a = world.lookup(a);
         let b = world.lookup(b);
@@ -198,9 +182,23 @@ impl<'a> Sim<'a> {
             let mut is_finished = true;
             let mut finished = vec![];
 
+            // Tick the networking, processing messages. This is done before
+            // ticking any other runtime, as they might be waiting on network
+            // IO. (It also might be waiting on something else, such as time.)
+            self.world.borrow_mut().topology.tick_by(tick);
+
             for (&addr, rt) in self.rts.iter() {
-                // Set the current host (see method docs)
-                self.world.borrow_mut().current = Some(addr);
+                {
+                    let mut world = self.world.borrow_mut();
+                    // We need to move deliverable messages off the network and
+                    // into the dst host. This requires two mutable borrows.
+                    let World {
+                        topology, hosts, ..
+                    } = world.deref_mut();
+                    topology.deliver_messages(hosts.get_mut(&addr).expect("missing host"));
+                    // Set the current host (see method docs)
+                    world.current = Some(addr);
+                }
 
                 let now = World::enter(&self.world, || rt.tick(tick));
 
@@ -244,9 +242,11 @@ impl<'a> Sim<'a> {
 
 #[cfg(test)]
 mod test {
-    use std::time::Duration;
+    use std::{rc::Rc, time::Duration};
 
-    use crate::Builder;
+    use tokio::sync::Semaphore;
+
+    use crate::{Builder, Result};
 
     #[test]
     fn client_error() {
@@ -270,5 +270,39 @@ mod test {
         });
 
         assert!(sim.run().is_err());
+    }
+
+    #[test]
+    fn multiple_clients_all_finish() -> Result {
+        let how_many = 3;
+        let tick_ms = 10;
+
+        // N = how_many runs, each with a different client finishing immediately
+        for run in 0..how_many {
+            let mut sim = Builder::new()
+                .tick_duration(Duration::from_millis(tick_ms))
+                .build();
+
+            let ct = Rc::new(Semaphore::new(how_many));
+
+            for client in 0..how_many {
+                let ct = ct.clone();
+
+                sim.client(format!("client-{}", client), async move {
+                    let ms = if run == client { 0 } else { 2 * tick_ms };
+                    tokio::time::sleep(Duration::from_millis(ms)).await;
+
+                    let p = ct.acquire().await?;
+                    p.forget();
+
+                    Ok(())
+                });
+            }
+
+            sim.run()?;
+            assert_eq!(0, ct.available_permits());
+        }
+
+        Ok(())
     }
 }
