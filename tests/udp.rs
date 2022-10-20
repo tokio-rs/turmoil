@@ -71,7 +71,6 @@ fn ping_pong() -> Result {
     sim.run()
 }
 
-#[ignore]
 #[test]
 fn recv_buf_is_clipped() -> Result {
     let mut sim = Builder::new().build();
