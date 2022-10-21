@@ -27,6 +27,7 @@ tokio = { version = "1.19.2", features = ["full"] }
 tokio-stream = "0.1.9"
 tokio-test = { version = "0.4.2" }
 tokio-util = "0.7.4"
+tracing = "0.1"
 
 [dev-dependencies]
 doc-comment = "0.3.3"

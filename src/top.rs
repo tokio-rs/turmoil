@@ -1,7 +1,7 @@
-use crate::config;
 use crate::envelope::{Envelope, Protocol};
 use crate::host::Host;
 use crate::rt::Rt;
+use crate::{config, trace};
 
 use indexmap::IndexMap;
 use rand::{Rng, RngCore};
@@ -221,8 +221,14 @@ impl Link {
                 let delay = self.delay(global_config.latency(), rand);
                 DeliveryStatus::DeliverAfter(self.now + delay)
             }
-            State::Hold => DeliveryStatus::Hold,
+            State::Hold => {
+                trace!("Hold {} {} {}", src, dst, message);
+
+                DeliveryStatus::Hold
+            }
             _ => {
+                trace!("Drop {} {} {}", src, dst, message);
+
                 return;
             }
         };

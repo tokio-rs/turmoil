@@ -1,5 +1,5 @@
 use crate::envelope::Protocol;
-use crate::{config, Dns, Host, ToIpAddr, Topology};
+use crate::{config, trace, Dns, Host, ToIpAddr, Topology};
 
 use indexmap::IndexMap;
 use rand::RngCore;
@@ -95,6 +95,8 @@ impl World {
             "already registered host for the given socket address"
         );
 
+        trace!("New {} @{}", self.dns.reverse(addr), addr);
+
         // Register links between the new host and all existing hosts
         for existing in self.hosts.keys() {
             self.topology.register(*existing, addr);
@@ -107,6 +109,8 @@ impl World {
     /// Send `message` from `src` to `dst`. Delivery is asynchronous and not
     /// guaranteed.
     pub(crate) fn send_message(&mut self, src: SocketAddr, dst: SocketAddr, message: Protocol) {
+        trace!("Send {} {} {}", src, dst, message);
+
         self.topology
             .enqueue_message(&mut self.rng, src, dst, message);
     }

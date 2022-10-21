@@ -26,12 +26,12 @@ impl Dns {
         addr.to_ip_addr(self)
     }
 
-    pub(crate) fn _reverse(&self, addr: IpAddr) -> &str {
+    pub(crate) fn reverse(&self, addr: IpAddr) -> &str {
         self.names
             .iter()
             .find(|(_, a)| **a == addr)
             .map(|(name, _)| name)
-            .expect("no hostname found for socket address")
+            .expect("no hostname found for ip address")
     }
 }
 
