@@ -31,7 +31,7 @@ impl Dns {
             .iter()
             .find(|(_, a)| **a == addr)
             .map(|(name, _)| name)
-            .expect("no hostname found for socket address")
+            .expect("no hostname found for ip address")
     }
 }
 
