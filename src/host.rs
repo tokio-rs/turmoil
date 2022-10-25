@@ -70,11 +70,12 @@ impl Host {
 
     /// Receive the `envelope` from the network.
     ///
-    /// Returns an optional message to be sent in response, such as a TCP RST.
+    /// Returns an Err if a message needs to be sent in response to a failed
+    /// delivery, e.g. TCP RST.
     // FIXME: This funkiness is necessary due to how message sending works. The
     // key problem is that the Host doesn't actually send messages, rather the
     // World is borrowed, and it sends.
-    pub(crate) fn receive_from_network(&mut self, envelope: Envelope) -> Option<Protocol> {
+    pub(crate) fn receive_from_network(&mut self, envelope: Envelope) -> Result<(), Protocol> {
         let Envelope { src, dst, message } = envelope;
 
         trace!(?dst, ?src, protocol = %message, "Delivered");
@@ -83,7 +84,7 @@ impl Host {
             Protocol::Tcp(segment) => self.tcp.receive_from_network(src, dst, segment),
             Protocol::Udp(datagram) => {
                 self.udp.receive_from_network(src, dst, datagram);
-                None
+                Ok(())
             }
         }
     }
@@ -239,7 +240,7 @@ impl Tcp {
         src: SocketAddr,
         dst: SocketAddr,
         segment: Segment,
-    ) -> Option<Protocol> {
+    ) -> Result<(), Protocol> {
         match segment {
             Segment::Syn(syn) => {
                 // If bound, queue the syn; else we drop the syn triggering
@@ -247,31 +248,23 @@ impl Tcp {
                 if let Some(b) = self.binds.get_mut(&dst) {
                     let _ = b.send((syn, src));
                 }
-
-                None
             }
             Segment::Data(seq, data) => match self.sockets.get_mut(&SocketPair::new(dst, src)) {
-                Some(sock) => {
-                    sock.buffer(seq, data);
-                    None
-                }
-                None => Some(Protocol::Tcp(Segment::Rst)),
+                Some(sock) => sock.buffer(seq, data),
+                None => return Err(Protocol::Tcp(Segment::Rst)),
             },
             Segment::Fin(seq) => match self.sockets.get_mut(&SocketPair::new(dst, src)) {
-                Some(sock) => {
-                    sock.buffer(seq, StreamData::eof());
-                    None
-                }
-                None => Some(Protocol::Tcp(Segment::Rst)),
+                Some(sock) => sock.buffer(seq, StreamData::eof()),
+                None => return Err(Protocol::Tcp(Segment::Rst)),
             },
             Segment::Rst => {
                 if let Some(_) = self.sockets.get(&SocketPair::new(dst, src)) {
                     self.sockets.remove(&SocketPair::new(dst, src)).unwrap();
                 }
-
-                None
             }
-        }
+        };
+
+        Ok(())
     }
 
     pub(crate) fn remove_stream(&mut self, pair: SocketPair) {

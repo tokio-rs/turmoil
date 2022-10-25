@@ -291,7 +291,7 @@ impl Link {
 
         for message in deliverable {
             let (src, dst) = (message.src, message.dst);
-            if let Some(message) = host.receive_from_network(message) {
+            if let Err(message) = host.receive_from_network(message) {
                 self.enqueue_message(global_config, rand, dst, src, message);
             }
         }

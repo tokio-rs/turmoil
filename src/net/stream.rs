@@ -5,10 +5,9 @@ use std::{
 };
 
 use bytes::{Buf, Bytes};
-use futures::channel::oneshot;
 use tokio::{
     io::{AsyncRead, AsyncWrite, ReadBuf},
-    sync::mpsc,
+    sync::{mpsc, oneshot},
 };
 
 use crate::{

@@ -1,7 +1,7 @@
 use std::{fmt::Display, net::SocketAddr};
 
 use bytes::Bytes;
-use futures::channel::oneshot;
+use tokio::sync::oneshot;
 
 #[derive(Debug)]
 pub(crate) struct Envelope {
