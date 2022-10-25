@@ -9,6 +9,8 @@ use crate::{
 use std::{cell::RefCell, cmp, io::Result, net::SocketAddr};
 
 /// A simulated UDP socket.
+///
+/// All methods must be called from a host within a Turmoil simulation.
 pub struct UdpSocket {
     local_addr: SocketAddr,
     rx: RefCell<mpsc::UnboundedReceiver<(Datagram, SocketAddr)>>,
@@ -29,13 +31,11 @@ impl UdpSocket {
     /// provided.
     ///
     /// Only 0.0.0.0 is currently supported.
-    ///
-    /// Must be called from a host within a turmoil simulation.
     pub async fn bind<A: ToSocketAddr>(addr: A) -> Result<UdpSocket> {
         World::current(|world| {
+            let mut addr = addr.to_socket_addr(&world.dns);
             let host = world.current_host_mut();
 
-            let mut addr = addr.to_socket_addr();
             if !addr.ip().is_unspecified() {
                 panic!("{} is not supported", addr);
             }
@@ -43,13 +43,7 @@ impl UdpSocket {
             // Unspecified -> host's IP
             addr.set_ip(host.addr);
 
-            let ret = host.udp.bind(addr);
-
-            if ret.is_ok() {
-                trace!("Bind {} UDP", addr);
-            }
-
-            ret
+            host.udp.bind(addr)
         })
     }
 
@@ -57,7 +51,7 @@ impl UdpSocket {
     /// number of bytes written.
     pub async fn send_to<A: ToSocketAddr>(&self, buf: &[u8], target: A) -> Result<usize> {
         World::current(|world| {
-            let dst = target.to_socket_addr();
+            let dst = target.to_socket_addr(&world.dns);
 
             world.send_message(
                 self.local_addr,
@@ -78,15 +72,12 @@ impl UdpSocket {
     pub async fn recv_from(&self, buf: &mut [u8]) -> Result<(usize, SocketAddr)> {
         let (datagram, origin) = self.rx.borrow_mut().recv().await.unwrap();
 
-        // Grab the trace before we mutate things
-        let trace = format!("Recv {} {} {}", self.local_addr, origin, datagram);
+        trace!(dst = ?self.local_addr, src = ?origin, protocol = %datagram, "Recv");
 
         let bytes = datagram.0;
         let limit = cmp::min(buf.len(), bytes.len());
 
         buf.as_mut().put(bytes.take(limit));
-
-        trace!("{}", trace);
 
         Ok((limit, origin))
     }
@@ -94,10 +85,6 @@ impl UdpSocket {
 
 impl Drop for UdpSocket {
     fn drop(&mut self) {
-        World::current_if_set(|world| {
-            world.current_host_mut().udp.unbind(self.local_addr);
-
-            trace!("Unbind {} UDP", self.local_addr)
-        });
+        World::current_if_set(|world| world.current_host_mut().udp.unbind(self.local_addr));
     }
 }

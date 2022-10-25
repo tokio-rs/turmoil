@@ -193,9 +193,12 @@ impl<'a> Sim<'a> {
                     // We need to move deliverable messages off the network and
                     // into the dst host. This requires two mutable borrows.
                     let World {
-                        topology, hosts, ..
+                        rng,
+                        topology,
+                        hosts,
+                        ..
                     } = world.deref_mut();
-                    topology.deliver_messages(hosts.get_mut(&addr).expect("missing host"));
+                    topology.deliver_messages(rng, hosts.get_mut(&addr).expect("missing host"));
                     // Set the current host (see method docs)
                     world.current = Some(addr);
                 }

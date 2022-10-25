@@ -32,37 +32,19 @@ turmoil = "0.2"
 Next, create a test file and add a test:
 
 ```rust
-use std::net::{IpAddr, Ipv4Addr};
-
-use turmoil::{lookup, net, Builder};
-
-let port = 1234;
-let unspecified = IpAddr::from(Ipv4Addr::UNSPECIFIED);
-
-let mut sim = Builder::new().build();
+let mut sim = turmoil::Builder::new().build();
 
 // register a host
 sim.host("server", || async move {
-    let sock = net::UdpSocket::bind((unspecified, port)).await.unwrap();
-
-    loop {
-        let mut buf = vec![0; 12];
-        let (_, origin) = sock.recv_from(&mut buf).await.unwrap();
-
-        let _ = sock.send_to(&buf, origin).await;
-    }
+    // host software goes here
 });
 
-// register a client (this is the test code)
+// register a client
 sim.client("client", async move {
-    let sock = net::UdpSocket::bind((unspecified, port)).await?;
+    // dns lookup for "server"
+    let addr = turmoil::lookup("server");
 
-    let server_addr = lookup("server");
-    sock.send_to(b"hello, world", (server_addr, port)).await?;
-
-    let mut buf = vec![0; 12];
-    let _ = sock.recv_from(&mut buf).await?;
-    assert_eq!(b"hello, world", &buf[..]);
+    // test code goes here
 
     Ok(())
 });
@@ -71,7 +53,7 @@ sim.client("client", async move {
 sim.run();
 ```
 
-For more examples, check out the [tests](tests) directory.
+For more examples (with simulated networking), check out the [tests](tests) directory.
 
 ## License
 

@@ -24,7 +24,7 @@ pub(crate) struct World {
 
     /// Random number generator used for all decisions. To make execution
     /// determinstic, reuse the same seed.
-    rng: Box<dyn RngCore>,
+    pub(crate) rng: Box<dyn RngCore>,
 }
 
 scoped_thread_local!(static CURRENT: RefCell<World>);
@@ -95,7 +95,7 @@ impl World {
             "already registered host for the given socket address"
         );
 
-        trace!("New {} @{}", self.dns.reverse(addr), addr);
+        trace!(hostname = ?self.dns.reverse(addr), ?addr, "New");
 
         // Register links between the new host and all existing hosts
         for existing in self.hosts.keys() {
@@ -109,8 +109,6 @@ impl World {
     /// Send `message` from `src` to `dst`. Delivery is asynchronous and not
     /// guaranteed.
     pub(crate) fn send_message(&mut self, src: SocketAddr, dst: SocketAddr, message: Protocol) {
-        trace!("Send {} {} {}", src, dst, message);
-
         self.topology
             .enqueue_message(&mut self.rng, src, dst, message);
     }

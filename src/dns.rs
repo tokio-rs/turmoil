@@ -11,7 +11,7 @@ pub trait ToIpAddr {
 }
 
 pub trait ToSocketAddr {
-    fn to_socket_addr(&self) -> SocketAddr;
+    fn to_socket_addr(&self, dns: &Dns) -> SocketAddr;
 }
 
 impl Dns {
@@ -61,14 +61,29 @@ impl ToIpAddr for IpAddr {
     }
 }
 
+impl ToSocketAddr for (String, u16) {
+    fn to_socket_addr(&self, dns: &Dns) -> SocketAddr {
+        (&self.0[..], self.1).to_socket_addr(dns)
+    }
+}
+
+impl<'a> ToSocketAddr for (&'a str, u16) {
+    fn to_socket_addr(&self, dns: &Dns) -> SocketAddr {
+        match dns.names.get(self.0) {
+            Some(ip) => (*ip, self.1).into(),
+            None => panic!("no hostname found for ip address"),
+        }
+    }
+}
+
 impl ToSocketAddr for SocketAddr {
-    fn to_socket_addr(&self) -> SocketAddr {
+    fn to_socket_addr(&self, _: &Dns) -> SocketAddr {
         *self
     }
 }
 
 impl ToSocketAddr for (IpAddr, u16) {
-    fn to_socket_addr(&self) -> SocketAddr {
+    fn to_socket_addr(&self, _: &Dns) -> SocketAddr {
         (*self).into()
     }
 }
