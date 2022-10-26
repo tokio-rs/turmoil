@@ -131,10 +131,10 @@ impl Topology {
     }
 
     // Move messages from any network links to the `dst` host.
-    pub(crate) fn deliver_messages(&mut self, dst: &mut Host) {
+    pub(crate) fn deliver_messages(&mut self, rand: &mut dyn RngCore, dst: &mut Host) {
         for (pair, link) in &mut self.links {
             if pair.0 == dst.addr || pair.1 == dst.addr {
-                link.deliver_messages(dst);
+                link.deliver_messages(&self.config, rand, dst);
             }
         }
     }
@@ -198,6 +198,8 @@ impl Link {
         dst: SocketAddr,
         message: Protocol,
     ) {
+        trace!(?src, ?dst, protocol = %message, "Send");
+
         self.rand_partition_or_repair(global_config, rand);
         self.enqueue(global_config, rand, src, dst, message);
         self.process_deliverables();
@@ -222,12 +224,12 @@ impl Link {
                 DeliveryStatus::DeliverAfter(self.now + delay)
             }
             State::Hold => {
-                trace!("Hold {} {} {}", src, dst, message);
+                trace!(?src, ?dst, protocol = %message, "Hold");
 
                 DeliveryStatus::Hold
             }
             _ => {
-                trace!("Drop {} {} {}", src, dst, message);
+                trace!(?src, ?dst, protocol = %message, "Drop");
 
                 return;
             }
@@ -274,9 +276,24 @@ impl Link {
     // FIXME: This implementation does not respect message delivery order. If
     // host A and host B are ordered (by addr), and B sends before A, then this
     // method will deliver A's message before B's.
-    fn deliver_messages(&mut self, dst: &mut Host) {
-        for message in self.deliverable.entry(dst.addr).or_default().drain(..) {
-            dst.receive_from_network(message)
+    fn deliver_messages(
+        &mut self,
+        global_config: &config::Link,
+        rand: &mut dyn RngCore,
+        host: &mut Host,
+    ) {
+        let deliverable = self
+            .deliverable
+            .entry(host.addr)
+            .or_default()
+            .drain(..)
+            .collect::<Vec<Envelope>>();
+
+        for message in deliverable {
+            let (src, dst) = (message.src, message.dst);
+            if let Err(message) = host.receive_from_network(message) {
+                self.enqueue_message(global_config, rand, dst, src, message);
+            }
         }
     }
 
