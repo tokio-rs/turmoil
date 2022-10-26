@@ -53,7 +53,7 @@ sim.client("client", async move {
 sim.run();
 ```
 
-See `ping_pong` in [udp.rs](tests/udp.rs) for a TCP example.
+See `ping_pong` in [udp.rs](tests/udp.rs) for a networking example.
 
 For more examples, check out the [tests](tests) directory.
 
