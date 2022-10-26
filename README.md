@@ -53,7 +53,9 @@ sim.client("client", async move {
 sim.run();
 ```
 
-For more examples (with simulated networking), check out the [tests](tests) directory.
+See `ping_pong` in [udp.rs](tests/udp.rs) for a TCP example.
+
+For more examples, check out the [tests](tests) directory.
 
 ## License
 

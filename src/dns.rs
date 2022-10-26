@@ -61,6 +61,7 @@ impl ToIpAddr for IpAddr {
     }
 }
 
+// Hostname and port
 impl ToSocketAddr for (String, u16) {
     fn to_socket_addr(&self, dns: &Dns) -> SocketAddr {
         (&self.0[..], self.1).to_socket_addr(dns)

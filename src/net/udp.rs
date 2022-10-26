@@ -13,14 +13,11 @@ use std::{cell::RefCell, cmp, io::Result, net::SocketAddr};
 /// All methods must be called from a host within a Turmoil simulation.
 pub struct UdpSocket {
     local_addr: SocketAddr,
-    rx: RefCell<mpsc::UnboundedReceiver<(Datagram, SocketAddr)>>,
+    rx: RefCell<mpsc::Receiver<(Datagram, SocketAddr)>>,
 }
 
 impl UdpSocket {
-    pub(crate) fn new(
-        local_addr: SocketAddr,
-        rx: mpsc::UnboundedReceiver<(Datagram, SocketAddr)>,
-    ) -> Self {
+    pub(crate) fn new(local_addr: SocketAddr, rx: mpsc::Receiver<(Datagram, SocketAddr)>) -> Self {
         Self {
             local_addr,
             rx: RefCell::new(rx),

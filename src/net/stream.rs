@@ -11,7 +11,8 @@ use tokio::{
 };
 
 use crate::{
-    envelope::{Protocol, Segment, StreamData, Syn},
+    envelope::{Protocol, Segment, Syn},
+    host::SequencedSegment,
     trace,
     world::World,
     ToSocketAddr,
@@ -25,7 +26,7 @@ use super::SocketPair;
 // TODO: implement split_into
 pub struct TcpStream {
     pair: SocketPair,
-    receiver: mpsc::UnboundedReceiver<StreamData>,
+    receiver: mpsc::Receiver<SequencedSegment>,
     /// EOF received
     is_closed: bool,
     /// FIN sent, closed for writes
@@ -33,7 +34,7 @@ pub struct TcpStream {
 }
 
 impl TcpStream {
-    pub(crate) fn new(pair: SocketPair, receiver: mpsc::UnboundedReceiver<StreamData>) -> Self {
+    pub(crate) fn new(pair: SocketPair, receiver: mpsc::Receiver<SequencedSegment>) -> Self {
         Self {
             pair,
             receiver,
@@ -75,12 +76,17 @@ impl TcpStream {
         }
 
         match ready!(self.receiver.poll_recv(cx)) {
-            Some(data) => {
-                trace!(dst = ?self.pair.local, src = ?self.pair.remote, protocol = %data, "Recv");
+            Some(seg) => {
+                trace!(dst = ?self.pair.local, src = ?self.pair.remote, protocol = %seg, "Recv");
 
-                let bytes = data.0.as_ref();
-                buf.put_slice(bytes);
-                self.is_closed = bytes.is_empty();
+                match seg {
+                    SequencedSegment::Data(bytes) => {
+                        buf.put_slice(bytes.as_ref());
+                    }
+                    SequencedSegment::Fin => {
+                        self.is_closed = true;
+                    }
+                }
 
                 Poll::Ready(Ok(()))
             }
@@ -108,7 +114,7 @@ impl TcpStream {
             let len = bytes.len();
 
             let seq = self.seq(world)?;
-            self.send(world, Segment::Data(seq, StreamData(bytes)));
+            self.send(world, Segment::Data(seq, bytes));
 
             Ok(len)
         });

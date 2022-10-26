@@ -11,14 +11,11 @@ use super::TcpStream;
 /// All methods must be called from a host within a Turmoil simulation.
 pub struct TcpListener {
     local_addr: SocketAddr,
-    receiver: RefCell<mpsc::UnboundedReceiver<(Syn, SocketAddr)>>,
+    receiver: RefCell<mpsc::Receiver<(Syn, SocketAddr)>>,
 }
 
 impl TcpListener {
-    pub(crate) fn new(
-        local_addr: SocketAddr,
-        receiver: mpsc::UnboundedReceiver<(Syn, SocketAddr)>,
-    ) -> Self {
+    pub(crate) fn new(local_addr: SocketAddr, receiver: mpsc::Receiver<(Syn, SocketAddr)>) -> Self {
         Self {
             local_addr,
             receiver: RefCell::new(receiver),

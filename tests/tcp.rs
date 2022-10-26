@@ -509,7 +509,7 @@ fn shutdown_write() -> Result {
 }
 
 #[test]
-fn read_with_no_capacity() -> Result {
+fn read_with_empty_buffer() -> Result {
     let mut sim = Builder::new().build();
 
     sim.client("server", async move {
