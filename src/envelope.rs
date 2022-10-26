@@ -23,7 +23,7 @@ pub(crate) struct Datagram(pub Bytes);
 ///
 /// We implement just enough to ensure fidelity and provide knobs for real world
 /// scenarios, but we skip a ton of complexity (e.g. checksums, flow control,
-/// etc) because said complexity isn't useful needed in tests.
+/// etc) because said complexity isn't useful in tests.
 #[derive(Debug)]
 pub(crate) enum Segment {
     Syn(Syn),
