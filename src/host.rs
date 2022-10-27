@@ -180,6 +180,9 @@ struct StreamSocket {
     next_send_seq: u64,
     recv_seq: u64,
     sender: mpsc::Sender<SequencedSegment>,
+    /// A simple reference counter for tracking read/write half drops. Once 0, the
+    /// socket may be removed from the host.
+    ref_ct: usize,
 }
 
 /// Stripped down version of [`Segment`] for delivery out to the application
@@ -208,6 +211,7 @@ impl StreamSocket {
             next_send_seq: 1,
             recv_seq: 0,
             sender: tx,
+            ref_ct: 2,
         };
 
         (sock, rx)
@@ -221,7 +225,9 @@ impl StreamSocket {
 
     // Buffer and re-order received segments by `seq` as the network may deliver
     // them out of order.
-    fn buffer(&mut self, seq: u64, segment: SequencedSegment) {
+    fn buffer(&mut self, seq: u64, segment: SequencedSegment) -> Result<(), Protocol> {
+        use mpsc::error::TrySendError::Closed;
+
         let exists = self.buf.insert(seq, segment);
 
         assert!(exists.is_none(), "duplicate segment {}", seq);
@@ -230,10 +236,13 @@ impl StreamSocket {
             self.recv_seq += 1;
 
             let segment = self.buf.remove(&self.recv_seq).unwrap();
-            self.sender
-                .try_send(segment)
-                .expect(&format!("unable to send to {}", self.local_addr));
+            self.sender.try_send(segment).map_err(|e| match e {
+                Closed(_) => Protocol::Tcp(Segment::Rst),
+                _ => todo!("{} socket buffer full", self.local_addr),
+            })?;
         }
+
+        Ok(())
     }
 }
 
@@ -310,11 +319,11 @@ impl Tcp {
                 }
             }
             Segment::Data(seq, data) => match self.sockets.get_mut(&SocketPair::new(dst, src)) {
-                Some(sock) => sock.buffer(seq, SequencedSegment::Data(data)),
+                Some(sock) => sock.buffer(seq, SequencedSegment::Data(data))?,
                 None => return Err(Protocol::Tcp(Segment::Rst)),
             },
             Segment::Fin(seq) => match self.sockets.get_mut(&SocketPair::new(dst, src)) {
-                Some(sock) => sock.buffer(seq, SequencedSegment::Fin),
+                Some(sock) => sock.buffer(seq, SequencedSegment::Fin)?,
                 None => return Err(Protocol::Tcp(Segment::Rst)),
             },
             Segment::Rst => {
@@ -327,10 +336,16 @@ impl Tcp {
         Ok(())
     }
 
-    pub(crate) fn remove_stream(&mut self, pair: SocketPair) {
-        let exists = self.sockets.remove(&pair);
+    pub(crate) fn close_stream_half(&mut self, pair: SocketPair) {
+        // Receiving a RST removes the socket, so it's possible that has occured
+        // when halfs of the stream drop.
+        if let Some(sock) = self.sockets.get_mut(&pair) {
+            sock.ref_ct -= 1;
 
-        assert!(exists.is_some(), "unknown socket {:?}", pair);
+            if sock.ref_ct == 0 {
+                self.sockets.remove(&pair).unwrap();
+            }
+        }
     }
 
     pub(crate) fn unbind(&mut self, addr: SocketAddr) {

@@ -561,3 +561,55 @@ fn write_zero_bytes() -> Result {
 
     sim.run()
 }
+
+#[test]
+fn split() -> Result {
+    let mut sim = Builder::new().build();
+
+    sim.client("server", async move {
+        let listener = bind().await;
+        let (mut s, _) = listener.accept().await?;
+
+        assert_eq!(1, s.read_u8().await?);
+
+        let mut buf = [0; 8];
+        assert!(matches!(s.read(&mut buf).await, Ok(0)));
+
+        s.write_u8(1).await?;
+
+        // accept to establish s1, s2, s3 below
+        listener.accept().await?;
+        listener.accept().await?;
+        listener.accept().await?;
+
+        Ok(())
+    });
+
+    sim.client("client", async move {
+        let s = TcpStream::connect(("server", PORT)).await?;
+
+        let (mut r, mut w) = s.into_split();
+
+        let h = tokio::spawn(async move { w.write_u8(1).await });
+
+        assert_eq!(1, r.read_u8().await?);
+        h.await??;
+
+        let s1 = TcpStream::connect(("server", PORT)).await?;
+        let s2 = TcpStream::connect(("server", PORT)).await?;
+        let s3 = TcpStream::connect(("server", PORT)).await?;
+
+        let (r1, w1) = s1.into_split();
+        let (r2, w2) = s2.into_split();
+
+        assert!(r1.reunite(w2).is_err());
+        assert!(w1.reunite(r2).is_err());
+
+        let (r3, w3) = s3.into_split();
+        r3.reunite(w3)?;
+
+        Ok(())
+    });
+
+    sim.run()
+}

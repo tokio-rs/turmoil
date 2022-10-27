@@ -3,13 +3,10 @@
 //! They mirror [tokio::net](https://docs.rs/tokio/latest/tokio/net/) to provide
 //! a high fidelity implementation.
 
-mod listener;
 use std::net::SocketAddr;
 
-pub use listener::TcpListener;
-
-mod stream;
-pub use stream::TcpStream;
+mod tcp;
+pub use tcp::{listener::TcpListener, stream::TcpStream};
 
 mod udp;
 pub use udp::UdpSocket;
