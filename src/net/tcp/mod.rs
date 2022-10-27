@@ -1,3 +1,6 @@
 pub(crate) mod listener;
-pub(crate) mod split_owned;
+
+mod split_owned;
+pub use split_owned::{OwnedReadHalf, OwnedWriteHalf};
+
 pub(crate) mod stream;

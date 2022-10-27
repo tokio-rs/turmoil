@@ -5,7 +5,7 @@
 
 use std::net::SocketAddr;
 
-mod tcp;
+pub mod tcp;
 pub use tcp::{listener::TcpListener, stream::TcpStream};
 
 mod udp;
