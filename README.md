@@ -26,7 +26,7 @@ Add this to your `Cargo.toml`.
 
 ```toml
 [dev-dependencies]
-turmoil = "0.2"
+turmoil = "0.3"
 ```
 
 Next, create a test file and add a test:
