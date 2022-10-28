@@ -2,9 +2,12 @@ use std::{io::Result, net::SocketAddr, sync::Arc};
 
 use tokio::sync::Notify;
 
-use crate::{net::SocketPair, trace, world::World, ToSocketAddr};
-
-use super::TcpStream;
+use crate::{
+    net::{SocketPair, TcpStream},
+    trace,
+    world::World,
+    ToSocketAddr,
+};
 
 /// A simulated TCP socket server, listening for connections.
 ///

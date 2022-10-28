@@ -1,6 +1,8 @@
 use std::{
+    fmt::Debug,
     io::{self, Result},
     pin::Pin,
+    sync::Arc,
     task::{ready, Context, Poll},
 };
 
@@ -13,33 +15,40 @@ use tokio::{
 use crate::{
     envelope::{Protocol, Segment, Syn},
     host::SequencedSegment,
+    net::SocketPair,
     trace,
     world::World,
     ToSocketAddr,
 };
 
-use super::SocketPair;
+use super::split_owned::{OwnedReadHalf, OwnedWriteHalf};
 
 /// A simulated TCP stream between a local and a remote socket.
 ///
 /// All methods must be called from a host within a Turmoil simulation.
-// TODO: implement split_into
+#[derive(Debug)]
 pub struct TcpStream {
-    pair: SocketPair,
-    receiver: mpsc::Receiver<SequencedSegment>,
-    /// EOF received
-    is_closed: bool,
-    /// FIN sent, closed for writes
-    is_shutdown: bool,
+    read_half: ReadHalf,
+    write_half: WriteHalf,
 }
 
 impl TcpStream {
     pub(crate) fn new(pair: SocketPair, receiver: mpsc::Receiver<SequencedSegment>) -> Self {
-        Self {
-            pair,
+        let pair = Arc::new(pair);
+        let read_half = ReadHalf {
+            pair: pair.clone(),
             receiver,
             is_closed: false,
+        };
+
+        let write_half = WriteHalf {
+            pair,
             is_shutdown: false,
+        };
+
+        Self {
+            read_half,
+            write_half,
         }
     }
 
@@ -70,6 +79,40 @@ impl TcpStream {
         Ok(TcpStream::new(pair, rx))
     }
 
+    pub(crate) fn reunite(read_half: ReadHalf, write_half: WriteHalf) -> Self {
+        Self {
+            read_half,
+            write_half,
+        }
+    }
+
+    /// Splits a `TcpStream` into a read half and a write half, which can be used
+    /// to read and write the stream concurrently.
+    ///
+    /// **Note:** Dropping the write half will shut down the write half of the TCP
+    /// stream. This is equivalent to calling [`shutdown()`] on the `TcpStream`.
+    ///
+    /// [`shutdown()`]: fn@tokio::io::AsyncWriteExt::shutdown
+    pub fn into_split(self) -> (OwnedReadHalf, OwnedWriteHalf) {
+        (
+            OwnedReadHalf {
+                inner: self.read_half,
+            },
+            OwnedWriteHalf {
+                inner: self.write_half,
+            },
+        )
+    }
+}
+
+pub(crate) struct ReadHalf {
+    pub(crate) pair: Arc<SocketPair>,
+    receiver: mpsc::Receiver<SequencedSegment>,
+    /// FIN received, EOF for reades
+    is_closed: bool,
+}
+
+impl ReadHalf {
     fn poll_read_priv(&mut self, cx: &mut Context<'_>, buf: &mut ReadBuf) -> Poll<Result<()>> {
         if self.is_closed || buf.capacity() == 0 {
             return Poll::Ready(Ok(()));
@@ -96,7 +139,24 @@ impl TcpStream {
             ))),
         }
     }
+}
 
+impl Debug for ReadHalf {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReadHalf")
+            .field("pair", &self.pair)
+            .field("is_closed", &self.is_closed)
+            .finish()
+    }
+}
+
+pub(crate) struct WriteHalf {
+    pub(crate) pair: Arc<SocketPair>,
+    /// FIN sent, closed for writes
+    is_shutdown: bool,
+}
+
+impl WriteHalf {
     fn poll_write_priv(&self, _cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize>> {
         if buf.remaining() == 0 {
             return Poll::Ready(Ok(0));
@@ -148,7 +208,7 @@ impl TcpStream {
         world
             .current_host_mut()
             .tcp
-            .assign_send_seq(self.pair)
+            .assign_send_seq(*self.pair)
             .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "Broken pipe"))
     }
 
@@ -157,7 +217,16 @@ impl TcpStream {
     }
 }
 
-impl AsyncRead for TcpStream {
+impl Debug for WriteHalf {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WriteHalf")
+            .field("pair", &self.pair)
+            .field("is_shutdown", &self.is_shutdown)
+            .finish()
+    }
+}
+
+impl AsyncRead for ReadHalf {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -167,7 +236,17 @@ impl AsyncRead for TcpStream {
     }
 }
 
-impl AsyncWrite for TcpStream {
+impl AsyncRead for TcpStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf,
+    ) -> Poll<Result<()>> {
+        Pin::new(&mut self.read_half).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for WriteHalf {
     fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize>> {
         self.poll_write_priv(cx, buf)
     }
@@ -181,12 +260,40 @@ impl AsyncWrite for TcpStream {
     }
 }
 
-impl Drop for TcpStream {
+impl AsyncWrite for TcpStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<Result<usize>> {
+        Pin::new(&mut self.write_half).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>> {
+        Pin::new(&mut self.write_half).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>> {
+        Pin::new(&mut self.write_half).poll_shutdown(cx)
+    }
+}
+
+impl Drop for ReadHalf {
     fn drop(&mut self) {
         World::current_if_set(|world| {
-            if let Some(seq) = world.current_host_mut().tcp.assign_send_seq(self.pair) {
+            world.current_host_mut().tcp.close_stream_half(*self.pair);
+        })
+    }
+}
+
+impl Drop for WriteHalf {
+    fn drop(&mut self) {
+        World::current_if_set(|world| {
+            let pair = *self.pair;
+
+            if let Some(seq) = world.current_host_mut().tcp.assign_send_seq(pair) {
                 self.send(world, Segment::Fin(seq));
-                world.current_host_mut().tcp.remove_stream(self.pair);
+                world.current_host_mut().tcp.close_stream_half(pair);
             }
         })
     }
