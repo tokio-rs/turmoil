@@ -1,8 +1,8 @@
-use std::{cell::RefCell, io::Result, net::SocketAddr};
+use std::{io::Result, net::SocketAddr, sync::Arc};
 
-use tokio::sync::mpsc;
+use tokio::sync::Notify;
 
-use crate::{envelope::Syn, net::SocketPair, trace, world::World, ToSocketAddr};
+use crate::{net::SocketPair, trace, world::World, ToSocketAddr};
 
 use super::TcpStream;
 
@@ -11,15 +11,12 @@ use super::TcpStream;
 /// All methods must be called from a host within a Turmoil simulation.
 pub struct TcpListener {
     local_addr: SocketAddr,
-    receiver: RefCell<mpsc::Receiver<(Syn, SocketAddr)>>,
+    notify: Arc<Notify>,
 }
 
 impl TcpListener {
-    pub(crate) fn new(local_addr: SocketAddr, receiver: mpsc::Receiver<(Syn, SocketAddr)>) -> Self {
-        Self {
-            local_addr,
-            receiver: RefCell::new(receiver),
-        }
+    pub(crate) fn new(local_addr: SocketAddr, notify: Arc<Notify>) -> Self {
+        Self { local_addr, notify }
     }
 
     /// Creates a new TcpListener, which will be bound to the specified address.
@@ -50,11 +47,11 @@ impl TcpListener {
     /// address will be returned.
     pub async fn accept(&self) -> Result<(TcpStream, SocketAddr)> {
         loop {
-            let (syn, origin) = self.receiver.borrow_mut().recv().await.unwrap();
-            trace!(dst = ?origin, src = ?self.local_addr, protocol = %"TCP SYN", "Recv");
-
-            let maybe = World::current(|world| {
+            let maybe_accept = World::current(|world| {
                 let host = world.current_host_mut();
+                let (syn, origin) = host.tcp.accept(self.local_addr)?;
+
+                trace!(dst = ?origin, src = ?self.local_addr, protocol = %"TCP SYN", "Recv");
 
                 // Send SYN-ACK -> origin. If Ok we proceed (acts as the ACK),
                 // else we return early to avoid host mutations.
@@ -71,9 +68,11 @@ impl TcpListener {
                 Some((TcpStream::new(pair, rx), origin))
             });
 
-            if let Some(accepted) = maybe {
+            if let Some(accepted) = maybe_accept {
                 return Ok(accepted);
             }
+
+            self.notify.notified().await;
         }
     }
 }

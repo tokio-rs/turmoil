@@ -148,7 +148,7 @@ impl TcpStream {
         world
             .current_host_mut()
             .tcp
-            .assing_send_seq(self.pair)
+            .assign_send_seq(self.pair)
             .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "Broken pipe"))
     }
 
@@ -184,7 +184,7 @@ impl AsyncWrite for TcpStream {
 impl Drop for TcpStream {
     fn drop(&mut self) {
         World::current_if_set(|world| {
-            if let Some(seq) = world.current_host_mut().tcp.assing_send_seq(self.pair) {
+            if let Some(seq) = world.current_host_mut().tcp.assign_send_seq(self.pair) {
                 self.send(world, Segment::Fin(seq));
                 world.current_host_mut().tcp.remove_stream(self.pair);
             }

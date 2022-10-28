@@ -175,9 +175,11 @@ fn accept_front_of_line_blocking() -> Result {
     sim.host("B", || async {
         let listener = bind().await;
 
-        while let Ok((_, peer)) = listener.accept().await {
-            tracing::debug!("peer {}", peer);
-        }
+        tokio::spawn(async move {
+            while let Ok((_, peer)) = listener.accept().await {
+                tracing::debug!("peer {}", peer);
+            }
+        });
     });
 
     // Hold all traffic from A:B

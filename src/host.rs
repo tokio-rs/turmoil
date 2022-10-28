@@ -4,10 +4,12 @@ use crate::{trace, Envelope};
 
 use bytes::Bytes;
 use indexmap::IndexMap;
+use std::collections::VecDeque;
 use std::fmt::Display;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
-use tokio::sync::mpsc;
+use std::sync::Arc;
+use tokio::sync::{mpsc, Notify};
 use tokio::time::{Duration, Instant};
 
 /// A host in the simulated network.
@@ -152,7 +154,7 @@ impl Udp {
 
 pub(crate) struct Tcp {
     /// Bound server sockets
-    binds: IndexMap<SocketAddr, mpsc::Sender<(Syn, SocketAddr)>>,
+    binds: IndexMap<SocketAddr, ServerSocket>,
 
     /// TcpListener channel capacity
     server_socket_capacity: usize,
@@ -162,6 +164,14 @@ pub(crate) struct Tcp {
 
     /// TcpStream channel capacity
     socket_capacity: usize,
+}
+
+struct ServerSocket {
+    /// Notify the TcpListener when SYNs are delivered
+    notify: Arc<Notify>,
+
+    /// Pending connections for the TcpListener to accept
+    deque: VecDeque<(Syn, SocketAddr)>,
 }
 
 struct StreamSocket {
@@ -244,15 +254,19 @@ impl Tcp {
     }
 
     pub(crate) fn bind(&mut self, addr: SocketAddr) -> io::Result<TcpListener> {
-        let (tx, rx) = mpsc::channel(self.server_socket_capacity);
+        let notify = Arc::new(Notify::new());
+        let sock = ServerSocket {
+            notify: notify.clone(),
+            deque: VecDeque::new(),
+        };
 
-        if self.binds.insert(addr, tx).is_some() {
+        if self.binds.insert(addr, sock).is_some() {
             return Err(io::Error::new(io::ErrorKind::AddrInUse, addr.to_string()));
         }
 
         trace!(?addr, protocol = %"TCP", "Bind");
 
-        Ok(TcpListener::new(addr, rx))
+        Ok(TcpListener::new(addr, notify))
     }
 
     pub(crate) fn new_stream(&mut self, pair: SocketPair) -> mpsc::Receiver<SequencedSegment> {
@@ -265,9 +279,13 @@ impl Tcp {
         rx
     }
 
+    pub(crate) fn accept(&mut self, addr: SocketAddr) -> Option<(Syn, SocketAddr)> {
+        self.binds[&addr].deque.pop_front()
+    }
+
     // Ideally, we could "write through" the tcp software, but this is necessary
     // due to borrowing the world to access the mut host and for sending.
-    pub(crate) fn assing_send_seq(&mut self, pair: SocketPair) -> Option<u64> {
+    pub(crate) fn assign_send_seq(&mut self, pair: SocketPair) -> Option<u64> {
         let sock = self.sockets.get_mut(&pair)?;
         Some(sock.assign_seq())
     }
@@ -283,8 +301,12 @@ impl Tcp {
                 // If bound, queue the syn; else we drop the syn triggering
                 // connection refused on the client.
                 if let Some(b) = self.binds.get_mut(&dst) {
-                    b.try_send((syn, src))
-                        .expect(&format!("unable to send to {}", dst));
+                    if b.deque.len() == self.server_socket_capacity {
+                        todo!("{} server socket buffer full", dst);
+                    }
+
+                    b.deque.push_back((syn, src));
+                    b.notify.notify_one();
                 }
             }
             Segment::Data(seq, data) => match self.sockets.get_mut(&SocketPair::new(dst, src)) {
