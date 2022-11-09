@@ -1,7 +1,7 @@
 use crate::envelope::{Envelope, Protocol};
 use crate::host::Host;
 use crate::rt::Rt;
-use crate::{config, trace};
+use crate::{config, TRACING_TARGET};
 
 use indexmap::IndexMap;
 use rand::{Rng, RngCore};
@@ -198,7 +198,7 @@ impl Link {
         dst: SocketAddr,
         message: Protocol,
     ) {
-        trace!(?src, ?dst, protocol = %message, "Send");
+        tracing::trace!(target: TRACING_TARGET, ?src, ?dst, protocol = %message, "Send");
 
         self.rand_partition_or_repair(global_config, rand);
         self.enqueue(global_config, rand, src, dst, message);
@@ -224,12 +224,12 @@ impl Link {
                 DeliveryStatus::DeliverAfter(self.now + delay)
             }
             State::Hold => {
-                trace!(?src, ?dst, protocol = %message, "Hold");
+                tracing::trace!(target: TRACING_TARGET,?src, ?dst, protocol = %message, "Hold");
 
                 DeliveryStatus::Hold
             }
             _ => {
-                trace!(?src, ?dst, protocol = %message, "Drop");
+                tracing::trace!(target: TRACING_TARGET,?src, ?dst, protocol = %message, "Drop");
 
                 return;
             }

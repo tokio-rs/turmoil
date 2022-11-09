@@ -1,5 +1,5 @@
 use crate::envelope::Protocol;
-use crate::{config, trace, Dns, Host, ToIpAddr, Topology};
+use crate::{config, Dns, Host, ToIpAddr, Topology, TRACING_TARGET};
 
 use indexmap::IndexMap;
 use rand::RngCore;
@@ -95,7 +95,7 @@ impl World {
             "already registered host for the given socket address"
         );
 
-        trace!(hostname = ?self.dns.reverse(addr), ?addr, "New");
+        tracing::info!(target: TRACING_TARGET, hostname = ?self.dns.reverse(addr), ?addr, "New");
 
         // Register links between the new host and all existing hosts
         for existing in self.hosts.keys() {

@@ -3,7 +3,7 @@ use tokio::sync::mpsc;
 
 use crate::{
     envelope::{Datagram, Protocol},
-    trace, ToSocketAddr, World,
+    ToSocketAddr, World, TRACING_TARGET,
 };
 
 use std::{cell::RefCell, cmp, io::Result, net::SocketAddr};
@@ -69,7 +69,7 @@ impl UdpSocket {
     pub async fn recv_from(&self, buf: &mut [u8]) -> Result<(usize, SocketAddr)> {
         let (datagram, origin) = self.rx.borrow_mut().recv().await.unwrap();
 
-        trace!(dst = ?self.local_addr, src = ?origin, protocol = %datagram, "Recv");
+        tracing::trace!(target: TRACING_TARGET, dst = ?self.local_addr, src = ?origin, protocol = %datagram, "Recv");
 
         let bytes = datagram.0;
         let limit = cmp::min(buf.len(), bytes.len());

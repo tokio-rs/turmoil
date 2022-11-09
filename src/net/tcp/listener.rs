@@ -4,9 +4,8 @@ use tokio::sync::Notify;
 
 use crate::{
     net::{SocketPair, TcpStream},
-    trace,
     world::World,
-    ToSocketAddr,
+    ToSocketAddr, TRACING_TARGET,
 };
 
 /// A simulated TCP socket server, listening for connections.
@@ -54,12 +53,12 @@ impl TcpListener {
                 let host = world.current_host_mut();
                 let (syn, origin) = host.tcp.accept(self.local_addr)?;
 
-                trace!(dst = ?origin, src = ?self.local_addr, protocol = %"TCP SYN", "Recv");
+                tracing::trace!(target: TRACING_TARGET, dst = ?origin, src = ?self.local_addr, protocol = %"TCP SYN", "Recv");
 
                 // Send SYN-ACK -> origin. If Ok we proceed (acts as the ACK),
                 // else we return early to avoid host mutations.
                 let ack = syn.ack.send(());
-                trace!(src = ?self.local_addr, dst = ?origin, protocol = %"TCP SYN-ACK", "Send");
+                tracing::trace!(target: TRACING_TARGET, src = ?self.local_addr, dst = ?origin, protocol = %"TCP SYN-ACK", "Send");
 
                 if ack.is_err() {
                     return None;
