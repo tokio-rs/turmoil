@@ -21,6 +21,7 @@ mod error;
 pub use error::Result;
 
 mod host;
+pub use host::elapsed;
 use host::Host;
 
 pub mod net;

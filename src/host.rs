@@ -1,5 +1,6 @@
 use crate::envelope::{hex, Datagram, Protocol, Segment, Syn};
 use crate::net::{SocketPair, TcpListener, UdpSocket};
+use crate::world::World;
 use crate::{trace, Envelope};
 
 use bytes::Bytes;
@@ -33,7 +34,7 @@ pub(crate) struct Host {
     /// Current instant at the host.
     pub(crate) now: Instant,
 
-    _epoch: Instant,
+    epoch: Instant,
 }
 
 impl Host {
@@ -44,13 +45,13 @@ impl Host {
             tcp: Tcp::new(),
             next_ephemeral_port: 1024,
             now,
-            _epoch: now,
+            epoch: now,
         }
     }
 
-    /// Returns how long the host has been executing for in virtual time
-    pub(crate) fn _elapsed(&self) -> Duration {
-        self.now - self._epoch
+    /// Returns how long the host has been executing for in virtual time.
+    pub(crate) fn elapsed(&self) -> Duration {
+        self.now - self.epoch
     }
 
     pub(crate) fn assign_ephemeral_port(&mut self) -> u16 {
@@ -98,6 +99,14 @@ impl Host {
     pub(crate) fn tick(&mut self, now: Instant) {
         self.now = now;
     }
+}
+
+/// Returns how long the currently executing host has been executing for in
+/// virtual time.
+///
+/// Must be called from within a Turmoil simulation.
+pub fn elapsed() -> Duration {
+    World::current(|world| world.current_host_mut().elapsed())
 }
 
 /// Simulated UDP host software.
