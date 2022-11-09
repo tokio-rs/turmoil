@@ -20,23 +20,9 @@ pub(crate) struct Rt {
 }
 
 impl Rt {
-    pub(crate) fn new() -> Rt {
-        let tokio = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
-            .start_paused(true)
-            .unhandled_panic(tokio::runtime::UnhandledPanic::ShutdownRuntime)
-            .build()
-            .unwrap();
-
-        tokio.block_on(async {
-            // Sleep to "round" `Instant::now()` to the closest `ms`
-            tokio::time::sleep(Duration::from_millis(1)).await;
-        });
-
-        Rt {
-            tokio,
-            local: new_local(),
-        }
+    pub(crate) fn new() -> Self {
+        let (tokio, local) = init();
+        Self { tokio, local }
     }
 
     pub(crate) fn block_on<R>(&self, f: impl Future<Output = R>) -> R {
@@ -86,9 +72,36 @@ impl Rt {
         })
     }
 
+    /// Cancel all tasks within the [`Rt`] by dropping the current tokio
+    /// [`Runtime`].
+    ///
+    /// Dropping the runtime blocks the calling thread until all futures have
+    /// completed, which is desired here to ensure host software completes and
+    /// all resources are dropped.
+    ///
+    /// Both the [`Runtime`] and [`LocalSet`] are replaced with new instances.
     pub(crate) fn cancel_tasks(&mut self) {
-        _ = mem::replace(&mut self.local, new_local());
+        let (tokio, local) = init();
+
+        _ = mem::replace(&mut self.tokio, tokio);
+        _ = mem::replace(&mut self.local, local);
     }
+}
+
+fn init() -> (Runtime, LocalSet) {
+    let tokio = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .start_paused(true)
+        .unhandled_panic(tokio::runtime::UnhandledPanic::ShutdownRuntime)
+        .build()
+        .unwrap();
+
+    tokio.block_on(async {
+        // Sleep to "round" `Instant::now()` to the closest `ms`
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    });
+
+    (tokio, new_local())
 }
 
 fn new_local() -> LocalSet {
