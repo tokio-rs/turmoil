@@ -169,9 +169,8 @@ impl<'a> Sim<'a> {
     ///
     /// For each runtime, we [`Rt::tick`] it forward, which allows time to
     /// advance just a little bit. In this way, only one runtime is ever active.
-    /// The turmoil APIs (such as [`crate::io::send`]) operate on the active
-    /// host, and so we remember which host is active before yielding to user
-    /// code.
+    /// The turmoil APIs operate on the active host, and so we remember which
+    /// host is active before yielding to user code.
     ///
     /// If any client errors, the simulation returns early with that Error.
     pub fn run(&mut self) -> Result {
@@ -245,7 +244,7 @@ impl<'a> Sim<'a> {
 
 #[cfg(test)]
 mod test {
-    use std::{rc::Rc, time::Duration};
+    use std::{rc::Rc, sync::Arc, time::Duration};
 
     use tokio::sync::Semaphore;
 
@@ -305,6 +304,36 @@ mod test {
             sim.run()?;
             assert_eq!(0, ct.available_permits());
         }
+
+        Ok(())
+    }
+
+    /// This is a regression test that ensures host software completes when the
+    /// host crashes. Before this fix we simply dropped the LocalSet, which did
+    /// not ensure resources owned by spawned tasks were dropped. Now we drop
+    /// and replace both the tokio Runtime and the LocalSet.
+    #[test]
+    fn crash_blocks_until_complete() -> Result {
+        let ct = Arc::new(());
+
+        let mut sim = Builder::new().build();
+
+        sim.host("host", || {
+            let ct = ct.clone();
+
+            async move {
+                tokio::spawn(async move {
+                    let _into_task = ct;
+                    _ = Semaphore::new(0).acquire().await;
+                });
+            }
+        });
+
+        sim.run()?;
+        assert_eq!(2, Arc::strong_count(&ct));
+
+        sim.crash("host");
+        assert_eq!(1, Arc::strong_count(&ct));
 
         Ok(())
     }

@@ -92,7 +92,7 @@ impl World {
     pub(crate) fn register(&mut self, addr: IpAddr, epoch: Instant) {
         assert!(
             !self.hosts.contains_key(&addr),
-            "already registered host for the given socket address"
+            "already registered host for the given ip address"
         );
 
         trace!(hostname = ?self.dns.reverse(addr), ?addr, "New");
