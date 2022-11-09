@@ -1,7 +1,7 @@
 use crate::envelope::{hex, Datagram, Protocol, Segment, Syn};
 use crate::net::{SocketPair, TcpListener, UdpSocket};
 use crate::world::World;
-use crate::{trace, Envelope};
+use crate::{Envelope, TRACING_TARGET};
 
 use bytes::Bytes;
 use indexmap::IndexMap;
@@ -85,7 +85,7 @@ impl Host {
     pub(crate) fn receive_from_network(&mut self, envelope: Envelope) -> Result<(), Protocol> {
         let Envelope { src, dst, message } = envelope;
 
-        trace!(?dst, ?src, protocol = %message, "Delivered");
+        tracing::trace!(target: TRACING_TARGET, ?dst, ?src, protocol = %message, "Delivered");
 
         match message {
             Protocol::Tcp(segment) => self.tcp.receive_from_network(src, dst, segment),
@@ -138,7 +138,7 @@ impl Udp {
             return Err(io::Error::new(io::ErrorKind::AddrInUse, addr.to_string()));
         }
 
-        trace!(?addr, protocol = %"UDP", "Bind");
+        tracing::info!(target: TRACING_TARGET, ?addr, protocol = %"UDP", "Bind");
 
         Ok(UdpSocket::new(addr, rx))
     }
@@ -157,7 +157,7 @@ impl Udp {
 
         assert!(exists.is_some(), "unknown bind {}", addr);
 
-        trace!(?addr, protocol = %"UDP", "Unbind");
+        tracing::info!(target: TRACING_TARGET, ?addr, protocol = %"UDP", "Unbind");
     }
 }
 
@@ -282,7 +282,7 @@ impl Tcp {
             return Err(io::Error::new(io::ErrorKind::AddrInUse, addr.to_string()));
         }
 
-        trace!(?addr, protocol = %"TCP", "Bind");
+        tracing::info!(target: TRACING_TARGET, ?addr, protocol = %"TCP", "Bind");
 
         Ok(TcpListener::new(addr, notify))
     }
@@ -362,7 +362,7 @@ impl Tcp {
 
         assert!(exists.is_some(), "unknown bind {}", addr);
 
-        trace!(?addr, protocol = %"TCP", "Unbind");
+        tracing::info!(target: TRACING_TARGET, ?addr, protocol = %"TCP", "Unbind");
     }
 }
 

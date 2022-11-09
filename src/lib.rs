@@ -38,10 +38,10 @@ pub use sim::Sim;
 mod top;
 use top::Topology;
 
-mod tracing;
-
 mod world;
 use world::World;
+
+const TRACING_TARGET: &str = "turmoil";
 
 /// Lookup an ip address by host name.
 ///

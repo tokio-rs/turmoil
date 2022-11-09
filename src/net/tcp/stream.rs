@@ -17,9 +17,8 @@ use crate::{
     envelope::{Protocol, Segment, Syn},
     host::SequencedSegment,
     net::SocketPair,
-    trace,
     world::World,
-    ToSocketAddr,
+    ToSocketAddr, TRACING_TARGET,
 };
 
 use super::split_owned::{OwnedReadHalf, OwnedWriteHalf};
@@ -75,7 +74,7 @@ impl TcpStream {
             io::Error::new(io::ErrorKind::ConnectionRefused, pair.remote.to_string())
         })?;
 
-        trace!(dst = ?pair.local, src = ?pair.remote, protocol = %"TCP SYN-ACK", "Recv");
+        tracing::trace!(target: TRACING_TARGET, dst = ?pair.local, src = ?pair.remote, protocol = %"TCP SYN-ACK", "Recv");
 
         Ok(TcpStream::new(pair, rx))
     }
@@ -131,7 +130,7 @@ impl ReadHalf {
 
         match ready!(self.receiver.poll_recv(cx)) {
             Some(seg) => {
-                trace!(dst = ?self.pair.local, src = ?self.pair.remote, protocol = %seg, "Recv");
+                tracing::trace!(target: TRACING_TARGET, dst = ?self.pair.local, src = ?self.pair.remote, protocol = %seg, "Recv");
 
                 match seg {
                     SequencedSegment::Data(bytes) => {
