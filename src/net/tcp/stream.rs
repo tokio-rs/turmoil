@@ -1,6 +1,7 @@
 use std::{
     fmt::Debug,
     io::{self, Result},
+    net::SocketAddr,
     pin::Pin,
     sync::Arc,
     task::{ready, Context, Poll},
@@ -77,6 +78,16 @@ impl TcpStream {
         trace!(dst = ?pair.local, src = ?pair.remote, protocol = %"TCP SYN-ACK", "Recv");
 
         Ok(TcpStream::new(pair, rx))
+    }
+
+    /// Returns the local address that this stream is bound to.
+    pub fn local_addr(&self) -> Result<SocketAddr> {
+        Ok(self.read_half.pair.local)
+    }
+
+    /// Returns the remote address that this stream is connected to.
+    pub fn peer_addr(&self) -> Result<SocketAddr> {
+        Ok(self.read_half.pair.remote)
     }
 
     pub(crate) fn reunite(read_half: ReadHalf, write_half: WriteHalf) -> Self {

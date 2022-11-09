@@ -1,6 +1,7 @@
 use std::{
     error::Error,
     fmt, io,
+    net::SocketAddr,
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
@@ -19,6 +20,16 @@ pub struct OwnedReadHalf {
 }
 
 impl OwnedReadHalf {
+    /// Returns the local address that this stream is bound to.
+    pub fn local_addr(&self) -> io::Result<SocketAddr> {
+        Ok(self.inner.pair.local)
+    }
+
+    /// Returns the remote address that this stream is connected to.
+    pub fn peer_addr(&self) -> io::Result<SocketAddr> {
+        Ok(self.inner.pair.remote)
+    }
+
     /// Attempts to put the two halves of a `TcpStream` back together and
     /// recover the original socket. Succeeds only if the two halves
     /// originated from the same call to `into_split`.
@@ -41,6 +52,16 @@ pub struct OwnedWriteHalf {
 }
 
 impl OwnedWriteHalf {
+    /// Returns the local address that this stream is bound to.
+    pub fn local_addr(&self) -> io::Result<SocketAddr> {
+        Ok(self.inner.pair.local)
+    }
+
+    /// Returns the remote address that this stream is connected to.
+    pub fn peer_addr(&self) -> io::Result<SocketAddr> {
+        Ok(self.inner.pair.remote)
+    }
+
     /// Attempts to put the two halves of a `TcpStream` back together and
     /// recover the original socket. Succeeds only if the two halves
     /// originated from the same call to `into_split`.

@@ -78,6 +78,11 @@ impl TcpListener {
             self.notify.notified().await;
         }
     }
+
+    /// Returns the local address that this listener is bound to.
+    pub fn local_addr(&self) -> Result<SocketAddr> {
+        Ok(self.local_addr)
+    }
 }
 
 impl Drop for TcpListener {
