@@ -5,6 +5,7 @@ use std::cell::RefCell;
 use std::future::Future;
 use std::net::IpAddr;
 use std::ops::DerefMut;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::time::Duration;
 
 /// Network simulation
@@ -19,15 +20,41 @@ pub struct Sim<'a> {
 
     /// Per simulated host runtimes
     rts: IndexMap<IpAddr, Role<'a>>,
+
+    /// Simulation epoch duration
+    since_epoch: Duration,
+
+    /// Simulation elapsed time
+    elapsed: Duration,
 }
 
 impl<'a> Sim<'a> {
     pub(crate) fn new(config: Config, world: World) -> Self {
+        let since_epoch = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("now must be > UNIX_EPOCH");
+
         Self {
             config,
             world: RefCell::new(world),
             rts: IndexMap::new(),
+            since_epoch,
+            elapsed: Duration::ZERO,
         }
+    }
+
+    /// How much logical time has elapsed.
+    pub fn elapsed(&self) -> Duration {
+        self.elapsed
+    }
+
+    /// The logical duration from [`UNIX_EPOCH`] until now.
+    ///
+    /// On creation the simulation picks a `SystemTime` and calculates the
+    /// duration since the epoch. Each `run()` invocation moves logical time
+    /// forward the configured tick duration.
+    pub fn since_epoch(&self) -> Duration {
+        self.since_epoch + self.elapsed
     }
 
     /// Register a client with the simulation.
@@ -174,7 +201,6 @@ impl<'a> Sim<'a> {
     ///
     /// If any client errors, the simulation returns early with that Error.
     pub fn run(&mut self) -> Result {
-        let mut elapsed = Duration::default();
         let tick = self.config.tick;
 
         loop {
@@ -230,9 +256,9 @@ impl<'a> Sim<'a> {
                 return Ok(());
             }
 
-            elapsed += tick;
+            self.elapsed += tick;
 
-            if elapsed > self.config.duration {
+            if self.elapsed > self.config.duration {
                 Err(format!(
                     "Ran for {:?} without completing",
                     self.config.duration
@@ -248,7 +274,7 @@ mod test {
 
     use tokio::sync::Semaphore;
 
-    use crate::{Builder, Result};
+    use crate::{elapsed, Builder, Result};
 
     #[test]
     fn client_error() {
@@ -336,5 +362,46 @@ mod test {
         assert_eq!(1, Arc::strong_count(&ct));
 
         Ok(())
+    }
+
+    // start 1668098287.857759s
+    // now 1668098290.357759s
+    // now 1668098290.357759s
+    // now 1668098290.357759s
+    // elapsed 2.5s
+    // end 1668098290.357759s
+    // now 1668098292.857759s
+    #[test]
+    fn elapsed_time() -> Result {
+        let mut sim = Builder::new().build();
+
+        let start = sim.since_epoch();
+
+        async fn software(start: Duration) -> Result {
+            for _ in 0..5 {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+            println!("now {:?}", start + elapsed());
+
+            Ok(())
+        }
+
+        println!("start {:?}", start);
+
+        sim.client("c1", software(start));
+        sim.client("c2", software(start));
+        sim.client("c3", software(start));
+
+        sim.run()?;
+
+        println!("elapsed {:?}", sim.elapsed());
+        println!("end {:?}", sim.since_epoch());
+
+        // Software needs the current simulation `since_epoch` to account for
+        // logical time that has elapsed.
+        let start = sim.since_epoch();
+        sim.client("c1'", software(start));
+
+        sim.run()
     }
 }
