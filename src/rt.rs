@@ -57,9 +57,8 @@ impl Rt {
     // 4. The sleep finishes
     // 5. The runtime pauses
     //
-    // If the host is running blocking code (computing fib), then it is possible
-    // that step 3 exceeds the intended duration. For this reason, we return the
-    // finish time and store that in [`crate::Host::now`].
+    // Return the finish time and store that in [`crate::Host::now`] to maintain
+    // the host's local elapsed duration.
     pub(crate) fn tick(&self, duration: Duration) -> Instant {
         self.block_on(async {
             self.local

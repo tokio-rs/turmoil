@@ -21,7 +21,8 @@ pub struct Sim<'a> {
     /// Per simulated host runtimes
     rts: IndexMap<IpAddr, Role<'a>>,
 
-    /// Simulation epoch duration
+    /// Simulation duration since unix epoch. Set when the simulation is
+    /// created.
     since_epoch: Duration,
 
     /// Simulation elapsed time
@@ -43,7 +44,7 @@ impl<'a> Sim<'a> {
         }
     }
 
-    /// How much logical time has elapsed.
+    /// How much logical time has elapsed since the simulation started.
     pub fn elapsed(&self) -> Duration {
         self.elapsed
     }
@@ -364,44 +365,40 @@ mod test {
         Ok(())
     }
 
-    // start 1668098287.857759s
-    // now 1668098290.357759s
-    // now 1668098290.357759s
-    // now 1668098290.357759s
-    // elapsed 2.5s
-    // end 1668098290.357759s
-    // now 1668098292.857759s
     #[test]
     fn elapsed_time() -> Result {
         let mut sim = Builder::new().build();
 
-        let start = sim.since_epoch();
+        let duration = Duration::from_millis(500);
 
-        async fn software(start: Duration) -> Result {
-            for _ in 0..5 {
-                tokio::time::sleep(Duration::from_millis(500)).await;
-            }
-            println!("now {:?}", start + elapsed());
+        sim.client("c1", async move {
+            tokio::time::sleep(duration).await;
+            assert_eq!(duration, elapsed());
 
             Ok(())
-        }
+        });
 
-        println!("start {:?}", start);
+        sim.client("c2", async move {
+            tokio::time::sleep(duration).await;
+            assert_eq!(duration, elapsed());
 
-        sim.client("c1", software(start));
-        sim.client("c2", software(start));
-        sim.client("c3", software(start));
+            Ok(())
+        });
 
         sim.run()?;
 
-        println!("elapsed {:?}", sim.elapsed());
-        println!("end {:?}", sim.since_epoch());
+        assert_eq!(duration, sim.elapsed());
 
-        // Software needs the current simulation `since_epoch` to account for
-        // logical time that has elapsed.
-        let start = sim.since_epoch();
-        sim.client("c1'", software(start));
+        sim.client("c3", async move {
+            assert_eq!(Duration::ZERO, elapsed());
 
-        sim.run()
+            Ok(())
+        });
+
+        sim.run()?;
+
+        assert_eq!(duration, sim.elapsed());
+
+        Ok(())
     }
 }
