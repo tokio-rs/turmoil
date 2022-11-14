@@ -245,6 +245,8 @@ impl<'a> Sim<'a> {
                 }
             }
 
+            self.elapsed += tick;
+
             // Check finished clients for err results. Runtimes are removed at
             // this stage.
             for addr in finished.iter() {
@@ -256,8 +258,6 @@ impl<'a> Sim<'a> {
             if is_finished {
                 return Ok(());
             }
-
-            self.elapsed += tick;
 
             if self.elapsed > self.config.duration {
                 Err(format!(
@@ -367,7 +367,8 @@ mod test {
 
     #[test]
     fn elapsed_time() -> Result {
-        let mut sim = Builder::new().build();
+        let tick = Duration::from_millis(5);
+        let mut sim = Builder::new().tick_duration(tick).build();
 
         let duration = Duration::from_millis(500);
 
@@ -387,8 +388,10 @@ mod test {
 
         sim.run()?;
 
-        assert_eq!(duration, sim.elapsed());
+        // sleep duration plus one tick to complete
+        assert_eq!(duration + tick, sim.elapsed());
 
+        let start = sim.elapsed();
         sim.client("c3", async move {
             assert_eq!(Duration::ZERO, elapsed());
 
@@ -397,7 +400,8 @@ mod test {
 
         sim.run()?;
 
-        assert_eq!(duration, sim.elapsed());
+        // one tick to complete
+        assert_eq!(tick, sim.elapsed() - start);
 
         Ok(())
     }
