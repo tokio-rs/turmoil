@@ -1,3 +1,11 @@
+# 0.3.2 (Nov 14, 2022)
+
+### Added
+
+- Expose the sim's epoch and elapsed duration ([#54])
+
+[#54]: https://github.com/tokio-rs/turmoil/pull/54
+
 # 0.3.1 (Nov 9, 2022)
 
 ### Added
