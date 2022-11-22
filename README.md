@@ -53,6 +53,8 @@ sim.client("client", async move {
 sim.run();
 ```
 
+`RUSTFLAG="--cfg tokio_unstable"` is necessary to compile the project.
+
 See `ping_pong` in [udp.rs](tests/udp.rs) for a networking example.
 
 For more examples, check out the [tests](tests) directory.
