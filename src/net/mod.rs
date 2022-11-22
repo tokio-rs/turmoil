@@ -11,6 +11,8 @@ pub use tcp::{listener::TcpListener, stream::TcpStream};
 mod udp;
 pub use udp::UdpSocket;
 
+pub use tokio::net::ToSocketAddrs;
+
 #[derive(Debug, Copy, Clone, Hash, Eq, PartialEq)]
 pub(crate) struct SocketPair {
     pub(crate) local: SocketAddr,
