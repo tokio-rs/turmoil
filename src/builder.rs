@@ -1,7 +1,6 @@
 use crate::*;
 
 use rand::{RngCore, SeedableRng};
-use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// Configure the simulation
@@ -11,9 +10,6 @@ pub struct Builder {
     config: Config,
 
     link: config::Link,
-
-    /// Whether or not to log
-    log: Option<PathBuf>,
 }
 
 impl Builder {
@@ -25,7 +21,6 @@ impl Builder {
                 latency: Some(config::Latency::default()),
                 message_loss: Some(config::MessageLoss::default()),
             },
-            log: None,
         }
     }
 
@@ -75,24 +70,12 @@ impl Builder {
         self
     }
 
-    /// Log events to the specified file
-    pub fn log(&mut self, path: impl AsRef<Path>) -> &mut Self {
-        self.log = Some(path.as_ref().into());
-        self
-    }
-
     pub fn build<'a>(&self) -> Sim<'a> {
         self.build_with_rng(Box::new(rand::rngs::SmallRng::from_entropy()))
     }
 
     pub fn build_with_rng<'a>(&self, rng: Box<dyn RngCore>) -> Sim<'a> {
-        let log = self
-            .log
-            .as_ref()
-            .map(|path| Log::new(path))
-            .unwrap_or(Log::none());
-
-        let world = World::new(self.link.clone(), log, rng);
+        let world = World::new(self.link.clone(), rng);
         Sim::new(self.config.clone(), world)
     }
 }

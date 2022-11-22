@@ -3,7 +3,7 @@ mod readme;
 
 mod builder;
 
-use std::net::SocketAddr;
+use std::net::IpAddr;
 
 pub use builder::Builder;
 
@@ -12,7 +12,7 @@ use config::Config;
 
 mod dns;
 use dns::Dns;
-pub use dns::ToSocketAddr;
+pub use dns::{ToIpAddr, ToSocketAddr};
 
 mod envelope;
 use envelope::Envelope;
@@ -21,15 +21,8 @@ mod error;
 pub use error::Result;
 
 mod host;
+pub use host::elapsed;
 use host::Host;
-
-pub mod io;
-
-mod log;
-use log::Log;
-
-mod message;
-pub use message::Message;
 
 pub mod net;
 
@@ -45,22 +38,22 @@ pub use sim::Sim;
 mod top;
 use top::Topology;
 
-mod version;
-
 mod world;
 use world::World;
 
-/// Lookup a socket address by host name.
+const TRACING_TARGET: &str = "turmoil";
+
+/// Lookup an ip address by host name.
 ///
 /// Must be called from within a Turmoil simulation.
-pub fn lookup(addr: impl ToSocketAddr) -> SocketAddr {
+pub fn lookup(addr: impl ToIpAddr) -> IpAddr {
     World::current(|world| world.lookup(addr))
 }
 
 /// Hold messages two hosts, until [`release`] is called.
 ///
 /// Must be called from within a Turmoil simulation.
-pub fn hold(a: impl ToSocketAddr, b: impl ToSocketAddr) {
+pub fn hold(a: impl ToIpAddr, b: impl ToIpAddr) {
     World::current(|world| {
         let a = world.lookup(a);
         let b = world.lookup(b);
@@ -72,7 +65,7 @@ pub fn hold(a: impl ToSocketAddr, b: impl ToSocketAddr) {
 /// The opposite of [`hold`]. All held messages are immediately delivered.
 ///
 /// Must be called from within a Turmoil simulation.
-pub fn release(a: impl ToSocketAddr, b: impl ToSocketAddr) {
+pub fn release(a: impl ToIpAddr, b: impl ToIpAddr) {
     World::current(|world| {
         let a = world.lookup(a);
         let b = world.lookup(b);
@@ -85,7 +78,7 @@ pub fn release(a: impl ToSocketAddr, b: impl ToSocketAddr) {
 /// dropped.
 ///
 /// Must be called from within a Turmoil simulation.
-pub fn partition(a: impl ToSocketAddr, b: impl ToSocketAddr) {
+pub fn partition(a: impl ToIpAddr, b: impl ToIpAddr) {
     World::current(|world| {
         let a = world.lookup(a);
         let b = world.lookup(b);
@@ -98,49 +91,11 @@ pub fn partition(a: impl ToSocketAddr, b: impl ToSocketAddr) {
 /// delivered.
 ///
 /// Must be called from within a Turmoil simulation.
-pub fn repair(a: impl ToSocketAddr, b: impl ToSocketAddr) {
+pub fn repair(a: impl ToIpAddr, b: impl ToIpAddr) {
     World::current(|world| {
         let a = world.lookup(a);
         let b = world.lookup(b);
 
         world.repair(a, b);
-    })
-}
-
-/// Returns `true` if logging is enabled
-pub fn log_enabled() -> bool {
-    World::current(|world| world.log.enabled() && world.current.is_some())
-}
-
-#[macro_export]
-macro_rules! info {
-    ( $($t:tt)* ) => {{
-        if $crate::log_enabled() {
-            let line = format!( $($t)* );
-            $crate::log(false, &line);
-        }
-    }};
-}
-
-#[macro_export]
-macro_rules! debug {
-    () => {
-        if $crate::log_enabled() {
-            let line = format!( $($t)* );
-            $crate::log(true, &line);
-        }
-    };
-}
-
-#[doc(hidden)]
-pub fn log(debug: bool, line: &str) {
-    World::current(|world| {
-        if let Some(current) = world.current {
-            let host = world.host(current);
-            let dot = host.dot();
-            let elapsed = host.elapsed();
-
-            world.log.line(&world.dns, dot, elapsed, debug, line);
-        }
     })
 }

@@ -1,385 +1,391 @@
-use crate::envelope::DeliveryInstructions;
-use crate::net::{Segment, SocketPair, StreamEnvelope, Syn};
-use crate::{version, Envelope, Message};
+use crate::envelope::{hex, Datagram, Protocol, Segment, Syn};
+use crate::net::{SocketPair, TcpListener, UdpSocket};
+use crate::world::World;
+use crate::{Envelope, TRACING_TARGET};
 
+use bytes::Bytes;
 use indexmap::IndexMap;
 use std::collections::VecDeque;
+use std::fmt::Display;
 use std::io;
-use std::net::SocketAddr;
-use std::rc::Rc;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
-use tokio::sync::Notify;
+use tokio::sync::{mpsc, Notify};
 use tokio::time::{Duration, Instant};
 
 /// A host in the simulated network.
 ///
-/// Hosts support two networking modes:
-/// - Datagram via [`crate::io::send`] and [`crate::io::recv`]
-/// - Stream via [`crate::net::Listener`] and [`crate::net::Stream`]
+/// Hosts have [`Udp`] and [`Tcp`] software available for networking.
 ///
-/// Both modes may be used by host software simulatanesouly.
+/// Both modes may be used simultaneously.
 pub(crate) struct Host {
-    /// Host address
-    pub(crate) addr: SocketAddr,
+    /// Host ip address.
+    pub(crate) addr: IpAddr,
 
-    /// Messages in-flight to the host. Some of these may still be "on the
-    /// network".
-    inbox: IndexMap<SocketAddr, VecDeque<Envelope>>,
+    /// L4 User Datagram Protocol (UDP).
+    pub(crate) udp: Udp,
 
-    /// Signaled when a message becomes available to receive.
-    pub(crate) notify: Rc<Notify>,
+    /// L4 Transmission Control Protocol (TCP).
+    pub(crate) tcp: Tcp,
 
-    /// Optional accept queue; set if the host is bound. This simulates a server
-    /// socket.
-    listener: Option<Inbox<Envelope>>,
-
-    /// In-flight messages for active connections. Some of these may still be
-    /// "on the network".
-    connections: IndexMap<SocketPair, Inbox<StreamEnvelope>>,
+    /// Ports 1024..=65535 for client connections.
+    next_ephemeral_port: u16,
 
     /// Current instant at the host.
     pub(crate) now: Instant,
 
     epoch: Instant,
-
-    /// Current host version. This is incremented each time a network operation
-    /// occurs.
-    pub(crate) version: u64,
-}
-
-/// A simple unbounded channel.
-struct Inbox<T> {
-    /// Pending connections
-    deque: VecDeque<T>,
-
-    /// Signaled when an item is available
-    notify: Arc<Notify>,
 }
 
 impl Host {
-    pub(crate) fn new(addr: SocketAddr, now: Instant, notify: Rc<Notify>) -> Host {
+    pub(crate) fn new(addr: IpAddr, now: Instant) -> Host {
         Host {
             addr,
-            inbox: IndexMap::new(),
-            notify,
-            listener: None,
-            connections: IndexMap::new(),
+            udp: Udp::new(),
+            tcp: Tcp::new(),
+            next_ephemeral_port: 1024,
             now,
             epoch: now,
-            version: 0,
         }
     }
 
-    /// Creates a new listener queue, which is bound to the host's `addr`.
-    ///
-    /// This is called by `Listener::bind()` and the returned `Notify` is used
-    /// to signal when connections are available to accept.
-    // TODO: Support binding to multiple ports
-    pub(crate) fn bind(&mut self) -> io::Result<Arc<Notify>> {
-        if self.listener.is_some() {
-            return Err(io::Error::new(
-                io::ErrorKind::AddrInUse,
-                self.addr.to_string(),
-            ));
-        }
-
-        let notify = Arc::new(Notify::new());
-
-        self.listener.replace(Inbox {
-            deque: VecDeque::new(),
-            notify: notify.clone(),
-        });
-        self.bump_version();
-
-        Ok(notify)
-    }
-
-    /// Unbind the host, dropping all pending connections.
-    pub(crate) fn unbind(&mut self) {
-        self.listener.take();
-        self.bump_version();
-    }
-
-    /// Returns how long the host has been executing for in virtual time
+    /// Returns how long the host has been executing for in virtual time.
     pub(crate) fn elapsed(&self) -> Duration {
         self.now - self.epoch
     }
 
-    /// Bump the version for this host and return a dot.
+    pub(crate) fn assign_ephemeral_port(&mut self) -> u16 {
+        // Check for existing binds to avoid port conflicts
+        loop {
+            let ret = self.next_ephemeral_port;
+
+            if self.next_ephemeral_port == 65535 {
+                // re-load
+                self.next_ephemeral_port = 1024;
+            } else {
+                // advance
+                self.next_ephemeral_port += 1;
+            }
+
+            if self.udp.is_port_assigned(ret) || self.tcp.is_port_assigned(ret) {
+                continue;
+            }
+
+            return ret;
+        }
+    }
+
+    /// Receive the `envelope` from the network.
     ///
-    /// Called when a host establishes a new connection with a remote peer.
-    pub(crate) fn bump(&mut self) -> version::Dot {
-        self.bump_version();
-        self.dot()
-    }
+    /// Returns an Err if a message needs to be sent in response to a failed
+    /// delivery, e.g. TCP RST.
+    // FIXME: This funkiness is necessary due to how message sending works. The
+    // key problem is that the Host doesn't actually send messages, rather the
+    // World is borrowed, and it sends.
+    pub(crate) fn receive_from_network(&mut self, envelope: Envelope) -> Result<(), Protocol> {
+        let Envelope { src, dst, message } = envelope;
 
-    fn bump_version(&mut self) {
-        self.version += 1;
-    }
+        tracing::trace!(target: TRACING_TARGET, ?dst, ?src, protocol = %message, "Delivered");
 
-    /// Returns a dot for the host at its current version
-    pub(crate) fn dot(&self) -> version::Dot {
-        version::Dot {
-            host: self.addr,
-            version: self.version,
-        }
-    }
-
-    pub(crate) fn accept(&mut self) -> Option<Envelope> {
-        let now = Instant::now();
-        let deque = &mut self.listener.as_mut()?.deque;
-
-        match deque.front() {
-            Some(Envelope {
-                instructions: DeliveryInstructions::DeliverAt(time),
-                ..
-            }) if *time <= now => {
-                let ret = deque.pop_front();
-                self.bump_version();
-                ret
-            }
-            _ => None,
-        }
-    }
-
-    // If the host is not bound we simply do nothing, dropping the `Syn`. The
-    // peer who initiated the connection is awaiting the receiver of the syn's
-    // oneshot, which triggers a "connection refused" error.
-    pub(crate) fn syn(&mut self, src: version::Dot, delay: Option<Duration>, syn: Syn) {
-        if let Some(listener) = self.listener.as_mut() {
-            let instructions = match delay {
-                Some(d) => DeliveryInstructions::DeliverAt(self.now + d),
-                None => DeliveryInstructions::ExplicitlyHeld,
-            };
-
-            listener.deque.push_back(Envelope {
-                src,
-                instructions,
-                message: Box::new(syn),
-            });
-
-            listener.notify.notify_one();
-        }
-    }
-
-    /// Finalize the connection, returning a `Notify` to build the stream.
-    ///
-    /// This is idempotent. If the connection has already been initialized, the
-    /// `Notify` is simply cloned and returned.
-    pub(crate) fn finish_connect(&mut self, pair: SocketPair) -> Arc<Notify> {
-        let inbox = self.connections.entry(pair).or_insert_with(|| Inbox {
-            deque: VecDeque::new(),
-            notify: Arc::new(Notify::new()),
-        });
-
-        inbox.notify.clone()
-    }
-
-    pub(crate) fn register_connection(&mut self, pair: SocketPair) {
-        assert!(
-            self.connections
-                .insert(
-                    pair,
-                    Inbox {
-                        deque: VecDeque::new(),
-                        notify: Arc::new(Notify::new()),
-                    }
-                )
-                .is_none(),
-            "{:?} is already registered",
-            pair
-        );
-    }
-
-    pub(crate) fn embark(
-        &mut self,
-        src: version::Dot,
-        delay: Option<Duration>,
-        message: Box<dyn Message>,
-    ) {
-        let instructions = match delay {
-            Some(d) => DeliveryInstructions::DeliverAt(self.now + d),
-            None => DeliveryInstructions::ExplicitlyHeld,
-        };
-
-        self.inbox.entry(src.host).or_default().push_back(Envelope {
-            src,
-            instructions,
-            message,
-        });
-
-        self.notify.notify_one();
-    }
-
-    pub(crate) fn embark_on(
-        &mut self,
-        pair: SocketPair,
-        delay: Option<Duration>,
-        segment: Segment,
-    ) {
-        let inbox = self.connections.get_mut(&pair).expect("no connection");
-
-        let instructions = match delay {
-            Some(d) => DeliveryInstructions::DeliverAt(self.now + d),
-            None => DeliveryInstructions::ExplicitlyHeld,
-        };
-
-        inbox.deque.push_back(StreamEnvelope {
-            instructions,
-            segment,
-        });
-
-        inbox.notify.notify_one();
-    }
-
-    pub(crate) fn recv(&mut self) -> (Option<Envelope>, Rc<Notify>) {
-        let now = Instant::now();
-        let notify = self.notify.clone();
-
-        for deque in self.inbox.values_mut() {
-            match deque.front() {
-                Some(Envelope {
-                    instructions: DeliveryInstructions::DeliverAt(time),
-                    ..
-                }) if *time <= now => {
-                    let ret = (deque.pop_front(), notify);
-                    self.bump_version();
-                    return ret;
-                }
-                _ => continue,
+        match message {
+            Protocol::Tcp(segment) => self.tcp.receive_from_network(src, dst, segment),
+            Protocol::Udp(datagram) => {
+                self.udp.receive_from_network(src, dst, datagram);
+                Ok(())
             }
         }
-
-        (None, notify)
-    }
-
-    pub(crate) fn recv_from(&mut self, peer: SocketAddr) -> (Option<Envelope>, Rc<Notify>) {
-        let now = Instant::now();
-
-        let deque = self.inbox.entry(peer).or_default();
-        let notify = self.notify.clone();
-
-        match deque.front() {
-            Some(Envelope {
-                instructions: DeliveryInstructions::DeliverAt(time),
-                ..
-            }) if *time <= now => {
-                let ret = (deque.pop_front(), notify);
-                self.bump_version();
-                ret
-            }
-            _ => (None, notify),
-        }
-    }
-
-    pub(crate) fn recv_on(&mut self, pair: SocketPair) -> Option<Segment> {
-        let now = Instant::now();
-
-        let deque = self
-            .connections
-            .get_mut(&pair)
-            .map(|i| &mut i.deque)
-            .expect("no connection");
-
-        match deque.front() {
-            Some(StreamEnvelope {
-                instructions: DeliveryInstructions::DeliverAt(time),
-                ..
-            }) if *time <= now => {
-                let ret = deque.pop_front().map(|e| e.segment);
-                self.bump_version();
-                ret
-            }
-            _ => None,
-        }
-    }
-
-    /// Releases all messages previously received from [`peer`]. These messages
-    /// may be received immediately (on the next call to `[Host::recv]`).
-    pub(crate) fn release(&mut self, peer: SocketAddr) {
-        let now = Instant::now();
-
-        if let Some(listener) = self.listener.as_mut() {
-            for syn in listener.deque.iter_mut() {
-                if let Envelope {
-                    instructions: DeliveryInstructions::ExplicitlyHeld,
-                    ..
-                } = syn
-                {
-                    syn.instructions = DeliveryInstructions::DeliverAt(now);
-                }
-            }
-
-            listener.notify.notify_one();
-        }
-
-        for (pair, inbox) in self.connections.iter_mut() {
-            if pair.peer.host == peer {
-                for envelope in &mut inbox.deque {
-                    if let StreamEnvelope {
-                        instructions: DeliveryInstructions::ExplicitlyHeld,
-                        ..
-                    } = envelope
-                    {
-                        envelope.instructions = DeliveryInstructions::DeliverAt(now);
-                    }
-                }
-
-                inbox.notify.notify_one();
-            }
-        }
-
-        for envelope in self.inbox.entry(peer).or_default() {
-            if let Envelope {
-                instructions: DeliveryInstructions::ExplicitlyHeld,
-                ..
-            } = envelope
-            {
-                envelope.instructions = DeliveryInstructions::DeliverAt(now);
-            }
-        }
-
-        self.notify.notify_one();
     }
 
     pub(crate) fn tick(&mut self, now: Instant) {
         self.now = now;
+    }
+}
 
-        if let Some(listener) = self.listener.as_ref() {
-            if let Some(Envelope {
-                instructions: DeliveryInstructions::DeliverAt(time),
-                ..
-            }) = listener.deque.front()
-            {
-                if *time <= now {
-                    listener.notify.notify_one();
-                }
-            }
+/// Returns how long the currently executing host has been executing for in
+/// virtual time.
+///
+/// Must be called from within a Turmoil simulation.
+pub fn elapsed() -> Duration {
+    World::current(|world| world.current_host_mut().elapsed())
+}
+
+/// Simulated UDP host software.
+pub(crate) struct Udp {
+    /// Bound udp sockets
+    binds: IndexMap<SocketAddr, mpsc::Sender<(Datagram, SocketAddr)>>,
+
+    /// UdpSocket channel capacity
+    capacity: usize,
+}
+
+impl Udp {
+    fn new() -> Self {
+        Self {
+            binds: IndexMap::new(),
+            // TODO: Make capacity configurable
+            capacity: 64,
+        }
+    }
+
+    fn is_port_assigned(&self, port: u16) -> bool {
+        self.binds.keys().any(|a| a.port() == port)
+    }
+
+    pub(crate) fn bind(&mut self, addr: SocketAddr) -> io::Result<UdpSocket> {
+        let (tx, rx) = mpsc::channel(self.capacity);
+
+        if self.binds.insert(addr, tx).is_some() {
+            return Err(io::Error::new(io::ErrorKind::AddrInUse, addr.to_string()));
         }
 
-        for inbox in self.connections.values() {
-            if let Some(StreamEnvelope {
-                instructions: DeliveryInstructions::DeliverAt(time),
-                ..
-            }) = inbox.deque.front()
-            {
-                if *time <= now {
-                    inbox.notify.notify_one();
-                }
-            }
+        tracing::info!(target: TRACING_TARGET, ?addr, protocol = %"UDP", "Bind");
+
+        Ok(UdpSocket::new(addr, rx))
+    }
+
+    fn receive_from_network(&mut self, src: SocketAddr, dst: SocketAddr, datagram: Datagram) {
+        match self.binds.get_mut(&dst) {
+            Some(s) => s
+                .try_send((datagram, src))
+                .expect(&format!("unable to send to {}", dst)),
+            _ => {}
+        };
+    }
+
+    pub(crate) fn unbind(&mut self, addr: SocketAddr) {
+        let exists = self.binds.remove(&addr);
+
+        assert!(exists.is_some(), "unknown bind {}", addr);
+
+        tracing::info!(target: TRACING_TARGET, ?addr, protocol = %"UDP", "Unbind");
+    }
+}
+
+pub(crate) struct Tcp {
+    /// Bound server sockets
+    binds: IndexMap<SocketAddr, ServerSocket>,
+
+    /// TcpListener channel capacity
+    server_socket_capacity: usize,
+
+    /// Active stream sockets
+    sockets: IndexMap<SocketPair, StreamSocket>,
+
+    /// TcpStream channel capacity
+    socket_capacity: usize,
+}
+
+struct ServerSocket {
+    /// Notify the TcpListener when SYNs are delivered
+    notify: Arc<Notify>,
+
+    /// Pending connections for the TcpListener to accept
+    deque: VecDeque<(Syn, SocketAddr)>,
+}
+
+struct StreamSocket {
+    local_addr: SocketAddr,
+    buf: IndexMap<u64, SequencedSegment>,
+    next_send_seq: u64,
+    recv_seq: u64,
+    sender: mpsc::Sender<SequencedSegment>,
+    /// A simple reference counter for tracking read/write half drops. Once 0, the
+    /// socket may be removed from the host.
+    ref_ct: usize,
+}
+
+/// Stripped down version of [`Segment`] for delivery out to the application
+/// layer.
+#[derive(Debug)]
+pub(crate) enum SequencedSegment {
+    Data(Bytes),
+    Fin,
+}
+
+impl Display for SequencedSegment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SequencedSegment::Data(data) => hex("TCP", &data, f),
+            SequencedSegment::Fin => write!(f, "TCP FIN"),
+        }
+    }
+}
+
+impl StreamSocket {
+    fn new(local_addr: SocketAddr, capacity: usize) -> (Self, mpsc::Receiver<SequencedSegment>) {
+        let (tx, rx) = mpsc::channel(capacity);
+        let sock = Self {
+            local_addr,
+            buf: IndexMap::new(),
+            next_send_seq: 1,
+            recv_seq: 0,
+            sender: tx,
+            ref_ct: 2,
+        };
+
+        (sock, rx)
+    }
+
+    fn assign_seq(&mut self) -> u64 {
+        let seq = self.next_send_seq;
+        self.next_send_seq += 1;
+        seq
+    }
+
+    // Buffer and re-order received segments by `seq` as the network may deliver
+    // them out of order.
+    fn buffer(&mut self, seq: u64, segment: SequencedSegment) -> Result<(), Protocol> {
+        use mpsc::error::TrySendError::Closed;
+
+        let exists = self.buf.insert(seq, segment);
+
+        assert!(exists.is_none(), "duplicate segment {}", seq);
+
+        while self.buf.contains_key(&(self.recv_seq + 1)) {
+            self.recv_seq += 1;
+
+            let segment = self.buf.remove(&self.recv_seq).unwrap();
+            self.sender.try_send(segment).map_err(|e| match e {
+                Closed(_) => Protocol::Tcp(Segment::Rst),
+                _ => todo!("{} socket buffer full", self.local_addr),
+            })?;
         }
 
-        for deque in self.inbox.values() {
-            if let Some(Envelope {
-                instructions: DeliveryInstructions::DeliverAt(time),
-                ..
-            }) = deque.front()
-            {
-                if *time <= now {
-                    self.notify.notify_one();
-                    return;
+        Ok(())
+    }
+}
+
+impl Tcp {
+    fn new() -> Self {
+        Self {
+            binds: IndexMap::new(),
+            sockets: IndexMap::new(),
+            // TODO: Make capacity configurable
+            server_socket_capacity: 64,
+            socket_capacity: 64,
+        }
+    }
+
+    fn is_port_assigned(&self, port: u16) -> bool {
+        self.binds.keys().any(|a| a.port() == port)
+            || self.sockets.keys().any(|a| a.local.port() == port)
+    }
+
+    pub(crate) fn bind(&mut self, addr: SocketAddr) -> io::Result<TcpListener> {
+        let notify = Arc::new(Notify::new());
+        let sock = ServerSocket {
+            notify: notify.clone(),
+            deque: VecDeque::new(),
+        };
+
+        if self.binds.insert(addr, sock).is_some() {
+            return Err(io::Error::new(io::ErrorKind::AddrInUse, addr.to_string()));
+        }
+
+        tracing::info!(target: TRACING_TARGET, ?addr, protocol = %"TCP", "Bind");
+
+        Ok(TcpListener::new(addr, notify))
+    }
+
+    pub(crate) fn new_stream(&mut self, pair: SocketPair) -> mpsc::Receiver<SequencedSegment> {
+        let (sock, rx) = StreamSocket::new(pair.local, self.socket_capacity);
+
+        let exists = self.sockets.insert(pair, sock);
+
+        assert!(exists.is_none(), "{:?} is already connected", pair);
+
+        rx
+    }
+
+    pub(crate) fn accept(&mut self, addr: SocketAddr) -> Option<(Syn, SocketAddr)> {
+        self.binds[&addr].deque.pop_front()
+    }
+
+    // Ideally, we could "write through" the tcp software, but this is necessary
+    // due to borrowing the world to access the mut host and for sending.
+    pub(crate) fn assign_send_seq(&mut self, pair: SocketPair) -> Option<u64> {
+        let sock = self.sockets.get_mut(&pair)?;
+        Some(sock.assign_seq())
+    }
+
+    fn receive_from_network(
+        &mut self,
+        src: SocketAddr,
+        dst: SocketAddr,
+        segment: Segment,
+    ) -> Result<(), Protocol> {
+        match segment {
+            Segment::Syn(syn) => {
+                // If bound, queue the syn; else we drop the syn triggering
+                // connection refused on the client.
+                if let Some(b) = self.binds.get_mut(&dst) {
+                    if b.deque.len() == self.server_socket_capacity {
+                        todo!("{} server socket buffer full", dst);
+                    }
+
+                    b.deque.push_back((syn, src));
+                    b.notify.notify_one();
                 }
             }
+            Segment::Data(seq, data) => match self.sockets.get_mut(&SocketPair::new(dst, src)) {
+                Some(sock) => sock.buffer(seq, SequencedSegment::Data(data))?,
+                None => return Err(Protocol::Tcp(Segment::Rst)),
+            },
+            Segment::Fin(seq) => match self.sockets.get_mut(&SocketPair::new(dst, src)) {
+                Some(sock) => sock.buffer(seq, SequencedSegment::Fin)?,
+                None => return Err(Protocol::Tcp(Segment::Rst)),
+            },
+            Segment::Rst => {
+                if let Some(_) = self.sockets.get(&SocketPair::new(dst, src)) {
+                    self.sockets.remove(&SocketPair::new(dst, src)).unwrap();
+                }
+            }
+        };
+
+        Ok(())
+    }
+
+    pub(crate) fn close_stream_half(&mut self, pair: SocketPair) {
+        // Receiving a RST removes the socket, so it's possible that has occured
+        // when halfs of the stream drop.
+        if let Some(sock) = self.sockets.get_mut(&pair) {
+            sock.ref_ct -= 1;
+
+            if sock.ref_ct == 0 {
+                self.sockets.remove(&pair).unwrap();
+            }
         }
+    }
+
+    pub(crate) fn unbind(&mut self, addr: SocketAddr) {
+        let exists = self.binds.remove(&addr);
+
+        assert!(exists.is_some(), "unknown bind {}", addr);
+
+        tracing::info!(target: TRACING_TARGET, ?addr, protocol = %"TCP", "Unbind");
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::{Host, Result};
+
+    #[test]
+    fn recycle_ports() -> Result {
+        let mut host = Host::new(
+            std::net::Ipv4Addr::UNSPECIFIED.into(),
+            tokio::time::Instant::now(),
+        );
+
+        host.udp.bind((host.addr, 65534).into())?;
+        host.udp.bind((host.addr, 65535).into())?;
+
+        for _ in 1024..65534 {
+            host.assign_ephemeral_port();
+        }
+
+        assert_eq!(1024, host.assign_ephemeral_port());
+
+        Ok(())
     }
 }

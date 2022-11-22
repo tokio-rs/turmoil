@@ -26,39 +26,25 @@ Add this to your `Cargo.toml`.
 
 ```toml
 [dev-dependencies]
-turmoil = "0.2"
+turmoil = "0.3"
 ```
 
 Next, create a test file and add a test:
 
 ```rust
-use turmoil::{io, Builder};
-
-#[derive(Debug)]
-struct Echo(String);
-
-impl turmoil::Message for Echo {
-    fn write_json(&self, _dst: &mut dyn std::io::Write) {
-        unimplemented!()
-    }
-}
-
-let mut sim = Builder::new().build();
+let mut sim = turmoil::Builder::new().build();
 
 // register a host
-sim.host("server", || async {
-    loop {
-        let (msg, src) = io::recv::<Echo>().await;
-        io::send(src, msg);
-    }
+sim.host("server", || async move {
+    // host software goes here
 });
 
-// register a client (this is the test code)
-sim.client("client", async {
-    io::send("server", Echo("hello, server!".to_string()));
+// register a client
+sim.client("client", async move {
+    // dns lookup for "server"
+    let addr = turmoil::lookup("server");
 
-    let (echo, _) = io::recv::<Echo>().await;
-    assert_eq!("hello, server!", echo.0);
+    // test code goes here
 
     Ok(())
 });
@@ -66,6 +52,8 @@ sim.client("client", async {
 // run the simulation
 sim.run();
 ```
+
+See `ping_pong` in [udp.rs](tests/udp.rs) for a networking example.
 
 For more examples, check out the [tests](tests) directory.
 
