@@ -10,7 +10,7 @@ pub trait ToIpAddr {
     fn to_ip_addr(&self, dns: &mut Dns) -> IpAddr;
 }
 
-pub trait ToSocketAddr {
+pub trait ToSocketAddrs {
     fn to_socket_addr(&self, dns: &Dns) -> SocketAddr;
 }
 
@@ -62,13 +62,13 @@ impl ToIpAddr for IpAddr {
 }
 
 // Hostname and port
-impl ToSocketAddr for (String, u16) {
+impl ToSocketAddrs for (String, u16) {
     fn to_socket_addr(&self, dns: &Dns) -> SocketAddr {
         (&self.0[..], self.1).to_socket_addr(dns)
     }
 }
 
-impl<'a> ToSocketAddr for (&'a str, u16) {
+impl<'a> ToSocketAddrs for (&'a str, u16) {
     fn to_socket_addr(&self, dns: &Dns) -> SocketAddr {
         match dns.names.get(self.0) {
             Some(ip) => (*ip, self.1).into(),
@@ -77,13 +77,13 @@ impl<'a> ToSocketAddr for (&'a str, u16) {
     }
 }
 
-impl ToSocketAddr for SocketAddr {
+impl ToSocketAddrs for SocketAddr {
     fn to_socket_addr(&self, _: &Dns) -> SocketAddr {
         *self
     }
 }
 
-impl ToSocketAddr for (IpAddr, u16) {
+impl ToSocketAddrs for (IpAddr, u16) {
     fn to_socket_addr(&self, _: &Dns) -> SocketAddr {
         (*self).into()
     }

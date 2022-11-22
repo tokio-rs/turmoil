@@ -5,7 +5,7 @@ use tokio::sync::Notify;
 use crate::{
     net::{SocketPair, TcpStream},
     world::World,
-    ToSocketAddr, TRACING_TARGET,
+    ToSocketAddrs, TRACING_TARGET,
 };
 
 /// A simulated TCP socket server, listening for connections.
@@ -26,7 +26,7 @@ impl TcpListener {
     /// The returned listener is ready for accepting connections.
     ///
     /// Only 0.0.0.0 is currently supported.
-    pub async fn bind<A: ToSocketAddr>(addr: A) -> Result<TcpListener> {
+    pub async fn bind<A: ToSocketAddrs>(addr: A) -> Result<TcpListener> {
         World::current(|world| {
             let mut addr = addr.to_socket_addr(&world.dns);
             let host = world.current_host_mut();

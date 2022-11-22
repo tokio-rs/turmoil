@@ -12,7 +12,7 @@ use config::Config;
 
 mod dns;
 use dns::Dns;
-pub use dns::{ToIpAddr, ToSocketAddr};
+pub use dns::{ToIpAddr, ToSocketAddrs};
 
 mod envelope;
 use envelope::Envelope;
