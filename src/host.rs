@@ -3,7 +3,7 @@ use crate::net::{SocketPair, TcpListener, UdpSocket};
 use crate::world::World;
 use crate::{Envelope, TRACING_TARGET};
 
-use bytes::Bytes;
+use bytes::{BufMut, Bytes, BytesMut};
 use indexmap::IndexMap;
 use std::collections::VecDeque;
 use std::fmt::Display;
@@ -188,7 +188,7 @@ struct StreamSocket {
     buf: IndexMap<u64, SequencedSegment>,
     next_send_seq: u64,
     recv_seq: u64,
-    sender: mpsc::Sender<SequencedSegment>,
+    sender: mpsc::Sender<()>,
     /// A simple reference counter for tracking read/write half drops. Once 0, the
     /// socket may be removed from the host.
     ref_ct: usize,
@@ -212,7 +212,7 @@ impl Display for SequencedSegment {
 }
 
 impl StreamSocket {
-    fn new(local_addr: SocketAddr, capacity: usize) -> (Self, mpsc::Receiver<SequencedSegment>) {
+    fn new(local_addr: SocketAddr, capacity: usize) -> (Self, mpsc::Receiver<()>) {
         let (tx, rx) = mpsc::channel(capacity);
         let sock = Self {
             local_addr,
@@ -232,26 +232,52 @@ impl StreamSocket {
         seq
     }
 
-    // Buffer and re-order received segments by `seq` as the network may deliver
-    // them out of order.
+    /// Buffer segments and notify the TcpStream for each segment in the sequence that is
+    /// available.
     fn buffer(&mut self, seq: u64, segment: SequencedSegment) -> Result<(), Protocol> {
         use mpsc::error::TrySendError::Closed;
 
         let exists = self.buf.insert(seq, segment);
-
         assert!(exists.is_none(), "duplicate segment {}", seq);
 
-        while self.buf.contains_key(&(self.recv_seq + 1)) {
-            self.recv_seq += 1;
-
-            let segment = self.buf.remove(&self.recv_seq).unwrap();
-            self.sender.try_send(segment).map_err(|e| match e {
+        let mut recv_seq = self.recv_seq;
+        while self.buf.contains_key(&(recv_seq + 1)) {
+            recv_seq += 1;
+            self.sender.try_send(()).map_err(|e| match e {
                 Closed(_) => Protocol::Tcp(Segment::Rst),
                 _ => todo!("{} socket buffer full", self.local_addr),
             })?;
         }
-
         Ok(())
+    }
+
+    // Read segments by re-ordering received segments by `seq` as the network may deliver
+    // them out of order.
+    fn next_segment(&mut self) -> Option<SequencedSegment> {
+        if self.buf.contains_key(&(self.recv_seq + 1)) {
+            self.recv_seq += 1;
+            let segment = self.buf.remove(&self.recv_seq).unwrap();
+            return Some(segment);
+        }
+        None
+    }
+
+    // Peeks the buffered segments without increasing the internal `recv_seq` value.
+    fn peek_buffer(&self, mut buf: &mut [u8]) -> usize {
+        let mut buffer = BytesMut::new();
+        let mut recv_seq = self.recv_seq;
+        while self.buf.contains_key(&(recv_seq + 1)) {
+            recv_seq += 1;
+
+            let segment = self.buf.get(&recv_seq).unwrap();
+            if let SequencedSegment::Data(bytes) = segment {
+                buffer.extend_from_slice(bytes);
+            }
+        }
+
+        let len = buffer.len().min(buf.len());
+        buf.put_slice(&buffer[..len]);
+        len
     }
 }
 
@@ -287,7 +313,7 @@ impl Tcp {
         Ok(TcpListener::new(addr, notify))
     }
 
-    pub(crate) fn new_stream(&mut self, pair: SocketPair) -> mpsc::Receiver<SequencedSegment> {
+    pub(crate) fn new_stream(&mut self, pair: SocketPair) -> mpsc::Receiver<()> {
         let (sock, rx) = StreamSocket::new(pair.local, self.socket_capacity);
 
         let exists = self.sockets.insert(pair, sock);
@@ -363,6 +389,16 @@ impl Tcp {
         assert!(exists.is_some(), "unknown bind {}", addr);
 
         tracing::info!(target: TRACING_TARGET, ?addr, protocol = %"TCP", "Unbind");
+    }
+
+    pub(crate) fn next_segment(&mut self, pair: &SocketPair) -> Option<SequencedSegment> {
+        let socket = self.sockets.get_mut(pair).unwrap();
+        socket.next_segment()
+    }
+
+    pub(crate) fn peek_buffer(&self, pair: &SocketPair, buf: &mut [u8]) -> usize {
+        let socket = self.sockets.get(pair).unwrap();
+        socket.peek_buffer(buf)
     }
 }
 

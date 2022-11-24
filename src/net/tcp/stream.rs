@@ -33,7 +33,7 @@ pub struct TcpStream {
 }
 
 impl TcpStream {
-    pub(crate) fn new(pair: SocketPair, receiver: mpsc::Receiver<SequencedSegment>) -> Self {
+    pub(crate) fn new(pair: SocketPair, receiver: mpsc::Receiver<()>) -> Self {
         let pair = Arc::new(pair);
         let read_half = ReadHalf {
             pair: pair.clone(),
@@ -113,11 +113,19 @@ impl TcpStream {
             },
         )
     }
+
+    pub async fn peek(&self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = World::current(|world| {
+            let host = world.current_host_mut();
+            host.tcp.peek_buffer(self.read_half.pair.as_ref(), buf)
+        });
+        Ok(n)
+    }
 }
 
 pub(crate) struct ReadHalf {
     pub(crate) pair: Arc<SocketPair>,
-    receiver: mpsc::Receiver<SequencedSegment>,
+    receiver: mpsc::Receiver<()>,
     /// FIN received, EOF for reades
     is_closed: bool,
 }
@@ -129,15 +137,20 @@ impl ReadHalf {
         }
 
         match ready!(self.receiver.poll_recv(cx)) {
-            Some(seg) => {
-                tracing::trace!(target: TRACING_TARGET, dst = ?self.pair.local, src = ?self.pair.remote, protocol = %seg, "Recv");
+            Some(_) => {
+                if let Some(seg) = World::current(|world| {
+                    let host = world.current_host_mut();
+                    host.tcp.next_segment(self.pair.as_ref())
+                }) {
+                    tracing::trace!(target: TRACING_TARGET, dst = ?self.pair.local, src = ?self.pair.remote, protocol = %seg, "Recv");
 
-                match seg {
-                    SequencedSegment::Data(bytes) => {
-                        buf.put_slice(bytes.as_ref());
-                    }
-                    SequencedSegment::Fin => {
-                        self.is_closed = true;
+                    match seg {
+                        SequencedSegment::Data(bytes) => {
+                            buf.put_slice(bytes.as_ref());
+                        }
+                        SequencedSegment::Fin => {
+                            self.is_closed = true;
+                        }
                     }
                 }
 

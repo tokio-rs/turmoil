@@ -613,3 +613,44 @@ fn split() -> Result {
 
     sim.run()
 }
+
+#[test]
+fn peek() -> Result {
+    let tick = Duration::from_millis(10);
+    let mut sim = Builder::new().build();
+
+    sim.host("server", move || async move {
+        let listener = bind().await;
+        let (mut s, _) = listener.accept().await.unwrap();
+
+        let _ = s.write_u8(3).await;
+        let _ = s.write_u8(5).await;
+        let _ = s.write_u8(7).await;
+    });
+
+    sim.client("client", async move {
+        let mut s = TcpStream::connect(("server", PORT)).await?;
+
+        let mut buf = [0; 3];
+        loop {
+            tokio::time::sleep(tick).await;
+            let n = s.peek(&mut buf).await?;
+            if n == 3 {
+                assert_eq!([3, 5, 7], buf);
+
+                let mut buf = [0; 3];
+                s.peek(&mut buf).await?;
+                assert_eq!([3, 5, 7], buf);
+
+                let mut buf = [0; 3];
+                s.read_exact(&mut buf).await?;
+                assert_eq!([3, 5, 7], buf);
+                break;
+            }
+        }
+
+        Ok(())
+    });
+
+    sim.run()
+}
