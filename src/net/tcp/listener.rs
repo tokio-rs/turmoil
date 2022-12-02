@@ -1,6 +1,9 @@
-use std::{io::Result, net::SocketAddr, sync::Arc};
-
-use tokio::sync::Notify;
+use std::{
+    future::poll_fn,
+    io::Result,
+    net::SocketAddr,
+    task::{ready, Context, Poll},
+};
 
 use crate::{
     net::{SocketPair, TcpStream},
@@ -13,12 +16,11 @@ use crate::{
 /// All methods must be called from a host within a Turmoil simulation.
 pub struct TcpListener {
     local_addr: SocketAddr,
-    notify: Arc<Notify>,
 }
 
 impl TcpListener {
-    pub(crate) fn new(local_addr: SocketAddr, notify: Arc<Notify>) -> Self {
-        Self { local_addr, notify }
+    pub(crate) fn new(local_addr: SocketAddr) -> Self {
+        Self { local_addr }
     }
 
     /// Creates a new TcpListener, which will be bound to the specified address.
@@ -48,39 +50,40 @@ impl TcpListener {
     /// established, the corresponding [`TcpStream`] and the remote peer’s
     /// address will be returned.
     pub async fn accept(&self) -> Result<(TcpStream, SocketAddr)> {
-        loop {
-            let maybe_accept = World::current(|world| {
-                let host = world.current_host_mut();
-                let (syn, origin) = host.tcp.accept(self.local_addr)?;
-
-                tracing::trace!(target: TRACING_TARGET, dst = ?origin, src = ?self.local_addr, protocol = %"TCP SYN", "Recv");
-
-                // Send SYN-ACK -> origin. If Ok we proceed (acts as the ACK),
-                // else we return early to avoid host mutations.
-                let ack = syn.ack.send(());
-                tracing::trace!(target: TRACING_TARGET, src = ?self.local_addr, dst = ?origin, protocol = %"TCP SYN-ACK", "Send");
-
-                if ack.is_err() {
-                    return None;
-                }
-
-                let pair = SocketPair::new(self.local_addr, origin);
-                let rx = host.tcp.new_stream(pair);
-
-                Some((TcpStream::new(pair, rx), origin))
-            });
-
-            if let Some(accepted) = maybe_accept {
-                return Ok(accepted);
-            }
-
-            self.notify.notified().await;
-        }
+        poll_fn(|cx| self.poll_accept(cx)).await
     }
 
     /// Returns the local address that this listener is bound to.
     pub fn local_addr(&self) -> Result<SocketAddr> {
         Ok(self.local_addr)
+    }
+
+    /// Polls to accept a new incoming connection to this listener.
+    ///
+    /// If there is no connection to accept, Poll::Pending is returned and the current task will be
+    /// notified by a waker. Note that on multiple calls to poll_accept, only the Waker from the
+    /// Context passed to the most recent call is scheduled to receive a wakeup.
+    pub fn poll_accept(&self, cx: &mut Context<'_>) -> Poll<Result<(TcpStream, SocketAddr)>> {
+        World::current(|world| {
+            let host = world.current_host_mut();
+            let (syn, origin) = ready!(host.tcp.poll_accept(self.local_addr, cx));
+
+            tracing::trace!(target: TRACING_TARGET, dst = ?origin, src = ?self.local_addr, protocol = %"TCP SYN", "Recv");
+
+            // Send SYN-ACK -> origin. If Ok we proceed (acts as the ACK),
+            // else we return early to avoid host mutations.
+            let ack = syn.ack.send(());
+            tracing::trace!(target: TRACING_TARGET, src = ?self.local_addr, dst = ?origin, protocol = %"TCP SYN-ACK", "Send");
+
+            if ack.is_err() {
+                return Poll::Pending;
+            }
+
+            let pair = SocketPair::new(self.local_addr, origin);
+            let rx = host.tcp.new_stream(pair);
+
+            Poll::Ready(Ok((TcpStream::new(pair, rx), origin)))
+        })
     }
 }
 

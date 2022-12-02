@@ -9,8 +9,8 @@ use std::collections::VecDeque;
 use std::fmt::Display;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
-use tokio::sync::{mpsc, Notify};
+use std::task::{Context, Poll, Waker};
+use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
 
 /// A host in the simulated network.
@@ -188,7 +188,7 @@ pub(crate) struct Tcp {
 
 struct ServerSocket {
     /// Notify the TcpListener when SYNs are delivered
-    notify: Arc<Notify>,
+    waker: Option<Waker>,
 
     /// Pending connections for the TcpListener to accept
     deque: VecDeque<(Syn, SocketAddr)>,
@@ -283,9 +283,8 @@ impl Tcp {
     }
 
     pub(crate) fn bind(&mut self, addr: SocketAddr) -> io::Result<TcpListener> {
-        let notify = Arc::new(Notify::new());
         let sock = ServerSocket {
-            notify: notify.clone(),
+            waker: None,
             deque: VecDeque::new(),
         };
 
@@ -295,7 +294,7 @@ impl Tcp {
 
         tracing::info!(target: TRACING_TARGET, ?addr, protocol = %"TCP", "Bind");
 
-        Ok(TcpListener::new(addr, notify))
+        Ok(TcpListener::new(addr))
     }
 
     pub(crate) fn new_stream(&mut self, pair: SocketPair) -> mpsc::Receiver<SequencedSegment> {
@@ -308,8 +307,19 @@ impl Tcp {
         rx
     }
 
-    pub(crate) fn accept(&mut self, addr: SocketAddr) -> Option<(Syn, SocketAddr)> {
-        self.binds[&addr].deque.pop_front()
+    pub(crate) fn poll_accept(
+        &mut self,
+        addr: SocketAddr,
+        cx: &mut Context<'_>,
+    ) -> Poll<(Syn, SocketAddr)> {
+        let socket = &mut self.binds[&addr];
+        match socket.deque.pop_front() {
+            Some(e) => Poll::Ready(e),
+            None => {
+                socket.waker.replace(cx.waker().clone());
+                Poll::Pending
+            }
+        }
     }
 
     // Ideally, we could "write through" the tcp software, but this is necessary
@@ -335,7 +345,9 @@ impl Tcp {
                     }
 
                     b.deque.push_back((syn, src));
-                    b.notify.notify_one();
+                    if let Some(waker) = b.waker.take() {
+                        waker.wake();
+                    }
                 }
             }
             Segment::Data(seq, data) => match self.sockets.get_mut(&SocketPair::new(dst, src)) {
