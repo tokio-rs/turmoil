@@ -224,7 +224,7 @@ impl Display for SequencedSegment {
 
 impl StreamSocket {
     fn new() -> Self {
-        let sock = Self {
+        Self {
             buf: IndexMap::new(),
             next_send_seq: 1,
             recv_seq: 0,
@@ -232,9 +232,7 @@ impl StreamSocket {
             rcv_buffer: Default::default(),
             reader: None,
             closed: false,
-        };
-
-        sock
+        }
     }
 
     pub(crate) fn poll_read_ready(&mut self, cx: &mut Context<'_>) -> Poll<()> {
@@ -437,5 +435,69 @@ mod test {
         assert_eq!(1024, host.assign_ephemeral_port());
 
         Ok(())
+    }
+
+    #[test]
+    fn socket_read() {
+        struct MockWaker(AtomicU8);
+        impl Wake for MockWaker {
+            fn wake(self: std::sync::Arc<Self>) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        let waker = Arc::new(MockWaker(AtomicU8::new(0)));
+
+        let mut socket = StreamSocket::new();
+        assert_eq!(
+            socket.poll_read_ready(&mut Context::from_waker(&waker.clone().into())),
+            Poll::Pending,
+        );
+        assert_eq!(waker.0.load(Ordering::Relaxed), 0);
+
+        let mut buf = [0; 512];
+        assert_eq!(socket.try_read(&mut buf), 0);
+
+        socket
+            .buffer(1, SequencedSegment::Data(Bytes::from_static(b"hello")))
+            .unwrap();
+
+        // ensure that the task was woken
+        assert_eq!(waker.0.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            socket.poll_read_ready(&mut Context::from_waker(&waker.into())),
+            Poll::Ready(()),
+        );
+        assert_eq!(socket.try_read(&mut buf), 5);
+        assert_eq!(&buf[..5], b"hello");
+    }
+
+    #[test]
+    fn socket_read_small_buffer() {
+        let mut socket = StreamSocket::new();
+        // In this test, we read a single segment in two calls to try_read, and make sure that no
+        // data is lost
+        socket
+            .buffer(1, SequencedSegment::Data(Bytes::from_static(b"helloworld")))
+            .unwrap();
+        let mut buf = [0; 5];
+        assert_eq!(socket.try_read(&mut buf), 5);
+        assert_eq!(&buf, b"hello");
+        assert_eq!(socket.try_read(&mut buf), 5);
+        assert_eq!(&buf, b"world");
+    }
+
+    #[test]
+    fn socket_read_two_segments() {
+        let mut socket = StreamSocket::new();
+        socket
+            .buffer(1, SequencedSegment::Data(Bytes::from_static(b"hello")))
+            .unwrap();
+        socket
+            .buffer(2, SequencedSegment::Data(Bytes::from_static(b"world")))
+            .unwrap();
+        let mut buf = [0; 10];
+        assert_eq!(socket.try_read(&mut buf), 10);
+        assert_eq!(&buf, b"helloworld");
     }
 }
