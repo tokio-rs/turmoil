@@ -400,7 +400,35 @@ impl Tcp {
 
 #[cfg(test)]
 mod test {
+    use std::sync::atomic::{AtomicU8, Ordering};
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Wake};
+
+    use futures::FutureExt;
+    use tokio::sync::oneshot;
+
+    use crate::envelope::{Segment, Syn};
     use crate::{Host, Result};
+
+    use super::Tcp;
+
+    struct MockWaker(AtomicU8);
+
+    impl MockWaker {
+        fn new() -> Self {
+            MockWaker(AtomicU8::new(0))
+        }
+
+        fn get(&self) -> u8 {
+            self.0.load(Ordering::Relaxed)
+        }
+    }
+
+    impl Wake for MockWaker {
+        fn wake(self: std::sync::Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 
     #[test]
     fn recycle_ports() -> Result {
@@ -416,5 +444,55 @@ mod test {
         assert_eq!(1024, host.assign_ephemeral_port());
 
         Ok(())
+    }
+
+    #[test]
+    fn poll_accept() {
+        let waker = Arc::new(MockWaker::new());
+        let mut tcp = Tcp::new();
+        let addr = "127.0.0.1:1234".parse().unwrap();
+        tcp.bind(addr).unwrap();
+
+        assert!(tcp
+            .poll_accept(addr, &mut Context::from_waker(&waker.clone().into()))
+            .is_pending());
+
+        // ensure that the waker is set
+        assert!(tcp.binds.get(&addr).unwrap().waker.is_some());
+        // not polled yet
+        assert_eq!(waker.get(), 0);
+
+        let src_addr = "127.0.0.1:5678".parse().unwrap();
+        let (sender, mut receiver) = oneshot::channel();
+        tcp.receive_from_network(src_addr, addr, Segment::Syn(Syn { ack: sender }))
+            .unwrap();
+
+        // we were woken
+        assert_eq!(waker.0.load(Ordering::Relaxed), 1);
+
+        let Poll::Ready((syn, a)) =
+            tcp.poll_accept(addr, &mut Context::from_waker(&waker.clone().into())) else { panic!()};
+
+        assert_eq!(a, src_addr);
+        syn.ack.send(()).unwrap();
+        assert!(receiver
+            .poll_unpin(&mut Context::from_waker(&waker.clone().into()))
+            .is_ready());
+
+        assert!(tcp.binds.get(&addr).unwrap().waker.is_none());
+
+        // send new SYN before polling listener again
+        let src_addr = "127.0.0.1:9012".parse().unwrap();
+        let (sender, _receiver) = oneshot::channel();
+        tcp.receive_from_network(src_addr, addr, Segment::Syn(Syn { ack: sender }))
+            .unwrap();
+
+        // listener is immediately ready
+        let Poll::Ready((_syn, a)) =
+            tcp.poll_accept(addr, &mut Context::from_waker(&waker.clone().into())) else { panic!() };
+        assert_eq!(a, src_addr);
+
+        // no waker was kept
+        assert!(tcp.binds.get(&addr).unwrap().waker.is_none());
     }
 }
