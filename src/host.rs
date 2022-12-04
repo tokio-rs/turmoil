@@ -434,6 +434,14 @@ mod test {
 
     use super::StreamSocket;
 
+    struct MockWaker(AtomicU8);
+
+    impl Wake for MockWaker {
+        fn wake(self: std::sync::Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     #[test]
     fn recycle_ports() -> Result {
         let mut host = Host::new(
@@ -455,13 +463,6 @@ mod test {
 
     #[test]
     fn socket_read() {
-        struct MockWaker(AtomicU8);
-        impl Wake for MockWaker {
-            fn wake(self: std::sync::Arc<Self>) {
-                self.0.fetch_add(1, Ordering::Relaxed);
-            }
-        }
-
         let waker = Arc::new(MockWaker(AtomicU8::new(0)));
 
         let mut socket = StreamSocket::new();
@@ -515,5 +516,33 @@ mod test {
         let mut buf = [0; 10];
         assert_eq!(socket.try_read(&mut buf), 10);
         assert_eq!(&buf, b"helloworld");
+    }
+
+    #[test]
+    fn try_peek() {
+        let mut socket = StreamSocket::new();
+        socket
+            .buffer(1, SequencedSegment::Data(Bytes::from_static(b"hello")))
+            .unwrap();
+        socket
+            .buffer(2, SequencedSegment::Data(Bytes::from_static(b"world")))
+            .unwrap();
+        let mut buf = [0; 10];
+        assert_eq!(socket.try_peek(&mut buf), 10);
+        assert_eq!(&buf, b"helloworld");
+
+        // we can peek again
+        let mut buf = [0; 10];
+        assert_eq!(socket.try_peek(&mut buf), 10);
+        assert_eq!(&buf, b"helloworld");
+
+        // we can also read
+        let mut buf = [0; 10];
+        assert_eq!(socket.try_read(&mut buf), 10);
+        assert_eq!(&buf, b"helloworld");
+
+        // now it's empty
+        let mut buf = [0; 10];
+        assert_eq!(socket.try_peek(&mut buf), 0);
     }
 }
