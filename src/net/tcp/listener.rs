@@ -65,9 +65,9 @@ impl TcpListener {
                 }
 
                 let pair = SocketPair::new(self.local_addr, origin);
-                let rx = host.tcp.new_stream(pair);
+                host.tcp.new_stream(pair);
 
-                Some((TcpStream::new(pair, rx), origin))
+                Some((TcpStream::new(pair), origin))
             });
 
             if let Some(accepted) = maybe_accept {
