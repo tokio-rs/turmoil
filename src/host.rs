@@ -3,13 +3,14 @@ use crate::net::{SocketPair, TcpListener, UdpSocket};
 use crate::world::World;
 use crate::{Envelope, TRACING_TARGET};
 
-use bytes::Bytes;
+use bytes::{Buf, Bytes};
 use indexmap::IndexMap;
 use std::collections::VecDeque;
 use std::fmt::Display;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::task::{Context, Poll, Waker};
 use tokio::sync::{mpsc, Notify};
 use tokio::time::{Duration, Instant};
 
@@ -181,9 +182,6 @@ pub(crate) struct Tcp {
 
     /// Active stream sockets
     sockets: IndexMap<SocketPair, StreamSocket>,
-
-    /// TcpStream channel capacity
-    socket_capacity: usize,
 }
 
 struct ServerSocket {
@@ -194,15 +192,17 @@ struct ServerSocket {
     deque: VecDeque<(Syn, SocketAddr)>,
 }
 
-struct StreamSocket {
-    local_addr: SocketAddr,
+pub(crate) struct StreamSocket {
     buf: IndexMap<u64, SequencedSegment>,
     next_send_seq: u64,
     recv_seq: u64,
-    sender: mpsc::Sender<SequencedSegment>,
+    rcv_buffer: VecDeque<SequencedSegment>,
+    /// Waker from the last context that polled with read interest. This mirrors tokio's behaviour.
+    reader: Option<Waker>,
     /// A simple reference counter for tracking read/write half drops. Once 0, the
     /// socket may be removed from the host.
     ref_ct: usize,
+    closed: bool,
 }
 
 /// Stripped down version of [`Segment`] for delivery out to the application
@@ -223,18 +223,52 @@ impl Display for SequencedSegment {
 }
 
 impl StreamSocket {
-    fn new(local_addr: SocketAddr, capacity: usize) -> (Self, mpsc::Receiver<SequencedSegment>) {
-        let (tx, rx) = mpsc::channel(capacity);
+    fn new() -> Self {
         let sock = Self {
-            local_addr,
             buf: IndexMap::new(),
             next_send_seq: 1,
             recv_seq: 0,
-            sender: tx,
             ref_ct: 2,
+            rcv_buffer: Default::default(),
+            reader: None,
+            closed: false,
         };
 
-        (sock, rx)
+        sock
+    }
+
+    pub(crate) fn poll_read_ready(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+        if self.rcv_buffer.is_empty() && !self.closed {
+            self.reader.replace(cx.waker().clone());
+            Poll::Pending
+        } else {
+            Poll::Ready(())
+        }
+    }
+
+    pub(crate) fn try_read(&mut self, buf: &mut [u8]) -> usize {
+        let mut total_read = 0;
+        while total_read < buf.len() {
+            match self.rcv_buffer.pop_front() {
+                Some(SequencedSegment::Data(mut data)) => {
+                    let n = data.len().min(buf.len() - total_read);
+                    buf[total_read..total_read + n].copy_from_slice(&data[..n]);
+                    data.advance(n);
+                    // buf is not large enough to contains all the data in the segment: re-enqueue it
+                    // for later.
+                    if data.has_remaining() {
+                        self.rcv_buffer.push_front(SequencedSegment::Data(data));
+                    }
+                    total_read += n;
+                }
+                Some(SequencedSegment::Fin) => {
+                    self.closed = true;
+                    break;
+                }
+                None => break,
+            }
+        }
+        total_read
     }
 
     fn assign_seq(&mut self) -> u64 {
@@ -246,8 +280,6 @@ impl StreamSocket {
     // Buffer and re-order received segments by `seq` as the network may deliver
     // them out of order.
     fn buffer(&mut self, seq: u64, segment: SequencedSegment) -> Result<(), Protocol> {
-        use mpsc::error::TrySendError::Closed;
-
         let exists = self.buf.insert(seq, segment);
 
         assert!(exists.is_none(), "duplicate segment {}", seq);
@@ -256,10 +288,11 @@ impl StreamSocket {
             self.recv_seq += 1;
 
             let segment = self.buf.remove(&self.recv_seq).unwrap();
-            self.sender.try_send(segment).map_err(|e| match e {
-                Closed(_) => Protocol::Tcp(Segment::Rst),
-                _ => todo!("{} socket buffer full", self.local_addr),
-            })?;
+            self.rcv_buffer.push_back(segment);
+        }
+
+        if let Some(waker) = self.reader.take() {
+            waker.wake();
         }
 
         Ok(())
@@ -273,7 +306,6 @@ impl Tcp {
             sockets: IndexMap::new(),
             // TODO: Make capacity configurable
             server_socket_capacity: 64,
-            socket_capacity: 64,
         }
     }
 
@@ -298,14 +330,12 @@ impl Tcp {
         Ok(TcpListener::new(addr, notify))
     }
 
-    pub(crate) fn new_stream(&mut self, pair: SocketPair) -> mpsc::Receiver<SequencedSegment> {
-        let (sock, rx) = StreamSocket::new(pair.local, self.socket_capacity);
+    pub(crate) fn new_stream(&mut self, pair: SocketPair) {
+        let sock = StreamSocket::new();
 
         let exists = self.sockets.insert(pair, sock);
 
         assert!(exists.is_none(), "{:?} is already connected", pair);
-
-        rx
     }
 
     pub(crate) fn accept(&mut self, addr: SocketAddr) -> Option<(Syn, SocketAddr)> {
@@ -375,11 +405,23 @@ impl Tcp {
 
         tracing::info!(target: TRACING_TARGET, ?addr, protocol = %"TCP", "Unbind");
     }
+
+    pub(crate) fn socket_mut(&mut self, pair: &SocketPair) -> Option<&mut StreamSocket> {
+        self.sockets.get_mut(pair)
+    }
 }
 
 #[cfg(test)]
 mod test {
-    use crate::{Host, Result};
+    use std::sync::atomic::{AtomicU8, Ordering};
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Wake};
+
+    use bytes::Bytes;
+
+    use crate::{host::SequencedSegment, Host, Result};
+
+    use super::StreamSocket;
 
     #[test]
     fn recycle_ports() -> Result {

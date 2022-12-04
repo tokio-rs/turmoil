@@ -10,12 +10,11 @@ use std::{
 use bytes::{Buf, Bytes};
 use tokio::{
     io::{AsyncRead, AsyncWrite, ReadBuf},
-    sync::{mpsc, oneshot},
+    sync::oneshot,
 };
 
 use crate::{
     envelope::{Protocol, Segment, Syn},
-    host::SequencedSegment,
     net::SocketPair,
     world::World,
     ToSocketAddrs, TRACING_TARGET,
@@ -33,13 +32,9 @@ pub struct TcpStream {
 }
 
 impl TcpStream {
-    pub(crate) fn new(pair: SocketPair, receiver: mpsc::Receiver<SequencedSegment>) -> Self {
+    pub(crate) fn new(pair: SocketPair) -> Self {
         let pair = Arc::new(pair);
-        let read_half = ReadHalf {
-            pair: pair.clone(),
-            receiver,
-            is_closed: false,
-        };
+        let read_half = ReadHalf { pair: pair.clone() };
 
         let write_half = WriteHalf {
             pair,
@@ -56,7 +51,7 @@ impl TcpStream {
     pub async fn connect<A: ToSocketAddrs>(addr: A) -> Result<TcpStream> {
         let (ack, syn_ack) = oneshot::channel();
 
-        let (pair, rx) = World::current(|world| {
+        let pair = World::current(|world| {
             let dst = addr.to_socket_addr(&world.dns);
             let syn = Segment::Syn(Syn { ack });
 
@@ -64,10 +59,10 @@ impl TcpStream {
             let local_addr = (host.addr, host.assign_ephemeral_port()).into();
 
             let pair = SocketPair::new(local_addr, dst);
-            let rx = host.tcp.new_stream(pair);
+            host.tcp.new_stream(pair);
             world.send_message(local_addr, dst, Protocol::Tcp(syn));
 
-            (pair, rx)
+            pair
         });
 
         syn_ack.await.map_err(|_| {
@@ -76,7 +71,7 @@ impl TcpStream {
 
         tracing::trace!(target: TRACING_TARGET, dst = ?pair.local, src = ?pair.remote, protocol = %"TCP SYN-ACK", "Recv");
 
-        Ok(TcpStream::new(pair, rx))
+        Ok(TcpStream::new(pair))
     }
 
     /// Returns the local address that this stream is bound to.
@@ -115,48 +110,39 @@ impl TcpStream {
     }
 }
 
+#[derive(Debug)]
 pub(crate) struct ReadHalf {
     pub(crate) pair: Arc<SocketPair>,
-    receiver: mpsc::Receiver<SequencedSegment>,
-    /// FIN received, EOF for reades
-    is_closed: bool,
 }
 
 impl ReadHalf {
     fn poll_read_priv(&mut self, cx: &mut Context<'_>, buf: &mut ReadBuf) -> Poll<Result<()>> {
-        if self.is_closed || buf.capacity() == 0 {
+        if buf.capacity() == 0 {
             return Poll::Ready(Ok(()));
         }
 
-        match ready!(self.receiver.poll_recv(cx)) {
-            Some(seg) => {
-                tracing::trace!(target: TRACING_TARGET, dst = ?self.pair.local, src = ?self.pair.remote, protocol = %seg, "Recv");
-
-                match seg {
-                    SequencedSegment::Data(bytes) => {
-                        buf.put_slice(bytes.as_ref());
-                    }
-                    SequencedSegment::Fin => {
-                        self.is_closed = true;
+        World::current(|world| {
+            let host = world.current_host_mut();
+            match host.tcp.socket_mut(&self.pair) {
+                Some(socket) => {
+                    ready!(socket.poll_read_ready(cx));
+                    unsafe {
+                        let buffer = std::slice::from_raw_parts_mut(
+                            buf.unfilled_mut().as_mut_ptr() as _,
+                            buf.remaining(),
+                        );
+                        let n = socket.try_read(buffer);
+                        buf.assume_init(buf.initialized().len() + n);
+                        buf.advance(n);
+                        Poll::Ready(Ok(()))
                     }
                 }
-
-                Poll::Ready(Ok(()))
+                None => Poll::Ready(Err(io::Error::new(
+                    io::ErrorKind::ConnectionReset,
+                    "Connection reset",
+                ))),
             }
-            None => Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::ConnectionReset,
-                "Connection reset",
-            ))),
-        }
-    }
-}
-
-impl Debug for ReadHalf {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ReadHalf")
-            .field("pair", &self.pair)
-            .field("is_closed", &self.is_closed)
-            .finish()
+        })
     }
 }
 
