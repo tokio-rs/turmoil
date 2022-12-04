@@ -1,5 +1,6 @@
 use std::{
     fmt::Debug,
+    future::poll_fn,
     io::{self, Result},
     net::SocketAddr,
     pin::Pin,
@@ -108,6 +109,30 @@ impl TcpStream {
             },
         )
     }
+
+    /// Attempts to receive data on the socket, without removing that data from
+    /// the queue, registering the current task for wakeup if data is not yet
+    /// available.
+    ///
+    /// Note that on multiple calls to `poll_peek`, `poll_read` or
+    /// `poll_read_ready`, only the `Waker` from the `Context` passed to the
+    /// most recent call is scheduled to receive a wakeup. (However,
+    /// `poll_write` retains a second, independent waker.)
+    ///
+    /// Behaves as its [tokio counterpart](https://docs.rs/tokio/latest/tokio/net/struct.TcpStream.html#method.poll_peek).
+    pub fn poll_peek(&self, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<Result<usize>> {
+        self.read_half.poll_peek_priv(cx, buf)
+    }
+
+    /// Receives data on the socket from the remote address to which it is
+    /// connected, without removing that data from the queue. On success,
+    /// returns the number of bytes peeked.
+    ///
+    /// Behaves as its [tokio counterpart](https://docs.rs/tokio/latest/tokio/net/struct.TcpStream.html#method.peek).
+    pub async fn peek(&self, buf: &mut [u8]) -> Result<usize> {
+        let mut buf = ReadBuf::new(buf);
+        poll_fn(|cx| self.poll_peek(cx, &mut buf)).await
+    }
 }
 
 #[derive(Debug)]
@@ -135,6 +160,35 @@ impl ReadHalf {
                         buf.assume_init(buf.initialized().len() + n);
                         buf.advance(n);
                         Poll::Ready(Ok(()))
+                    }
+                }
+                None => Poll::Ready(Err(io::Error::new(
+                    io::ErrorKind::ConnectionReset,
+                    "Connection reset",
+                ))),
+            }
+        })
+    }
+
+    fn poll_peek_priv(&self, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<Result<usize>> {
+        if buf.capacity() == 0 {
+            return Poll::Ready(Ok(0));
+        }
+
+        World::current(|world| {
+            let host = world.current_host_mut();
+            match host.tcp.socket_mut(&self.pair) {
+                Some(socket) => {
+                    ready!(socket.poll_read_ready(cx));
+                    unsafe {
+                        let buffer = std::slice::from_raw_parts_mut(
+                            buf.unfilled_mut().as_mut_ptr() as _,
+                            buf.remaining(),
+                        );
+                        let n = socket.try_peek(buffer);
+                        buf.assume_init(buf.initialized().len() + n);
+                        buf.advance(n);
+                        Poll::Ready(Ok(n))
                     }
                 }
                 None => Poll::Ready(Err(io::Error::new(

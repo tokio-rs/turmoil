@@ -260,6 +260,28 @@ impl StreamSocket {
         total_read
     }
 
+    pub(crate) fn try_peek(&mut self, buf: &mut [u8]) -> usize {
+        let mut total_read = 0;
+        for seg in self.rcv_buffer.iter() {
+            match seg {
+                SequencedSegment::Data(data) => {
+                    let n = data.len().min(buf.len() - total_read);
+                    buf[total_read..total_read + n].copy_from_slice(&data[..n]);
+                    total_read += n;
+                    if total_read == buf.len() {
+                        break;
+                    }
+                }
+                SequencedSegment::Fin => {
+                    self.closed = true;
+                    break;
+                }
+            }
+        }
+
+        total_read
+    }
+
     fn assign_seq(&mut self) -> u64 {
         let seq = self.next_send_seq;
         self.next_send_seq += 1;
