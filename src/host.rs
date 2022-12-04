@@ -319,13 +319,15 @@ impl Tcp {
         addr: SocketAddr,
         cx: &mut Context<'_>,
     ) -> Poll<(Syn, SocketAddr)> {
-        let socket = &mut self.binds[&addr];
-        match socket.deque.pop_front() {
-            Some(e) => Poll::Ready(e),
-            None => {
-                socket.waker.replace(cx.waker().clone());
-                Poll::Pending
-            }
+        match self.binds.get_mut(&addr) {
+            Some(socket) => match socket.deque.pop_front() {
+                Some(e) => Poll::Ready(e),
+                None => {
+                    socket.waker.replace(cx.waker().clone());
+                    Poll::Pending
+                }
+            },
+            None => panic!("no binding for {addr}"),
         }
     }
 
