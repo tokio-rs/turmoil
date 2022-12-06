@@ -1,5 +1,5 @@
 use rand_distr::Exp;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 #[derive(Clone)]
 pub(crate) struct Config {
@@ -8,6 +8,9 @@ pub(crate) struct Config {
 
     /// How much simulated time should elapse each tick
     pub(crate) tick: Duration,
+
+    /// When the simulation starts
+    pub(crate) epoch: SystemTime,
 }
 
 /// Configures link behavior.
@@ -48,6 +51,7 @@ impl Default for Config {
         Config {
             duration: Duration::from_secs(10),
             tick: Duration::from_millis(1),
+            epoch: SystemTime::now(),
         }
     }
 }

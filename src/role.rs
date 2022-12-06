@@ -37,7 +37,16 @@ impl<'a> Role<'a> {
         }
     }
 
-    pub(crate) fn tick(&self, duration: Duration) -> Instant {
+    pub(crate) fn now(&self) -> Instant {
+        let rt = match self {
+            Role::Client { rt, .. } => rt,
+            Role::Simulated { rt, .. } => rt,
+        };
+
+        rt.now()
+    }
+
+    pub(crate) fn tick(&self, duration: Duration) {
         let rt = match self {
             Role::Client { rt, .. } => rt,
             Role::Simulated { rt, .. } => rt,
