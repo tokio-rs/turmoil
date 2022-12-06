@@ -12,6 +12,7 @@ simulated network. The network can be controlled manually or with a seeded rng.
 [![Crates.io][crates-badge]][crates-url]
 [![Documentation][docs-badge]][docs-url]
 [![Build Status][actions-badge]][actions-url]
+[![Discord chat](https://img.shields.io/discord/500028886025895936.svg?logo=discord&style=flat-square)](https://discord.com/channels/500028886025895936/628283075398467594)
 
 [crates-badge]: https://img.shields.io/crates/v/turmoil.svg
 [crates-url]: https://crates.io/crates/turmoil
