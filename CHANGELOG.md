@@ -1,3 +1,11 @@
+# 0.3.3 (Dec 7, 2022)
+
+### Fixed
+
+- Fix host elapsed time across software restarts ([#65])
+
+[#65]: https://github.com/tokio-rs/turmoil/pull/65
+
 # 0.3.2 (Nov 14, 2022)
 
 ### Added

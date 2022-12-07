@@ -12,7 +12,7 @@ simulated network. The network can be controlled manually or with a seeded rng.
 [![Crates.io][crates-badge]][crates-url]
 [![Documentation][docs-badge]][docs-url]
 [![Build Status][actions-badge]][actions-url]
-[![Discord chat](https://img.shields.io/discord/500028886025895936.svg?logo=discord&style=flat-square)](https://discord.com/channels/500028886025895936/628283075398467594)
+[![Discord chat][discord-badge]][discord-url]
 
 [crates-badge]: https://img.shields.io/crates/v/turmoil.svg
 [crates-url]: https://crates.io/crates/turmoil
@@ -20,6 +20,8 @@ simulated network. The network can be controlled manually or with a seeded rng.
 [docs-url]: https://docs.rs/turmoil
 [actions-badge]: https://github.com/tokio-rs/turmoil/actions/workflows/rust.yml/badge.svg?branch=main
 [actions-url]: https://github.com/tokio-rs/turmoil/actions?query=workflow%3ACI+branch%3Amain
+[discord-badge]: https://img.shields.io/discord/500028886025895936.svg?logo=discord&style=flat-square
+[discord-url]: https://discord.com/channels/500028886025895936/628283075398467594
 
 ## Quickstart
 
@@ -56,9 +58,8 @@ sim.run();
 
 `RUSTFLAG="--cfg tokio_unstable"` is necessary to compile the project.
 
-See `ping_pong` in [udp.rs](tests/udp.rs) for a networking example.
-
-For more examples, check out the [tests](tests) directory.
+See `ping_pong` in [udp.rs](tests/udp.rs) for a networking example. For more
+examples, check out the [tests](tests) directory.
 
 ## License
 
