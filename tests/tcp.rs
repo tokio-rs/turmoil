@@ -5,6 +5,7 @@ use std::{
     time::Duration,
 };
 
+use futures::future;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     sync::Notify,
@@ -21,10 +22,8 @@ fn assert_error_kind<T>(res: io::Result<T>, kind: io::ErrorKind) {
     assert_eq!(res.err().map(|e| e.kind()), Some(kind));
 }
 
-async fn bind() -> TcpListener {
-    TcpListener::bind((IpAddr::from(Ipv4Addr::UNSPECIFIED), PORT))
-        .await
-        .unwrap()
+async fn bind() -> std::result::Result<TcpListener, std::io::Error> {
+    TcpListener::bind((IpAddr::from(Ipv4Addr::UNSPECIFIED), PORT)).await
 }
 
 #[test]
@@ -32,7 +31,7 @@ fn network_partitions_during_connect() -> Result {
     let mut sim = Builder::new().build();
 
     sim.host("server", || async {
-        let listener = bind().await;
+        let listener = bind().await?;
         loop {
             let _ = listener.accept().await;
         }
@@ -68,7 +67,7 @@ fn client_hangup_on_connect() -> Result {
     let timeout_secs = 1;
 
     sim.client("server", async move {
-        let listener = bind().await;
+        let listener = bind().await?;
 
         assert!(
             timeout(Duration::from_secs(timeout_secs * 2), listener.accept())
@@ -105,7 +104,7 @@ fn hold_and_release_once_connected() -> Result {
     let wait = notify.clone();
 
     sim.client("server", async move {
-        let listener = bind().await;
+        let listener = bind().await?;
         let (mut s, _) = listener.accept().await?;
 
         wait.notified().await;
@@ -138,7 +137,7 @@ fn network_partition_once_connected() -> Result {
     let mut sim = Builder::new().build();
 
     sim.client("server", async move {
-        let listener = bind().await;
+        let listener = bind().await?;
         let (mut s, _) = listener.accept().await?;
 
         assert!(timeout(Duration::from_secs(1), s.read_u8()).await.is_err());
@@ -173,11 +172,13 @@ fn accept_front_of_line_blocking() -> Result {
     // We setup the simulation with hosts A, B, and C
 
     sim.host("B", || async {
-        let listener = bind().await;
+        let listener = bind().await?;
 
         while let Ok((_, peer)) = listener.accept().await {
             tracing::debug!("peer {}", peer);
         }
+
+        Ok(())
     });
 
     // Hold all traffic from A:B
@@ -212,11 +213,13 @@ fn send_upon_accept() -> Result {
     let mut sim = Builder::new().build();
 
     sim.host("server", || async {
-        let listener = bind().await;
+        let listener = bind().await?;
 
         while let Ok((mut s, _)) = listener.accept().await {
             assert!(s.write_u8(9).await.is_ok());
         }
+
+        Ok(())
     });
 
     sim.client("client", async {
@@ -235,7 +238,7 @@ fn n_responses() -> Result {
     let mut sim = Builder::new().build();
 
     sim.host("server", || async {
-        let listener = bind().await;
+        let listener = bind().await?;
 
         while let Ok((mut s, _)) = listener.accept().await {
             tokio::spawn(async move {
@@ -246,6 +249,8 @@ fn n_responses() -> Result {
                 }
             });
         }
+
+        Ok(())
     });
 
     sim.client("client", async {
@@ -269,7 +274,7 @@ fn server_concurrency() -> Result {
     let mut sim = Builder::new().build();
 
     sim.host("server", || async {
-        let listener = bind().await;
+        let listener = bind().await?;
 
         while let Ok((mut s, _)) = listener.accept().await {
             tokio::spawn(async move {
@@ -280,6 +285,8 @@ fn server_concurrency() -> Result {
                 }
             });
         }
+
+        Ok(())
     });
 
     let how_many = 3;
@@ -314,10 +321,10 @@ fn drop_listener() -> Result {
         let notify = notify.clone();
 
         async move {
-            let listener = bind().await;
+            let listener = bind().await?;
 
             for _ in 0..how_many_conns {
-                let (mut s, _) = listener.accept().await.unwrap();
+                let (mut s, _) = listener.accept().await?;
                 tokio::spawn(async move {
                     while let Ok(how_many) = s.read_u8().await {
                         for i in 0..how_many {
@@ -329,6 +336,8 @@ fn drop_listener() -> Result {
 
             drop(listener);
             notify.notify_one();
+
+            future::pending().await
         }
     });
 
@@ -376,9 +385,10 @@ fn drop_listener_with_non_empty_queue() -> Result {
         let wait = wait.clone();
 
         async move {
-            let listener = bind().await;
+            let listener = bind().await?;
             wait.notified().await;
             drop(listener);
+            future::pending().await
         }
     });
 
@@ -428,7 +438,7 @@ fn hangup() -> Result {
     let mut sim = Builder::new().build();
 
     sim.client("server", async move {
-        let listener = bind().await;
+        let listener = bind().await?;
         let (mut s, _) = listener.accept().await?;
 
         let mut buf = [0; 8];
@@ -468,7 +478,7 @@ fn shutdown_write() -> Result {
     let mut sim = Builder::new().build();
 
     sim.client("server", async move {
-        let listener = bind().await;
+        let listener = bind().await?;
         let (mut s, _) = listener.accept().await?;
 
         for i in 1..=3 {
@@ -513,7 +523,7 @@ fn read_with_empty_buffer() -> Result {
     let mut sim = Builder::new().build();
 
     sim.client("server", async move {
-        let listener = bind().await;
+        let listener = bind().await?;
         let _ = listener.accept().await?;
 
         Ok(())
@@ -538,7 +548,7 @@ fn write_zero_bytes() -> Result {
     let mut sim = Builder::new().build();
 
     sim.client("server", async move {
-        let listener = bind().await;
+        let listener = bind().await?;
         let (mut s, _) = listener.accept().await?;
 
         assert_eq!(1, s.read_u8().await?);
@@ -567,7 +577,7 @@ fn split() -> Result {
     let mut sim = Builder::new().build();
 
     sim.client("server", async move {
-        let listener = bind().await;
+        let listener = bind().await?;
         let (mut s, _) = listener.accept().await?;
 
         assert_eq!(1, s.read_u8().await?);

@@ -88,7 +88,7 @@ impl<'a> Sim<'a> {
     pub fn host<F, Fut>(&mut self, addr: impl ToIpAddr, host: F)
     where
         F: Fn() -> Fut + 'a,
-        Fut: Future<Output = ()> + 'static,
+        Fut: Future<Output = Result> + 'static,
     {
         let rt = Rt::new();
         let addr = self.lookup(addr);
@@ -100,13 +100,9 @@ impl<'a> Sim<'a> {
             world.register(addr);
         }
 
-        World::enter(&self.world, || {
-            rt.with(|| {
-                tokio::task::spawn_local(host());
-            });
-        });
+        let handle = World::enter(&self.world, || rt.with(|| tokio::task::spawn_local(host())));
 
-        self.rts.insert(addr, Role::simulated(rt, host));
+        self.rts.insert(addr, Role::simulated(rt, host, handle));
     }
 
     /// Crash a host. Nothing will be running on the host after this method. You
@@ -117,18 +113,22 @@ impl<'a> Sim<'a> {
             Role::Simulated { rt, .. } => {
                 rt.cancel_tasks();
             }
-        });
+        })
     }
 
     /// Bounce a host. The software is restarted.
     pub fn bounce(&mut self, addr: impl ToIpAddr) {
         self.run_with_host(addr, |rt| match rt {
             Role::Client { .. } => panic!("can only bounce hosts, not clients"),
-            Role::Simulated { rt, software } => {
+            Role::Simulated {
+                rt,
+                software,
+                handle,
+            } => {
                 rt.cancel_tasks();
-                rt.with(|| tokio::task::spawn_local(software()));
+                handle.replace(rt.with(|| tokio::task::spawn_local(software())));
             }
-        });
+        })
     }
 
     // Run `f` with the host at `addr` set on the world.
@@ -245,15 +245,31 @@ impl<'a> Sim<'a> {
                     }
                     is_finished = is_finished && handle.is_finished();
                 }
+
+                if let Role::Simulated {
+                    handle: Some(handle),
+                    ..
+                } = rt
+                {
+                    if handle.is_finished() {
+                        finished.push(addr);
+                    }
+                }
             }
 
             self.elapsed += tick;
 
-            // Check finished clients for err results. Runtimes are removed at
+            // Check finished clients and hosts for err results. Runtimes are removed at
             // this stage.
             for addr in finished.iter() {
-                if let Some(Role::Client { rt, handle }) = self.rts.remove(addr) {
-                    rt.block_on(handle)??;
+                if let Some(role) = self.rts.remove(addr) {
+                    let (rt, handle) = match role {
+                        Role::Client { rt, handle } => (rt, Some(handle)),
+                        Role::Simulated { rt, handle, .. } => (rt, handle),
+                    };
+                    if let Some(handle) = handle {
+                        rt.block_on(handle)??;
+                    }
                 }
             }
 
@@ -282,6 +298,7 @@ mod test {
         time::Duration,
     };
 
+    use futures::future;
     use tokio::sync::Semaphore;
 
     use crate::{elapsed, Builder, Result};
@@ -360,8 +377,10 @@ mod test {
             async move {
                 tokio::spawn(async move {
                     let _into_task = ct;
-                    _ = Semaphore::new(0).acquire().await;
+                    future::pending::<()>().await;
                 });
+
+                future::pending().await
             }
         });
 
@@ -444,5 +463,16 @@ mod test {
         assert_eq!((tick_ms * 2) - 1, actual.load(Ordering::SeqCst));
 
         Ok(())
+    }
+
+    #[test]
+    fn host_finishes_with_error() {
+        let mut sim = Builder::new().build();
+
+        sim.host("host", || async {
+            Err("Host software finished unexpectedly")?
+        });
+
+        assert!(sim.run().is_err());
     }
 }

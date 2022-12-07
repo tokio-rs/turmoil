@@ -8,7 +8,7 @@ use crate::{rt::Rt, Result};
 // To support re-creation, we need to store a factory of the future that
 // represents the software. This is somewhat annoying in that it requires
 // boxxing to avoid generics.
-type Software<'a> = Box<dyn Fn() -> Pin<Box<dyn Future<Output = ()>>> + 'a>;
+type Software<'a> = Box<dyn Fn() -> Pin<Box<dyn Future<Output = Result>>> + 'a>;
 
 /// Differentiates runtime fields for different host types
 pub(crate) enum Role<'a> {
@@ -16,7 +16,11 @@ pub(crate) enum Role<'a> {
     Client { rt: Rt, handle: JoinHandle<Result> },
 
     /// A simulated host
-    Simulated { rt: Rt, software: Software<'a> },
+    Simulated {
+        rt: Rt,
+        software: Software<'a>,
+        handle: Option<JoinHandle<Result>>,
+    },
 }
 
 impl<'a> Role<'a> {
@@ -24,16 +28,17 @@ impl<'a> Role<'a> {
         Self::Client { rt, handle }
     }
 
-    pub(crate) fn simulated<F, Fut>(rt: Rt, software: F) -> Self
+    pub(crate) fn simulated<F, Fut>(rt: Rt, software: F, handle: JoinHandle<Result>) -> Self
     where
         F: Fn() -> Fut + 'a,
-        Fut: Future<Output = ()> + 'static,
+        Fut: Future<Output = Result> + 'static,
     {
         let wrapped: Software = Box::new(move || Box::pin(software()));
 
         Self::Simulated {
             rt,
             software: wrapped,
+            handle: Some(handle),
         }
     }
 
