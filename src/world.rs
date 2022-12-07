@@ -6,7 +6,7 @@ use rand::RngCore;
 use scoped_tls::scoped_thread_local;
 use std::cell::RefCell;
 use std::net::{IpAddr, SocketAddr};
-use tokio::time::Instant;
+use std::time::Duration;
 
 /// Tracks all the state for the simulated world.
 pub(crate) struct World {
@@ -89,7 +89,7 @@ impl World {
     }
 
     /// Register a new host with the simulation.
-    pub(crate) fn register(&mut self, addr: IpAddr, epoch: Instant) {
+    pub(crate) fn register(&mut self, addr: IpAddr) {
         assert!(
             !self.hosts.contains_key(&addr),
             "already registered host for the given ip address"
@@ -103,7 +103,7 @@ impl World {
         }
 
         // Initialize host state
-        self.hosts.insert(addr, Host::new(addr, epoch));
+        self.hosts.insert(addr, Host::new(addr));
     }
 
     /// Send `message` from `src` to `dst`. Delivery is asynchronous and not
@@ -113,8 +113,11 @@ impl World {
             .enqueue_message(&mut self.rng, src, dst, message);
     }
 
-    /// Tick the host at `addr` to `now`.
-    pub(crate) fn tick(&mut self, addr: IpAddr, now: Instant) {
-        self.hosts.get_mut(&addr).expect("missing host").tick(now);
+    /// Tick the host at `addr` by `duration`.
+    pub(crate) fn tick(&mut self, addr: IpAddr, duration: Duration) {
+        self.hosts
+            .get_mut(&addr)
+            .expect("missing host")
+            .tick(duration);
     }
 }

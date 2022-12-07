@@ -56,16 +56,11 @@ impl Rt {
     // 3. Other tasks on the `LocalSet` get a chance to run
     // 4. The sleep finishes
     // 5. The runtime pauses
-    //
-    // Return the finish time and store that in [`crate::Host::now`] to maintain
-    // the host's local elapsed duration.
-    pub(crate) fn tick(&self, duration: Duration) -> Instant {
+    pub(crate) fn tick(&self, duration: Duration) {
         self.block_on(async {
             self.local
                 .run_until(async {
                     sleep(duration).await;
-
-                    Instant::now()
                 })
                 .await
         })

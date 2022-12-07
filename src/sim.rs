@@ -5,7 +5,7 @@ use std::cell::RefCell;
 use std::future::Future;
 use std::net::IpAddr;
 use std::ops::DerefMut;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 use tokio::time::Duration;
 
 /// Network simulation
@@ -31,9 +31,10 @@ pub struct Sim<'a> {
 
 impl<'a> Sim<'a> {
     pub(crate) fn new(config: Config, world: World) -> Self {
-        let since_epoch = SystemTime::now()
+        let since_epoch = config
+            .epoch
             .duration_since(UNIX_EPOCH)
-            .expect("now must be > UNIX_EPOCH");
+            .expect("now must be >= UNIX_EPOCH");
 
         Self {
             config,
@@ -64,14 +65,13 @@ impl<'a> Sim<'a> {
         F: Future<Output = Result> + 'static,
     {
         let rt = Rt::new();
-        let epoch = rt.now();
         let addr = self.lookup(addr);
 
         {
             let world = RefCell::get_mut(&mut self.world);
 
             // Register host state with the world
-            world.register(addr, epoch);
+            world.register(addr);
         }
 
         let handle = World::enter(&self.world, || rt.with(|| tokio::task::spawn_local(client)));
@@ -91,14 +91,13 @@ impl<'a> Sim<'a> {
         Fut: Future<Output = ()> + 'static,
     {
         let rt = Rt::new();
-        let epoch = rt.now();
         let addr = self.lookup(addr);
 
         {
             let world = RefCell::get_mut(&mut self.world);
 
             // Register host state with the world
-            world.register(addr, epoch);
+            world.register(addr);
         }
 
         World::enter(&self.world, || {
@@ -225,17 +224,20 @@ impl<'a> Sim<'a> {
                         ..
                     } = world.deref_mut();
                     topology.deliver_messages(rng, hosts.get_mut(&addr).expect("missing host"));
+
                     // Set the current host (see method docs)
                     world.current = Some(addr);
+
+                    world.current_host_mut().now(rt.now());
                 }
 
-                let now = World::enter(&self.world, || rt.tick(tick));
+                World::enter(&self.world, || rt.tick(tick));
 
                 // Unset the current host
-                self.world.borrow_mut().current = None;
-
                 let mut world = self.world.borrow_mut();
-                world.tick(addr, now);
+                world.current = None;
+
+                world.tick(addr, tick);
 
                 if let Role::Client { handle, .. } = rt {
                     if handle.is_finished() {
@@ -271,7 +273,14 @@ impl<'a> Sim<'a> {
 
 #[cfg(test)]
 mod test {
-    use std::{rc::Rc, sync::Arc, time::Duration};
+    use std::{
+        rc::Rc,
+        sync::{
+            atomic::{AtomicU64, Ordering},
+            Arc,
+        },
+        time::Duration,
+    };
 
     use tokio::sync::Semaphore;
 
@@ -402,6 +411,37 @@ mod test {
 
         // one tick to complete
         assert_eq!(tick, sim.elapsed() - start);
+
+        Ok(())
+    }
+
+    #[test]
+    fn elapsed_time_across_restarts() -> Result {
+        let tick_ms = 5;
+        let mut sim = Builder::new()
+            .tick_duration(Duration::from_millis(tick_ms))
+            .build();
+
+        let clock = Arc::new(AtomicU64::new(0));
+        let actual = clock.clone();
+
+        sim.host("host", move || {
+            let clock = clock.clone();
+
+            async move {
+                loop {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                    clock.store(elapsed().as_millis() as u64, Ordering::SeqCst);
+                }
+            }
+        });
+
+        sim.run()?;
+        assert_eq!(tick_ms - 1, actual.load(Ordering::SeqCst));
+
+        sim.bounce("host");
+        sim.run()?;
+        assert_eq!((tick_ms * 2) - 1, actual.load(Ordering::SeqCst));
 
         Ok(())
     }

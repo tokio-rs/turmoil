@@ -1,7 +1,7 @@
 use crate::*;
 
 use rand::{RngCore, SeedableRng};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 /// Configure the simulation
 pub struct Builder {
@@ -22,6 +22,12 @@ impl Builder {
                 message_loss: Some(config::MessageLoss::default()),
             },
         }
+    }
+
+    /// When the simulation starts.
+    pub fn epoch(&mut self, value: SystemTime) -> &mut Self {
+        self.config.epoch = value;
+        self
     }
 
     /// How long the test should run for in simulated time

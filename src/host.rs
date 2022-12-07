@@ -31,27 +31,40 @@ pub(crate) struct Host {
     /// Ports 1024..=65535 for client connections.
     next_ephemeral_port: u16,
 
-    /// Current instant at the host.
-    pub(crate) now: Instant,
+    /// Host elapsed time.
+    elapsed: Duration,
 
-    epoch: Instant,
+    /// Set each time the software is run.
+    now: Option<Instant>,
 }
 
 impl Host {
-    pub(crate) fn new(addr: IpAddr, now: Instant) -> Host {
+    pub(crate) fn new(addr: IpAddr) -> Host {
         Host {
             addr,
             udp: Udp::new(),
             tcp: Tcp::new(),
             next_ephemeral_port: 1024,
-            now,
-            epoch: now,
+            elapsed: Duration::ZERO,
+            now: None,
         }
+    }
+
+    /// Set a new `Instant` for each iteration of the simulation. `elapsed` is
+    /// updated after each iteration via `tick()`, where as this value is
+    /// necessary to accurately calculate elapsed time while the software is
+    /// running.
+    ///
+    /// This is required to track logical time across host restarts as a single
+    /// `Instant` resets when the tokio runtime is recreated.
+    pub(crate) fn now(&mut self, now: Instant) {
+        self.now.replace(now);
     }
 
     /// Returns how long the host has been executing for in virtual time.
     pub(crate) fn elapsed(&self) -> Duration {
-        self.now - self.epoch
+        let run_duration = self.now.expect("host instant not set").elapsed();
+        self.elapsed + run_duration
     }
 
     pub(crate) fn assign_ephemeral_port(&mut self) -> u16 {
@@ -96,8 +109,8 @@ impl Host {
         }
     }
 
-    pub(crate) fn tick(&mut self, now: Instant) {
-        self.now = now;
+    pub(crate) fn tick(&mut self, duration: Duration) {
+        self.elapsed += duration
     }
 }
 
@@ -372,10 +385,7 @@ mod test {
 
     #[test]
     fn recycle_ports() -> Result {
-        let mut host = Host::new(
-            std::net::Ipv4Addr::UNSPECIFIED.into(),
-            tokio::time::Instant::now(),
-        );
+        let mut host = Host::new(std::net::Ipv4Addr::UNSPECIFIED.into());
 
         host.udp.bind((host.addr, 65534).into())?;
         host.udp.bind((host.addr, 65535).into())?;
