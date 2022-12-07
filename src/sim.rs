@@ -273,7 +273,14 @@ impl<'a> Sim<'a> {
 
 #[cfg(test)]
 mod test {
-    use std::{rc::Rc, sync::Arc, time::Duration};
+    use std::{
+        rc::Rc,
+        sync::{
+            atomic::{AtomicU64, Ordering},
+            Arc,
+        },
+        time::Duration,
+    };
 
     use tokio::sync::Semaphore;
 
@@ -404,6 +411,37 @@ mod test {
 
         // one tick to complete
         assert_eq!(tick, sim.elapsed() - start);
+
+        Ok(())
+    }
+
+    #[test]
+    fn elapsed_time_across_restarts() -> Result {
+        let tick_ms = 5;
+        let mut sim = Builder::new()
+            .tick_duration(Duration::from_millis(tick_ms))
+            .build();
+
+        let clock = Arc::new(AtomicU64::new(0));
+        let actual = clock.clone();
+
+        sim.host("host", move || {
+            let clock = clock.clone();
+
+            async move {
+                loop {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                    clock.store(elapsed().as_millis() as u64, Ordering::SeqCst);
+                }
+            }
+        });
+
+        sim.run()?;
+        assert_eq!(tick_ms - 1, actual.load(Ordering::SeqCst));
+
+        sim.bounce("host");
+        sim.run()?;
+        assert_eq!((tick_ms * 2) - 1, actual.load(Ordering::SeqCst));
 
         Ok(())
     }
