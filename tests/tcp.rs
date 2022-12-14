@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 
-use futures::future;
+use std::future;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     sync::Notify,

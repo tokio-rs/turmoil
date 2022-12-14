@@ -1,4 +1,4 @@
-use crate::{Config, Result, Role, Rt, ToIpAddr, World};
+use crate::{Config, Result, Role, Rt, ToIpAddr, World, TRACING_TARGET};
 
 use indexmap::IndexMap;
 use std::cell::RefCell;
@@ -113,7 +113,7 @@ impl<'a> Sim<'a> {
             Role::Simulated { rt, .. } => {
                 rt.cancel_tasks();
             }
-        })
+        });
     }
 
     /// Bounce a host. The software is restarted.
@@ -128,7 +128,7 @@ impl<'a> Sim<'a> {
                 rt.cancel_tasks();
                 handle.replace(rt.with(|| tokio::task::spawn_local(software())));
             }
-        })
+        });
     }
 
     // Run `f` with the host at `addr` set on the world.
@@ -261,14 +261,19 @@ impl<'a> Sim<'a> {
 
             // Check finished clients and hosts for err results. Runtimes are removed at
             // this stage.
-            for addr in finished.iter() {
-                if let Some(role) = self.rts.remove(addr) {
+            for addr in finished.into_iter() {
+                if let Some(role) = self.rts.remove(&addr) {
                     let (rt, handle) = match role {
                         Role::Client { rt, handle } => (rt, Some(handle)),
                         Role::Simulated { rt, handle, .. } => (rt, handle),
                     };
                     if let Some(handle) = handle {
-                        rt.block_on(handle)??;
+                        if let Err(error) = rt.block_on(handle)? {
+                            let world = self.world.borrow();
+                            let hostname = world.dns.reverse(addr);
+                            tracing::warn!(target: TRACING_TARGET, ?hostname, ?addr, ?error);
+                            return Err(error);
+                        }
                     }
                 }
             }
@@ -298,7 +303,7 @@ mod test {
         time::Duration,
     };
 
-    use futures::future;
+    use std::future;
     use tokio::sync::Semaphore;
 
     use crate::{elapsed, Builder, Result};
