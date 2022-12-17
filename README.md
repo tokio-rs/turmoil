@@ -41,7 +41,7 @@ let mut sim = turmoil::Builder::new().build();
 sim.host("server", || async move {
     // host software goes here
 
-    Err("Host software finished unexpectedly")?
+    Ok(())
 });
 
 // register a client

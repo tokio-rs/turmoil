@@ -19,7 +19,7 @@ pub(crate) enum Role<'a> {
     Simulated {
         rt: Rt,
         software: Software<'a>,
-        handle: Option<JoinHandle<Result>>,
+        handle: JoinHandle<Result>,
     },
 }
 
@@ -38,7 +38,7 @@ impl<'a> Role<'a> {
         Self::Simulated {
             rt,
             software: wrapped,
-            handle: Some(handle),
+            handle,
         }
     }
 

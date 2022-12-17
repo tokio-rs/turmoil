@@ -1,4 +1,4 @@
-use crate::{Config, Result, Role, Rt, ToIpAddr, World, TRACING_TARGET};
+use crate::{Config, Result, Role, Rt, ToIpAddr, World};
 
 use indexmap::IndexMap;
 use std::cell::RefCell;
@@ -126,7 +126,7 @@ impl<'a> Sim<'a> {
                 handle,
             } => {
                 rt.cancel_tasks();
-                handle.replace(rt.with(|| tokio::task::spawn_local(software())));
+                *handle = rt.with(|| tokio::task::spawn_local(software()));
             }
         });
     }
@@ -239,20 +239,17 @@ impl<'a> Sim<'a> {
 
                 world.tick(addr, tick);
 
-                if let Role::Client { handle, .. } = rt {
-                    if handle.is_finished() {
-                        finished.push(addr);
+                match rt {
+                    Role::Client { handle, .. } => {
+                        if handle.is_finished() {
+                            finished.push(addr);
+                        }
+                        is_finished = is_finished && handle.is_finished();
                     }
-                    is_finished = is_finished && handle.is_finished();
-                }
-
-                if let Role::Simulated {
-                    handle: Some(handle),
-                    ..
-                } = rt
-                {
-                    if handle.is_finished() {
-                        finished.push(addr);
+                    Role::Simulated { handle, .. } => {
+                        if handle.is_finished() {
+                            finished.push(addr);
+                        }
                     }
                 }
             }
@@ -264,17 +261,10 @@ impl<'a> Sim<'a> {
             for addr in finished.into_iter() {
                 if let Some(role) = self.rts.remove(&addr) {
                     let (rt, handle) = match role {
-                        Role::Client { rt, handle } => (rt, Some(handle)),
+                        Role::Client { rt, handle } => (rt, handle),
                         Role::Simulated { rt, handle, .. } => (rt, handle),
                     };
-                    if let Some(handle) = handle {
-                        if let Err(error) = rt.block_on(handle)? {
-                            let world = self.world.borrow();
-                            let hostname = world.dns.reverse(addr);
-                            tracing::warn!(target: TRACING_TARGET, ?hostname, ?addr, ?error);
-                            return Err(error);
-                        }
-                    }
+                    rt.block_on(handle)??;
                 }
             }
 
