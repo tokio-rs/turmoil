@@ -10,7 +10,9 @@ pub trait ToIpAddr {
     fn to_ip_addr(&self, dns: &mut Dns) -> IpAddr;
 }
 
-pub trait ToSocketAddrs {
+/// A simulated version of `tokio::net::ToSocketAddrs`.
+pub trait ToSocketAddrs: sealed::Sealed {
+    #[doc(hidden)]
     fn to_socket_addr(&self, dns: &Dns) -> SocketAddr;
 }
 
@@ -87,4 +89,29 @@ impl ToSocketAddrs for (IpAddr, u16) {
     fn to_socket_addr(&self, _: &Dns) -> SocketAddr {
         (*self).into()
     }
+}
+
+impl<T: ToSocketAddrs + ?Sized> ToSocketAddrs for &T {
+    fn to_socket_addr(&self, dns: &Dns) -> SocketAddr {
+        (**self).to_socket_addr(dns)
+    }
+}
+
+impl ToSocketAddrs for str {
+    fn to_socket_addr(&self, _: &Dns) -> SocketAddr {
+        self.parse().unwrap()
+    }
+}
+
+impl ToSocketAddrs for String {
+    fn to_socket_addr(&self, _: &Dns) -> SocketAddr {
+        self.parse().unwrap()
+    }
+}
+
+mod sealed {
+
+    pub trait Sealed {}
+
+    impl<T: ?Sized> Sealed for T {}
 }
