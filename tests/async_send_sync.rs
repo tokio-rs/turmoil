@@ -67,6 +67,7 @@ macro_rules! async_assert_fn {
     ($($f:ident $(< $($generic:ty),* > )? )::+($($arg:ty),*): $($tok:tt)*) => {
         #[allow(unreachable_code)]
         #[allow(unused_variables)]
+        #[allow(clippy::diverging_sub_expression)]
         const _: fn() = || {
             let f = $($f $(::<$($generic),*>)? )::+( $( into_todo!($arg) ),* );
             async_assert_fn_send!($($tok)*, f);
@@ -79,6 +80,7 @@ macro_rules! assert_value {
     ($type:ty: $($tok:tt)*) => {
         #[allow(unreachable_code)]
         #[allow(unused_variables)]
+        #[allow(clippy::diverging_sub_expression)]
         const _: fn() = || {
             let f: $type = todo!();
             async_assert_fn_send!($($tok)*, f);

@@ -33,6 +33,9 @@ jobs:
   clippy:
     name: Run Clippy
     runs-on: ${{ matrix.os }}
+    strategy:
+      matrix :
+        os: [ubuntu-latest]
     steps:
       - uses: actions/checkout@v3
       - uses: actions-rs/toolchain@v1

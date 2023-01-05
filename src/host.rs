@@ -157,12 +157,10 @@ impl Udp {
     }
 
     fn receive_from_network(&mut self, src: SocketAddr, dst: SocketAddr, datagram: Datagram) {
-        match self.binds.get_mut(&dst) {
-            Some(s) => s
-                .try_send((datagram, src))
-                .expect(&format!("unable to send to {}", dst)),
-            _ => {}
-        };
+        if let Some(s) = self.binds.get_mut(&dst) {
+            s.try_send((datagram, src))
+                .unwrap_or_else(|_| panic!("unable to send to {}", dst))
+        }
     }
 
     pub(crate) fn unbind(&mut self, addr: SocketAddr) {
@@ -218,7 +216,7 @@ pub(crate) enum SequencedSegment {
 impl Display for SequencedSegment {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SequencedSegment::Data(data) => hex("TCP", &data, f),
+            SequencedSegment::Data(data) => hex("TCP", data, f),
             SequencedSegment::Fin => write!(f, "TCP FIN"),
         }
     }
@@ -349,7 +347,7 @@ impl Tcp {
                 None => return Err(Protocol::Tcp(Segment::Rst)),
             },
             Segment::Rst => {
-                if let Some(_) = self.sockets.get(&SocketPair::new(dst, src)) {
+                if self.sockets.get(&SocketPair::new(dst, src)).is_some() {
                     self.sockets.remove(&SocketPair::new(dst, src)).unwrap();
                 }
             }

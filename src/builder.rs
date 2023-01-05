@@ -12,6 +12,12 @@ pub struct Builder {
     link: config::Link,
 }
 
+impl Default for Builder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Builder {
     pub fn new() -> Self {
         Self {
