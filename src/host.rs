@@ -190,7 +190,7 @@ struct ServerSocket {
     /// `Waker` from the `Context` of the last call to `poll_accept`.
     ///
     /// Similarly to tokio, only the `Waker` from the context of the last
-    /// call `poll_accept` is kept.
+    /// call to `poll_accept` is kept.
     waker: Option<Waker>,
 
     /// Pending connections for the TcpListener to accept
@@ -313,7 +313,7 @@ impl Tcp {
     /// Poll for new connections to `addr`.
     ///
     /// If there are none, the `Waker` from `cx` is stored, to wake up the task when
-    /// a new connection become available.
+    /// a new connection becomes available.
     pub(crate) fn poll_accept(
         &mut self,
         addr: SocketAddr,
@@ -489,7 +489,7 @@ mod test {
 
         // listener is immediately ready
         let Poll::Ready((_syn, a)) =
-            tcp.poll_accept(addr, &mut Context::from_waker(&waker.clone().into())) else { panic!() };
+            tcp.poll_accept(addr, &mut Context::from_waker(&waker.into())) else { panic!() };
         assert_eq!(a, src_addr);
 
         // no waker was kept
