@@ -4,7 +4,6 @@ on:
   push:
     branches: [ main ]
   pull_request:
-    branches: [ main ]
 
 env:
   CARGO_TERM_COLOR: always
@@ -16,7 +15,6 @@ jobs:
     strategy:
       matrix :
         os: [ubuntu-latest]
-
     steps:
       - name: Git Checkout
         uses: actions/checkout@v3
@@ -32,19 +30,19 @@ jobs:
           command: test
           args: --verbose
 
-    clippy:
-      name: Run Clippy
-      runs-on: ${{ matrix.os }}
-      steps:
-        - uses: actions/checkout@v3
-        - uses: actions-rs/toolchain@v1
-          with:
-            profile: minimal
-            toolchain: stable
-            override: true
-            components: clippy
-        - name: Run cargo clippy
-          uses: actions-rs/cargo@v1
-          with:
-            command: clippy
-            args: --all-targets -- --deny warnings
+  clippy:
+    name: Run Clippy
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+          components: clippy
+      - name: Run cargo clippy
+        uses: actions-rs/cargo@v1
+        with:
+          command: clippy
+          args: --all-targets -- --deny warnings
