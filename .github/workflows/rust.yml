@@ -19,7 +19,7 @@ jobs:
 
     steps:
       - name: Git Checkout
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
       - name: Rust Toolchain
         uses: actions-rs/toolchain@v1
         with:
@@ -31,3 +31,20 @@ jobs:
         with:
           command: test
           args: --verbose
+
+    clippy:
+      name: Run Clippy
+      runs-on: ${{ matrix.os }}
+      steps:
+        - uses: actions/checkout@v3
+        - uses: actions-rs/toolchain@v1
+          with:
+            profile: minimal
+            toolchain: stable
+            override: true
+            components: clippy
+        - name: Run cargo clippy
+          uses: actions-rs/cargo@v1
+          with:
+            command: clippy
+            args: --all-targets -- --deny warnings
