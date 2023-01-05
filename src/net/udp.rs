@@ -3,7 +3,7 @@ use tokio::sync::mpsc;
 
 use crate::{
     envelope::{Datagram, Protocol},
-    ToSocketAddr, World, TRACING_TARGET,
+    ToSocketAddrs, World, TRACING_TARGET,
 };
 
 use std::{cell::RefCell, cmp, io::Result, net::SocketAddr};
@@ -28,7 +28,7 @@ impl UdpSocket {
     /// provided.
     ///
     /// Only 0.0.0.0 is currently supported.
-    pub async fn bind<A: ToSocketAddr>(addr: A) -> Result<UdpSocket> {
+    pub async fn bind<A: ToSocketAddrs>(addr: A) -> Result<UdpSocket> {
         World::current(|world| {
             let mut addr = addr.to_socket_addr(&world.dns);
             let host = world.current_host_mut();
@@ -46,7 +46,7 @@ impl UdpSocket {
 
     /// Sends data on the socket to the given address. On success, returns the
     /// number of bytes written.
-    pub async fn send_to<A: ToSocketAddr>(&self, buf: &[u8], target: A) -> Result<usize> {
+    pub async fn send_to<A: ToSocketAddrs>(&self, buf: &[u8], target: A) -> Result<usize> {
         World::current(|world| {
             let dst = target.to_socket_addr(&world.dns);
 

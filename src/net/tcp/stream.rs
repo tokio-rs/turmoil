@@ -18,7 +18,7 @@ use crate::{
     host::SequencedSegment,
     net::SocketPair,
     world::World,
-    ToSocketAddr, TRACING_TARGET,
+    ToSocketAddrs, TRACING_TARGET,
 };
 
 use super::split_owned::{OwnedReadHalf, OwnedWriteHalf};
@@ -53,7 +53,7 @@ impl TcpStream {
     }
 
     /// Opens a TCP connection to a remote host.
-    pub async fn connect<A: ToSocketAddr>(addr: A) -> Result<TcpStream> {
+    pub async fn connect<A: ToSocketAddrs>(addr: A) -> Result<TcpStream> {
         let (ack, syn_ack) = oneshot::channel();
 
         let (pair, rx) = World::current(|world| {
