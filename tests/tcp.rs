@@ -613,3 +613,33 @@ fn split() -> Result {
 
     sim.run()
 }
+
+#[test]
+fn peek() -> Result {
+    let mut sim = Builder::new().build();
+
+    sim.client("server", async move {
+        let listener = bind().await;
+        let (stream, _) = listener.accept().await?;
+        let mut buf = [0; 10];
+        assert_eq!(stream.peek(&mut buf).await.unwrap(), 5);
+        assert_eq!(&buf[..5], b"hello");
+
+        // peek twice
+        let mut buf = [0; 10];
+        assert_eq!(stream.peek(&mut buf).await.unwrap(), 5);
+        assert_eq!(&buf[..5], b"hello");
+
+        Ok(())
+    });
+
+    sim.client("client", async move {
+        let mut s = TcpStream::connect(("server", PORT)).await?;
+
+        s.write_all(b"hello").await.unwrap();
+
+        Ok(())
+    });
+
+    sim.run()
+}
