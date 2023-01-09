@@ -9,8 +9,8 @@ use std::collections::VecDeque;
 use std::fmt::Display;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
-use tokio::sync::{mpsc, Notify};
+use std::task::{Context, Poll, Waker};
+use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
 
 /// A host in the simulated network.
@@ -187,8 +187,11 @@ pub(crate) struct Tcp {
 }
 
 struct ServerSocket {
-    /// Notify the TcpListener when SYNs are delivered
-    notify: Arc<Notify>,
+    /// `Waker` from the `Context` of the last call to `poll_accept`.
+    ///
+    /// Similarly to tokio, only the `Waker` from the context of the last
+    /// call to `poll_accept` is kept.
+    waker: Option<Waker>,
 
     /// Pending connections for the TcpListener to accept
     deque: VecDeque<(Syn, SocketAddr)>,
@@ -283,9 +286,8 @@ impl Tcp {
     }
 
     pub(crate) fn bind(&mut self, addr: SocketAddr) -> io::Result<TcpListener> {
-        let notify = Arc::new(Notify::new());
         let sock = ServerSocket {
-            notify: notify.clone(),
+            waker: None,
             deque: VecDeque::new(),
         };
 
@@ -295,7 +297,7 @@ impl Tcp {
 
         tracing::info!(target: TRACING_TARGET, ?addr, protocol = %"TCP", "Bind");
 
-        Ok(TcpListener::new(addr, notify))
+        Ok(TcpListener::new(addr))
     }
 
     pub(crate) fn new_stream(&mut self, pair: SocketPair) -> mpsc::Receiver<SequencedSegment> {
@@ -308,8 +310,25 @@ impl Tcp {
         rx
     }
 
-    pub(crate) fn accept(&mut self, addr: SocketAddr) -> Option<(Syn, SocketAddr)> {
-        self.binds[&addr].deque.pop_front()
+    /// Poll for new connections to `addr`.
+    ///
+    /// If there are none, the `Waker` from `cx` is stored, to wake up the task when
+    /// a new connection becomes available.
+    pub(crate) fn poll_accept(
+        &mut self,
+        addr: SocketAddr,
+        cx: &mut Context<'_>,
+    ) -> Poll<(Syn, SocketAddr)> {
+        match self.binds.get_mut(&addr) {
+            Some(socket) => match socket.deque.pop_front() {
+                Some(e) => Poll::Ready(e),
+                None => {
+                    socket.waker.replace(cx.waker().clone());
+                    Poll::Pending
+                }
+            },
+            None => panic!("no binding for {addr}"),
+        }
     }
 
     // Ideally, we could "write through" the tcp software, but this is necessary
@@ -335,7 +354,9 @@ impl Tcp {
                     }
 
                     b.deque.push_back((syn, src));
-                    b.notify.notify_one();
+                    if let Some(waker) = b.waker.take() {
+                        waker.wake();
+                    }
                 }
             }
             Segment::Data(seq, data) => match self.sockets.get_mut(&SocketPair::new(dst, src)) {
@@ -379,7 +400,35 @@ impl Tcp {
 
 #[cfg(test)]
 mod test {
+    use std::sync::atomic::{AtomicU8, Ordering};
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Wake};
+
+    use futures::FutureExt;
+    use tokio::sync::oneshot;
+
+    use crate::envelope::{Segment, Syn};
     use crate::{Host, Result};
+
+    use super::Tcp;
+
+    struct MockWaker(AtomicU8);
+
+    impl MockWaker {
+        fn new() -> Self {
+            MockWaker(AtomicU8::new(0))
+        }
+
+        fn get(&self) -> u8 {
+            self.0.load(Ordering::Relaxed)
+        }
+    }
+
+    impl Wake for MockWaker {
+        fn wake(self: std::sync::Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 
     #[test]
     fn recycle_ports() -> Result {
@@ -395,5 +444,55 @@ mod test {
         assert_eq!(1024, host.assign_ephemeral_port());
 
         Ok(())
+    }
+
+    #[test]
+    fn poll_accept() {
+        let waker = Arc::new(MockWaker::new());
+        let mut tcp = Tcp::new();
+        let addr = "127.0.0.1:1234".parse().unwrap();
+        tcp.bind(addr).unwrap();
+
+        assert!(tcp
+            .poll_accept(addr, &mut Context::from_waker(&waker.clone().into()))
+            .is_pending());
+
+        // ensure that the waker is set
+        assert!(tcp.binds.get(&addr).unwrap().waker.is_some());
+        // not polled yet
+        assert_eq!(waker.get(), 0);
+
+        let src_addr = "127.0.0.1:5678".parse().unwrap();
+        let (sender, mut receiver) = oneshot::channel();
+        tcp.receive_from_network(src_addr, addr, Segment::Syn(Syn { ack: sender }))
+            .unwrap();
+
+        // we were woken
+        assert_eq!(waker.0.load(Ordering::Relaxed), 1);
+
+        let Poll::Ready((syn, a)) =
+            tcp.poll_accept(addr, &mut Context::from_waker(&waker.clone().into())) else { panic!()};
+
+        assert_eq!(a, src_addr);
+        syn.ack.send(()).unwrap();
+        assert!(receiver
+            .poll_unpin(&mut Context::from_waker(&waker.clone().into()))
+            .is_ready());
+
+        assert!(tcp.binds.get(&addr).unwrap().waker.is_none());
+
+        // send new SYN before polling listener again
+        let src_addr = "127.0.0.1:9012".parse().unwrap();
+        let (sender, _receiver) = oneshot::channel();
+        tcp.receive_from_network(src_addr, addr, Segment::Syn(Syn { ack: sender }))
+            .unwrap();
+
+        // listener is immediately ready
+        let Poll::Ready((_syn, a)) =
+            tcp.poll_accept(addr, &mut Context::from_waker(&waker.into())) else { panic!() };
+        assert_eq!(a, src_addr);
+
+        // no waker was kept
+        assert!(tcp.binds.get(&addr).unwrap().waker.is_none());
     }
 }
