@@ -10,14 +10,12 @@ use turmoil::{lookup, net, Builder, Result};
 
 const PORT: u16 = 1738;
 
-async fn bind() -> net::UdpSocket {
+async fn bind() -> std::result::Result<net::UdpSocket, std::io::Error> {
     bind_to(PORT).await
 }
 
-async fn bind_to(port: u16) -> net::UdpSocket {
-    net::UdpSocket::bind((IpAddr::from(Ipv4Addr::UNSPECIFIED), port))
-        .await
-        .unwrap()
+async fn bind_to(port: u16) -> std::result::Result<net::UdpSocket, std::io::Error> {
+    net::UdpSocket::bind((IpAddr::from(Ipv4Addr::UNSPECIFIED), port)).await
 }
 
 async fn send_ping(sock: &net::UdpSocket) -> Result<()> {
@@ -55,14 +53,14 @@ fn ping_pong() -> Result {
     let mut sim = Builder::new().build();
 
     sim.client("server", async {
-        let sock = bind().await;
+        let sock = bind().await?;
 
         let origin = recv_ping(&sock).await?;
         send_pong(&sock, origin).await
     });
 
     sim.client("client", async {
-        let sock = bind().await;
+        let sock = bind().await?;
 
         send_ping(&sock).await?;
         recv_pong(&sock).await
@@ -76,7 +74,7 @@ fn recv_buf_is_clipped() -> Result {
     let mut sim = Builder::new().build();
 
     sim.client("server", async move {
-        let sock = bind().await;
+        let sock = bind().await?;
 
         let mut buf = vec![0; 8];
         let _ = sock.recv_from(&mut buf).await?;
@@ -88,7 +86,7 @@ fn recv_buf_is_clipped() -> Result {
 
     // register a client (this is the test code)
     sim.client("client", async move {
-        let sock = bind().await;
+        let sock = bind().await?;
 
         let server_addr = lookup("server");
         sock.send_to(b"hello, world", (server_addr, PORT)).await?;
@@ -104,18 +102,20 @@ fn hold_and_release() -> Result {
     let mut sim = Builder::new().build();
 
     sim.host("server", || async {
-        let sock = bind().await;
+        let sock = bind().await?;
 
         while let Ok(origin) = recv_ping(&sock).await {
             let _ = send_pong(&sock, origin).await;
         }
+
+        Ok(())
     });
 
     sim.client("client", async {
         // pause delivery of packets between the client and server
         turmoil::hold("client", "server");
 
-        let sock = bind().await;
+        let sock = bind().await?;
         send_ping(&sock).await?;
 
         let res = timeout(Duration::from_secs(1), recv_pong(&sock)).await;
@@ -136,18 +136,20 @@ fn network_partition() -> Result {
     let mut sim = Builder::new().build();
 
     sim.host("server", || async {
-        let sock = bind().await;
+        let sock = bind().await?;
 
         while let Ok(origin) = recv_ping(&sock).await {
             let _ = send_pong(&sock, origin).await;
         }
+
+        Ok(())
     });
 
     sim.client("client", async {
         // introduce the partition
         turmoil::partition("client", "server");
 
-        let sock = bind().await;
+        let sock = bind().await?;
         send_ping(&sock).await?;
 
         assert!(timeout(Duration::from_secs(1), recv_pong(&sock))
@@ -172,7 +174,7 @@ fn bounce() -> Result {
         let publish = reqs.clone();
         let mut reqs = 0;
         async move {
-            let sock = bind().await;
+            let sock = bind().await?;
 
             while let Ok(origin) = recv_ping(&sock).await {
                 reqs += 1;
@@ -180,12 +182,14 @@ fn bounce() -> Result {
 
                 let _ = send_pong(&sock, origin).await;
             }
+
+            Ok(())
         }
     });
 
     for i in 0..3 {
         sim.client(format!("client-{}", i), async move {
-            let sock = bind_to(PORT + i).await;
+            let sock = bind_to(PORT + i).await?;
 
             send_ping(&sock).await?;
             recv_pong(&sock).await
