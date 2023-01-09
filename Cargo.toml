@@ -32,3 +32,5 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 doc-comment = "0.3.3"
+hyper = { version = "0.14", features = ["full"] }
+async-stream = "0.3"
