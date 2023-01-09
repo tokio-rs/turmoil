@@ -108,7 +108,7 @@ fn hold_and_release_once_connected() -> Result {
         let (mut s, _) = listener.accept().await?;
 
         wait.notified().await;
-        let _ = s.write_u8(1).await?;
+        s.write_u8(1).await?;
 
         Ok(())
     });
@@ -561,7 +561,7 @@ fn write_zero_bytes() -> Result {
 
         // no-op
         let buf = [0; 0];
-        s.write(&buf).await?;
+        let _ = s.write(&buf).await?;
 
         // actual write to ensure server:read_u8 is not EOF
         s.write_u8(1).await?;

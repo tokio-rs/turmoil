@@ -14,7 +14,7 @@ pub(crate) struct Config {
 }
 
 /// Configures link behavior.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub(crate) struct Link {
     /// Message latency between two hosts
     pub(crate) latency: Option<Latency>,
@@ -71,15 +71,6 @@ impl Link {
 
     pub(crate) fn message_loss_mut(&mut self) -> &mut MessageLoss {
         self.message_loss.as_mut().expect("`MessageLoss` missing")
-    }
-}
-
-impl Default for Link {
-    fn default() -> Link {
-        Link {
-            latency: None,
-            message_loss: None,
-        }
     }
 }
 

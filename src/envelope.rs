@@ -56,7 +56,7 @@ impl Display for Segment {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Segment::Syn(_) => write!(f, "TCP SYN"),
-            Segment::Data(_, data) => hex("TCP", &data, f),
+            Segment::Data(_, data) => hex("TCP", data, f),
             Segment::Fin(_) => write!(f, "TCP FIN"),
             Segment::Rst => write!(f, "TCP RST"),
         }

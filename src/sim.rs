@@ -132,7 +132,7 @@ impl<'a> Sim<'a> {
     }
 
     // Run `f` with the host at `addr` set on the world.
-    fn run_with_host(&mut self, addr: impl ToIpAddr, f: impl FnOnce(&mut Role) -> ()) {
+    fn run_with_host(&mut self, addr: impl ToIpAddr, f: impl FnOnce(&mut Role)) {
         let h = self.world.borrow_mut().lookup(addr);
         let rt = self.rts.get_mut(&h).expect("missing host");
 

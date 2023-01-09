@@ -86,10 +86,7 @@ impl Topology {
     /// Register a link between two hosts
     pub(crate) fn register(&mut self, a: IpAddr, b: IpAddr) {
         let pair = Pair::new(a, b);
-        assert!(self
-            .links
-            .insert(pair.clone(), Link::new(self.rt.now()))
-            .is_none());
+        assert!(self.links.insert(pair, Link::new(self.rt.now())).is_none());
     }
 
     pub(crate) fn set_max_message_latency(&mut self, value: Duration) {
@@ -112,7 +109,7 @@ impl Topology {
 
     pub(crate) fn set_link_fail_rate(&mut self, a: IpAddr, b: IpAddr, value: f64) {
         self.links[&Pair::new(a, b)]
-            .message_loss(&self.config.message_loss())
+            .message_loss(self.config.message_loss())
             .fail_rate = value;
     }
 

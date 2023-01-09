@@ -45,7 +45,7 @@ impl World {
     pub(crate) fn current<R>(f: impl FnOnce(&mut World) -> R) -> R {
         CURRENT.with(|current| {
             let mut current = current.borrow_mut();
-            f(&mut *current)
+            f(&mut current)
         })
     }
 
@@ -53,7 +53,7 @@ impl World {
     ///
     /// Used in drop paths, where the simulation may be shutting
     /// down and we don't need to do anything.
-    pub(crate) fn current_if_set(f: impl FnOnce(&mut World) -> ()) {
+    pub(crate) fn current_if_set(f: impl FnOnce(&mut World)) {
         if CURRENT.is_set() {
             Self::current(f);
         }
