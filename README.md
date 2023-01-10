@@ -58,10 +58,16 @@ sim.client("client", async move {
 sim.run();
 ```
 
-`RUSTFLAG="--cfg tokio_unstable"` is necessary to compile the project.
-
 See `ping_pong` in [udp.rs](tests/udp.rs) for a networking example. For more
 examples, check out the [tests](tests) directory.
+
+### tokio_unstable
+
+Turmoil uses [unhandled_panic] to forward host panics as test failures. See
+[unstable features] to opt in.
+
+[unhandled_panic]: https://docs.rs/tokio/latest/tokio/runtime/struct.Builder.html#method.unhandled_panic
+[unstable features]: https://docs.rs/tokio/latest/tokio/#unstable-features
 
 ## License
 

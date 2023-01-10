@@ -83,12 +83,12 @@ impl Rt {
 }
 
 fn init() -> (Runtime, LocalSet) {
-    let tokio = tokio::runtime::Builder::new_current_thread()
-        .enable_time()
-        .start_paused(true)
-        .unhandled_panic(tokio::runtime::UnhandledPanic::ShutdownRuntime)
-        .build()
-        .unwrap();
+    let mut builder = tokio::runtime::Builder::new_current_thread();
+
+    #[cfg(tokio_unstable)]
+    builder.unhandled_panic(tokio::runtime::UnhandledPanic::ShutdownRuntime);
+
+    let tokio = builder.enable_time().start_paused(true).build().unwrap();
 
     tokio.block_on(async {
         // Sleep to "round" `Instant::now()` to the closest `ms`
@@ -100,6 +100,9 @@ fn init() -> (Runtime, LocalSet) {
 
 fn new_local() -> LocalSet {
     let mut local = LocalSet::new();
+
+    #[cfg(tokio_unstable)]
     local.unhandled_panic(tokio::runtime::UnhandledPanic::ShutdownRuntime);
+
     local
 }
