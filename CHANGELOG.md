@@ -1,3 +1,20 @@
+# 0.4 (Jan 10, 2023)
+
+### Added
+
+- Add more type conversions for ToSocketAddrs ([#71])
+- Add host error support ([#67])
+
+### Changed
+
+- Make tokio unstable opt in ([#73])
+- Rename ToSocketAddr to ToSocketAddrs ([#60])
+
+[#73]: https://github.com/tokio-rs/turmoil/pull/73
+[#71]: https://github.com/tokio-rs/turmoil/pull/71
+[#67]: https://github.com/tokio-rs/turmoil/pull/67
+[#60]: https://github.com/tokio-rs/turmoil/pull/60
+
 # 0.3.3 (Dec 7, 2022)
 
 ### Fixed
