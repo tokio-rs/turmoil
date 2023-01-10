@@ -63,7 +63,7 @@ examples, check out the [tests](tests) directory.
 
 ### tokio_unstable
 
-Turmoil uses [unhandled_panic] to foward host panics as test failures. See
+Turmoil uses [unhandled_panic] to forward host panics as test failures. See
 [unstable features] to opt in.
 
 [unhandled_panic]: https://docs.rs/tokio/latest/tokio/runtime/struct.Builder.html#method.unhandled_panic

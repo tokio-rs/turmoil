@@ -85,9 +85,8 @@ impl Rt {
 fn init() -> (Runtime, LocalSet) {
     let mut builder = tokio::runtime::Builder::new_current_thread();
 
-    if cfg!(tokio_unstable) {
-        builder.unhandled_panic(tokio::runtime::UnhandledPanic::ShutdownRuntime);
-    }
+    #[cfg(tokio_unstable)]
+    builder.unhandled_panic(tokio::runtime::UnhandledPanic::ShutdownRuntime);
 
     let tokio = builder.enable_time().start_paused(true).build().unwrap();
 
@@ -102,9 +101,8 @@ fn init() -> (Runtime, LocalSet) {
 fn new_local() -> LocalSet {
     let mut local = LocalSet::new();
 
-    if cfg!(tokio_unstable) {
-        local.unhandled_panic(tokio::runtime::UnhandledPanic::ShutdownRuntime);
-    }
+    #[cfg(tokio_unstable)]
+    local.unhandled_panic(tokio::runtime::UnhandledPanic::ShutdownRuntime);
 
     local
 }
