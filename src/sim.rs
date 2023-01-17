@@ -8,7 +8,7 @@ use std::ops::DerefMut;
 use std::time::UNIX_EPOCH;
 use tokio::time::Duration;
 
-/// Network simulation
+/// A handle for interacting with the simulation.
 pub struct Sim<'a> {
     /// Simulation configuration
     config: Config,
@@ -192,93 +192,102 @@ impl<'a> Sim<'a> {
         world.topology.set_link_fail_rate(a, b, value);
     }
 
-    /// Run the simulation until all clients finish.
+    /// Run the simulation to completion.
     ///
-    /// For each runtime, we [`Rt::tick`] it forward, which allows time to
-    /// advance just a little bit. In this way, only one runtime is ever active.
-    /// The turmoil APIs operate on the active host, and so we remember which
-    /// host is active before yielding to user code.
-    ///
-    /// If any client errors, the simulation returns early with that Error.
+    /// Executes a simple event loop that calls [step](#method.step) each iteration,
+    /// returning early if any host software errors.
     pub fn run(&mut self) -> Result {
-        let tick = self.config.tick;
-
         loop {
-            let mut is_finished = true;
-            let mut finished = vec![];
-
-            // Tick the networking, processing messages. This is done before
-            // ticking any other runtime, as they might be waiting on network
-            // IO. (It also might be waiting on something else, such as time.)
-            self.world.borrow_mut().topology.tick_by(tick);
-
-            for (&addr, rt) in self.rts.iter() {
-                {
-                    let mut world = self.world.borrow_mut();
-                    // We need to move deliverable messages off the network and
-                    // into the dst host. This requires two mutable borrows.
-                    let World {
-                        rng,
-                        topology,
-                        hosts,
-                        ..
-                    } = world.deref_mut();
-                    topology.deliver_messages(rng, hosts.get_mut(&addr).expect("missing host"));
-
-                    // Set the current host (see method docs)
-                    world.current = Some(addr);
-
-                    world.current_host_mut().now(rt.now());
-                }
-
-                World::enter(&self.world, || rt.tick(tick));
-
-                // Unset the current host
-                let mut world = self.world.borrow_mut();
-                world.current = None;
-
-                world.tick(addr, tick);
-
-                match rt {
-                    Role::Client { handle, .. } => {
-                        if handle.is_finished() {
-                            finished.push(addr);
-                        }
-                        is_finished = is_finished && handle.is_finished();
-                    }
-                    Role::Simulated { handle, .. } => {
-                        if handle.is_finished() {
-                            finished.push(addr);
-                        }
-                    }
-                }
-            }
-
-            self.elapsed += tick;
-
-            // Check finished clients and hosts for err results. Runtimes are removed at
-            // this stage.
-            for addr in finished.into_iter() {
-                if let Some(role) = self.rts.remove(&addr) {
-                    let (rt, handle) = match role {
-                        Role::Client { rt, handle } => (rt, handle),
-                        Role::Simulated { rt, handle, .. } => (rt, handle),
-                    };
-                    rt.block_on(handle)??;
-                }
-            }
+            let is_finished = self.step()?;
 
             if is_finished {
                 return Ok(());
             }
+        }
+    }
 
-            if self.elapsed > self.config.duration {
-                Err(format!(
-                    "Ran for {:?} without completing",
-                    self.config.duration
-                ))?;
+    /// Step the simulation.
+    ///
+    /// Runs each host in the simulation a fixed duration configured by
+    /// `tick_duration` in the builder.
+    ///
+    /// The simulated network also steps, processing in flight messages, and
+    /// delivering them to their destination if appropriate.
+    pub fn step(&mut self) -> Result<bool> {
+        let tick = self.config.tick;
+
+        let mut is_finished = true;
+        let mut finished = vec![];
+
+        // Tick the networking, processing messages. This is done before
+        // ticking any other runtime, as they might be waiting on network
+        // IO. (It also might be waiting on something else, such as time.)
+        self.world.borrow_mut().topology.tick_by(tick);
+
+        for (&addr, rt) in self.rts.iter() {
+            {
+                let mut world = self.world.borrow_mut();
+                // We need to move deliverable messages off the network and
+                // into the dst host. This requires two mutable borrows.
+                let World {
+                    rng,
+                    topology,
+                    hosts,
+                    ..
+                } = world.deref_mut();
+                topology.deliver_messages(rng, hosts.get_mut(&addr).expect("missing host"));
+
+                // Set the current host (see method docs)
+                world.current = Some(addr);
+
+                world.current_host_mut().now(rt.now());
+            }
+
+            World::enter(&self.world, || rt.tick(tick));
+
+            // Unset the current host
+            let mut world = self.world.borrow_mut();
+            world.current = None;
+
+            world.tick(addr, tick);
+
+            match rt {
+                Role::Client { handle, .. } => {
+                    if handle.is_finished() {
+                        finished.push(addr);
+                    }
+                    is_finished = is_finished && handle.is_finished();
+                }
+                Role::Simulated { handle, .. } => {
+                    if handle.is_finished() {
+                        finished.push(addr);
+                    }
+                }
             }
         }
+
+        self.elapsed += tick;
+
+        // Check finished clients and hosts for err results. Runtimes are removed at
+        // this stage.
+        for addr in finished.into_iter() {
+            if let Some(role) = self.rts.remove(&addr) {
+                let (rt, handle) = match role {
+                    Role::Client { rt, handle } => (rt, handle),
+                    Role::Simulated { rt, handle, .. } => (rt, handle),
+                };
+                rt.block_on(handle)??;
+            }
+        }
+
+        if self.elapsed > self.config.duration && !is_finished {
+            return Err(format!(
+                "Ran for {:?} without completing",
+                self.config.duration
+            ))?;
+        }
+
+        return Ok(is_finished);
     }
 }
 
