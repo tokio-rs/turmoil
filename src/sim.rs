@@ -287,7 +287,7 @@ impl<'a> Sim<'a> {
             ))?;
         }
 
-        return Ok(is_finished);
+        Ok(is_finished)
     }
 }
 
