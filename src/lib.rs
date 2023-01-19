@@ -16,6 +16,7 @@ pub use dns::{ToIpAddr, ToSocketAddrs};
 
 mod envelope;
 use envelope::Envelope;
+pub use envelope::{Datagram, Protocol, Segment};
 
 mod error;
 pub use error::Result;
@@ -37,6 +38,7 @@ pub use sim::Sim;
 
 mod top;
 use top::Topology;
+pub use top::{LinkIter, LinksIter, SentRef};
 
 mod world;
 use world::World;

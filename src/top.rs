@@ -12,7 +12,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 /// Describes the network topology.
-pub(crate) struct Topology {
+pub struct Topology {
     config: config::Link,
 
     /// Specific configuration overrides between specific hosts.
@@ -42,6 +42,94 @@ impl Pair {
     }
 }
 
+/// An iterator for the network topology, providing access to all active links
+/// in the simulated network.
+pub struct LinksIter<'a> {
+    iter: indexmap::map::IterMut<'a, Pair, Link>,
+}
+
+/// An iterator for the link, providing access to sent messages that have not
+/// yet been delivered.
+pub struct LinkIter<'a> {
+    a: IpAddr,
+    b: IpAddr,
+    now: Instant,
+    iter: std::collections::vec_deque::IterMut<'a, Sent>,
+}
+
+impl<'a> LinkIter<'a> {
+    /// The [`IpAddr`] pair for the link. Always ordered to uniquely identify
+    /// the link.
+    pub fn pair(&self) -> (IpAddr, IpAddr) {
+        (self.a, self.b)
+    }
+
+    /// Schedule all messages on the link for delivery the next time the
+    /// simulation steps, consuming the iterator.
+    pub fn deliver_all(self) {
+        for sent in self {
+            sent.deliver();
+        }
+    }
+}
+
+/// Provides a reference to a message that is currently inflight on the network
+/// from one host to another.
+pub struct SentRef<'a> {
+    src: SocketAddr,
+    dst: SocketAddr,
+    now: Instant,
+    sent: &'a mut Sent,
+}
+
+impl<'a> SentRef<'a> {
+    /// The (src, dst) [`SocketAddr`] pair for the message.
+    pub fn pair(&self) -> (SocketAddr, SocketAddr) {
+        (self.src, self.dst)
+    }
+
+    /// The message [`Protocol`].
+    pub fn protocol(&self) -> &Protocol {
+        &self.sent.protocol
+    }
+
+    /// Schedule the message for delivery the next time the simulation steps,
+    /// consuming the item.
+    pub fn deliver(self) {
+        self.sent.deliver(self.now);
+    }
+}
+
+impl<'a> Iterator for LinksIter<'a> {
+    type Item = LinkIter<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let (pair, link) = self.iter.next()?;
+
+        Some(LinkIter {
+            a: pair.0,
+            b: pair.1,
+            now: link.now,
+            iter: link.sent.iter_mut(),
+        })
+    }
+}
+
+impl<'a> Iterator for LinkIter<'a> {
+    type Item = SentRef<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let sent = self.iter.next()?;
+
+        Some(SentRef {
+            src: sent.src,
+            dst: sent.dst,
+            now: self.now,
+            sent,
+        })
+    }
+}
+
 /// A two-way link between two hosts on the network.
 struct Link {
     state: State,
@@ -49,9 +137,9 @@ struct Link {
     /// Optional, per-link configuration.
     config: config::Link,
 
-    /// Inflight messages that are either scheduled for delivery in the future
+    /// Sent messages that are either scheduled for delivery in the future
     /// or are on hold.
-    inflight: VecDeque<Inflight>,
+    sent: VecDeque<Sent>,
 
     /// Messages that are ready to be delivered.
     deliverable: IndexMap<IpAddr, VecDeque<Envelope>>,
@@ -158,17 +246,25 @@ impl Topology {
             link.tick(self.rt.now());
         }
     }
+
+    pub(crate) fn iter_mut(&mut self) -> LinksIter {
+        LinksIter {
+            iter: self.links.iter_mut(),
+        }
+    }
 }
 
-struct Inflight {
-    args: InflightArgs,
-    status: DeliveryStatus,
-}
-
-struct InflightArgs {
+struct Sent {
     src: SocketAddr,
     dst: SocketAddr,
-    message: Protocol,
+    status: DeliveryStatus,
+    protocol: Protocol,
+}
+
+impl Sent {
+    fn deliver(&mut self, now: Instant) {
+        self.status = DeliveryStatus::DeliverAfter(now);
+    }
 }
 
 enum DeliveryStatus {
@@ -181,7 +277,7 @@ impl Link {
         Link {
             state: State::Healthy,
             config: config::Link::default(),
-            inflight: VecDeque::new(),
+            sent: VecDeque::new(),
             deliverable: IndexMap::new(),
             now,
         }
@@ -232,12 +328,14 @@ impl Link {
             }
         };
 
-        let inflight = Inflight {
-            args: InflightArgs { src, dst, message },
+        let sent = Sent {
+            src,
+            dst,
             status,
+            protocol: message,
         };
 
-        self.inflight.push_back(inflight);
+        self.sent.push_back(sent);
     }
 
     fn tick(&mut self, now: Instant) {
@@ -248,23 +346,23 @@ impl Link {
     fn process_deliverables(&mut self) {
         // TODO: `drain_filter` is not yet stable, and so we have a low quality
         // implementation here that avoids clones.
-        let mut sent = 0;
-        for i in 0..self.inflight.len() {
-            let index = i - sent;
-            let inflight = &self.inflight[index];
-            if let DeliveryStatus::DeliverAfter(time) = inflight.status {
+        let mut deliverable = 0;
+        for i in 0..self.sent.len() {
+            let index = i - deliverable;
+            let sent = &self.sent[index];
+            if let DeliveryStatus::DeliverAfter(time) = sent.status {
                 if time <= self.now {
-                    let inflight = self.inflight.remove(index).unwrap();
+                    let sent = self.sent.remove(index).unwrap();
                     let envelope = Envelope {
-                        src: inflight.args.src,
-                        dst: inflight.args.dst,
-                        message: inflight.args.message,
+                        src: sent.src,
+                        dst: sent.dst,
+                        message: sent.protocol,
                     };
                     self.deliverable
-                        .entry(inflight.args.dst.ip())
+                        .entry(sent.dst.ip())
                         .or_default()
                         .push_back(envelope);
-                    sent += 1;
+                    deliverable += 1;
                 }
             }
         }
@@ -318,9 +416,9 @@ impl Link {
     // This link becomes healthy, and any held messages are scheduled for delivery.
     fn release(&mut self) {
         self.state = State::Healthy;
-        for inflight in &mut self.inflight {
-            if let DeliveryStatus::Hold = inflight.status {
-                inflight.status = DeliveryStatus::DeliverAfter(self.now);
+        for sent in &mut self.sent {
+            if let DeliveryStatus::Hold = sent.status {
+                sent.deliver(self.now);
             }
         }
     }
