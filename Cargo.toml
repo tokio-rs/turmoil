@@ -22,6 +22,7 @@ futures = "0.3"
 indexmap = "1.9"
 rand = { version = "0.8.5", features = ["small_rng"] }
 rand_distr = "0.4.3"
+regex = "1"
 scoped-tls = "1.0.0"
 tokio = { version = "1.24.1", features = ["full"] }
 tokio-stream = "0.1"

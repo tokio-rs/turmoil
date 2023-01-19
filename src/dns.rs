@@ -1,4 +1,5 @@
 use indexmap::IndexMap;
+use regex::Regex;
 use std::net::{IpAddr, SocketAddr};
 
 pub struct Dns {
@@ -8,6 +9,10 @@ pub struct Dns {
 
 pub trait ToIpAddr {
     fn to_ip_addr(&self, dns: &mut Dns) -> IpAddr;
+}
+
+pub trait ToIpAddrs {
+    fn to_ip_addrs(&self, dns: &mut Dns) -> Vec<IpAddr>;
 }
 
 /// A simulated version of `tokio::net::ToSocketAddrs`.
@@ -26,6 +31,10 @@ impl Dns {
 
     pub(crate) fn lookup(&mut self, addr: impl ToIpAddr) -> IpAddr {
         addr.to_ip_addr(self)
+    }
+
+    pub(crate) fn lookup_many(&mut self, addrs: impl ToIpAddrs) -> Vec<IpAddr> {
+        addrs.to_ip_addrs(self)
     }
 
     pub(crate) fn reverse(&self, addr: IpAddr) -> &str {
@@ -60,6 +69,32 @@ impl<'a> ToIpAddr for &'a str {
 impl ToIpAddr for IpAddr {
     fn to_ip_addr(&self, _: &mut Dns) -> IpAddr {
         *self
+    }
+}
+
+impl<T> ToIpAddrs for T
+where
+    T: ToIpAddr,
+{
+    fn to_ip_addrs(&self, dns: &mut Dns) -> Vec<IpAddr> {
+        vec![self.to_ip_addr(dns)]
+    }
+}
+
+impl ToIpAddrs for Vec<IpAddr> {
+    fn to_ip_addrs(&self, _: &mut Dns) -> Vec<IpAddr> {
+        self.clone()
+    }
+}
+
+impl ToIpAddrs for Regex {
+    fn to_ip_addrs(&self, dns: &mut Dns) -> Vec<IpAddr> {
+        #[allow(clippy::needless_collect)]
+        let hosts = dns.names.keys().cloned().collect::<Vec<_>>();
+        hosts
+            .into_iter()
+            .filter_map(|h| self.is_match(&h).then(|| h.to_ip_addr(dns)))
+            .collect::<Vec<_>>()
     }
 }
 
