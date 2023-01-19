@@ -150,7 +150,7 @@ impl<'a> Sim<'a> {
 
     /// Resolve host names for an [`IpAddr`] pair.
     ///
-    /// Useful when interactiong with network [links](#method.links).
+    /// Useful when interacting with network [links](#method.links).
     pub fn reverse_lookup_pair(&self, pair: (IpAddr, IpAddr)) -> (String, String) {
         let world = self.world.borrow();
 

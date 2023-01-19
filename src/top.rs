@@ -12,7 +12,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 /// Describes the network topology.
-pub struct Topology {
+pub(crate) struct Topology {
     config: config::Link,
 
     /// Specific configuration overrides between specific hosts.
