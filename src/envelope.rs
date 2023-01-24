@@ -10,14 +10,16 @@ pub(crate) struct Envelope {
     pub(crate) message: Protocol,
 }
 
+/// Supported network protocols.
 #[derive(Debug)]
-pub(crate) enum Protocol {
+pub enum Protocol {
     Tcp(Segment),
     Udp(Datagram),
 }
 
+/// UDP datagram.
 #[derive(Debug)]
-pub(crate) struct Datagram(pub Bytes);
+pub struct Datagram(pub Bytes);
 
 /// This is a simplification of real TCP.
 ///
@@ -25,7 +27,7 @@ pub(crate) struct Datagram(pub Bytes);
 /// scenarios, but we skip a ton of complexity (e.g. checksums, flow control,
 /// etc) because said complexity isn't useful in tests.
 #[derive(Debug)]
-pub(crate) enum Segment {
+pub enum Segment {
     Syn(Syn),
     Data(u64, Bytes),
     Fin(u64),
@@ -33,7 +35,7 @@ pub(crate) enum Segment {
 }
 
 #[derive(Debug)]
-pub(crate) struct Syn {
+pub struct Syn {
     pub(crate) ack: oneshot::Sender<()>,
 }
 

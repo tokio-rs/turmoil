@@ -1,4 +1,4 @@
-use crate::{Config, Result, Role, Rt, ToIpAddr, World};
+use crate::{Config, LinksIter, Result, Role, Rt, ToIpAddr, World};
 
 use indexmap::IndexMap;
 use std::cell::RefCell;
@@ -148,6 +148,18 @@ impl<'a> Sim<'a> {
         self.world.borrow_mut().lookup(addr)
     }
 
+    /// Resolve host names for an [`IpAddr`] pair.
+    ///
+    /// Useful when interacting with network [links](#method.links).
+    pub fn reverse_lookup_pair(&self, pair: (IpAddr, IpAddr)) -> (String, String) {
+        let world = self.world.borrow();
+
+        (
+            world.dns.reverse(pair.0).to_owned(),
+            world.dns.reverse(pair.1).to_owned(),
+        )
+    }
+
     /// Set the max message latency
     pub fn set_max_message_latency(&self, value: Duration) {
         self.world
@@ -190,6 +202,13 @@ impl<'a> Sim<'a> {
         let b = world.lookup(b);
 
         world.topology.set_link_fail_rate(a, b, value);
+    }
+
+    /// Access a [`LinksIter`] to introspect inflight messages between hosts.
+    pub fn links(&self, f: impl FnOnce(LinksIter)) {
+        let top = &mut self.world.borrow_mut().topology;
+
+        f(top.iter_mut())
     }
 
     /// Run the simulation to completion.
@@ -305,7 +324,11 @@ mod test {
     use std::future;
     use tokio::sync::Semaphore;
 
-    use crate::{elapsed, Builder, Result};
+    use crate::{
+        elapsed, hold,
+        net::{TcpListener, TcpStream},
+        Builder, Result,
+    };
 
     #[test]
     fn client_error() {
@@ -478,5 +501,37 @@ mod test {
         });
 
         assert!(sim.run().is_err());
+    }
+
+    #[test]
+    fn manual_message_delivery() -> Result {
+        let mut sim = Builder::new().build();
+
+        sim.host("a", || async {
+            let l = TcpListener::bind("0.0.0.0:1234").await?;
+
+            _ = l.accept().await?;
+
+            Ok(())
+        });
+
+        sim.client("b", async {
+            hold("a", "b");
+
+            _ = TcpStream::connect("a:1234").await?;
+
+            Ok(())
+        });
+
+        assert!(!sim.step()?);
+
+        sim.links(|mut l| {
+            let a_to_b = l.next().unwrap();
+            a_to_b.deliver_all();
+        });
+
+        assert!(sim.step()?);
+
+        Ok(())
     }
 }
