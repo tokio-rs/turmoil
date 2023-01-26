@@ -81,9 +81,12 @@ where
     }
 }
 
-impl ToIpAddrs for Vec<IpAddr> {
-    fn to_ip_addrs(&self, _: &mut Dns) -> Vec<IpAddr> {
-        self.clone()
+impl<T> ToIpAddrs for Vec<T>
+where
+    T: ToIpAddr,
+{
+    fn to_ip_addrs(&self, dns: &mut Dns) -> Vec<IpAddr> {
+        self.iter().map(|addr| addr.to_ip_addr(dns)).collect()
     }
 }
 

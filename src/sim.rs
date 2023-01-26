@@ -105,8 +105,9 @@ impl<'a> Sim<'a> {
         self.rts.insert(addr, Role::simulated(rt, host, handle));
     }
 
-    /// Crashes a host(s). Nothing will be running on the matched hosts after this method. You can
-    /// use [`Sim::bounce`] to start the hosts up again.
+    /// Crashes the resolved hosts. Nothing will be running on the matched hosts
+    /// after this method. You can use [`Sim::bounce`] to start the hosts up
+    /// again.
     pub fn crash(&mut self, addrs: impl ToIpAddrs) {
         self.run_with_hosts(addrs, |rt| match rt {
             Role::Client { .. } => panic!("can only bounce hosts, not clients"),
@@ -116,7 +117,7 @@ impl<'a> Sim<'a> {
         });
     }
 
-    /// Bounce a host(s). The software is restarted.
+    /// Bounces the resolved hosts. The software is restarted.
     pub fn bounce(&mut self, addrs: impl ToIpAddrs) {
         self.run_with_hosts(addrs, |rt| match rt {
             Role::Client { .. } => panic!("can only bounce hosts, not clients"),
@@ -131,7 +132,7 @@ impl<'a> Sim<'a> {
         });
     }
 
-    /// Run `f` with the host(s) at `addr` set on the world.
+    /// Run `f` with the resolved hosts at `addrs` set on the world.
     fn run_with_hosts(&mut self, addrs: impl ToIpAddrs, mut f: impl FnMut(&mut Role)) {
         let hosts = self.world.borrow_mut().lookup_many(addrs);
         for h in hosts {
@@ -145,7 +146,7 @@ impl<'a> Sim<'a> {
         self.world.borrow_mut().current = None;
     }
 
-    /// Lookup an ip address by host name.
+    /// Lookup an IP address by host name.
     pub fn lookup(&self, addr: impl ToIpAddr) -> IpAddr {
         self.world.borrow_mut().lookup(addr)
     }
@@ -162,7 +163,7 @@ impl<'a> Sim<'a> {
         )
     }
 
-    /// Lookup an ip address by host name.
+    /// Lookup IP addresses for resolved hosts.
     pub fn lookup_many(&self, addr: impl ToIpAddrs) -> Vec<IpAddr> {
         self.world.borrow_mut().lookup_many(addr)
     }
@@ -565,9 +566,9 @@ mod test {
 
         sim.run()?;
         assert_eq!(count.load(Ordering::SeqCst), 3);
-        sim.bounce(Regex::new("host-\\d").unwrap());
+        sim.bounce(Regex::new("host-[12]")?);
         sim.run()?;
-        assert_eq!(count.load(Ordering::SeqCst), 6);
+        assert_eq!(count.load(Ordering::SeqCst), 5);
 
         Ok(())
     }
