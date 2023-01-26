@@ -14,6 +14,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix :
+        features: ["", regex]
         os: [ubuntu-latest]
     steps:
       - name: Git Checkout
@@ -27,7 +28,7 @@ jobs:
       - name: Cargo Test
         uses: actions-rs/cargo@v1
         with:
-          command: test
+          command: test --features "${{ matrix.features }}"
           args: --verbose
 
   clippy:

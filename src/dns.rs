@@ -1,4 +1,5 @@
 use indexmap::IndexMap;
+#[cfg(feature = "regex")]
 use regex::Regex;
 use std::net::{IpAddr, SocketAddr};
 
@@ -90,6 +91,7 @@ where
     }
 }
 
+#[cfg(feature = "regex")]
 impl ToIpAddrs for Regex {
     fn to_ip_addrs(&self, dns: &mut Dns) -> Vec<IpAddr> {
         #[allow(clippy::needless_collect)]

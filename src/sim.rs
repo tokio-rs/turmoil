@@ -333,7 +333,6 @@ mod test {
         time::Duration,
     };
 
-    use regex::Regex;
     use std::future;
     use tokio::sync::Semaphore;
 
@@ -549,6 +548,7 @@ mod test {
     }
 
     #[test]
+    #[cfg(feature = "regex")]
     fn bounce_multiple_hosts_with_regex() -> Result {
         let mut sim = Builder::new().build();
 
@@ -566,7 +566,7 @@ mod test {
 
         sim.run()?;
         assert_eq!(count.load(Ordering::SeqCst), 3);
-        sim.bounce(Regex::new("host-[12]")?);
+        sim.bounce(regex::Regex::new("host-[12]")?);
         sim.run()?;
         assert_eq!(count.load(Ordering::SeqCst), 5);
 
