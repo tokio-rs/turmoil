@@ -382,7 +382,7 @@ mod test {
             for client in 0..how_many {
                 let ct = ct.clone();
 
-                sim.client(format!("client-{}", client), async move {
+                sim.client(format!("client-{client}"), async move {
                     let ms = if run == client { 0 } else { 2 * tick_ms };
                     tokio::time::sleep(Duration::from_millis(ms)).await;
 

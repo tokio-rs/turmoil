@@ -292,7 +292,7 @@ fn server_concurrency() -> Result {
     let how_many = 3;
 
     for i in 0..how_many {
-        sim.client(format!("client-{}", i), async move {
+        sim.client(format!("client-{i}"), async move {
             let mut s = TcpStream::connect(("server", PORT)).await?;
 
             s.write_u8(how_many).await?;

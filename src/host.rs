@@ -159,14 +159,14 @@ impl Udp {
     fn receive_from_network(&mut self, src: SocketAddr, dst: SocketAddr, datagram: Datagram) {
         if let Some(s) = self.binds.get_mut(&dst) {
             s.try_send((datagram, src))
-                .unwrap_or_else(|_| panic!("unable to send to {}", dst))
+                .unwrap_or_else(|_| panic!("unable to send to {dst}"))
         }
     }
 
     pub(crate) fn unbind(&mut self, addr: SocketAddr) {
         let exists = self.binds.remove(&addr);
 
-        assert!(exists.is_some(), "unknown bind {}", addr);
+        assert!(exists.is_some(), "unknown bind {addr}");
 
         tracing::info!(target: TRACING_TARGET, ?addr, protocol = %"UDP", "Unbind");
     }
@@ -250,7 +250,7 @@ impl StreamSocket {
 
         let exists = self.buf.insert(seq, segment);
 
-        assert!(exists.is_none(), "duplicate segment {}", seq);
+        assert!(exists.is_none(), "duplicate segment {seq}");
 
         while self.buf.contains_key(&(self.recv_seq + 1)) {
             self.recv_seq += 1;
@@ -303,7 +303,7 @@ impl Tcp {
 
         let exists = self.sockets.insert(pair, sock);
 
-        assert!(exists.is_none(), "{:?} is already connected", pair);
+        assert!(exists.is_none(), "{pair:?} is already connected");
 
         rx
     }
@@ -371,7 +371,7 @@ impl Tcp {
     pub(crate) fn unbind(&mut self, addr: SocketAddr) {
         let exists = self.binds.remove(&addr);
 
-        assert!(exists.is_some(), "unknown bind {}", addr);
+        assert!(exists.is_some(), "unknown bind {addr}");
 
         tracing::info!(target: TRACING_TARGET, ?addr, protocol = %"TCP", "Unbind");
     }

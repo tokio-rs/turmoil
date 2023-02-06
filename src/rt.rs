@@ -78,7 +78,7 @@ impl Rt {
         let (tokio, local) = init();
 
         _ = mem::replace(&mut self.tokio, tokio);
-        _ = mem::replace(&mut self.local, local);
+        drop(mem::replace(&mut self.local, local));
     }
 }
 
