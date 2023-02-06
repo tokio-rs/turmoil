@@ -28,8 +28,8 @@ jobs:
       - name: Cargo Test
         uses: actions-rs/cargo@v1
         with:
-          command: test --features "${{ matrix.features }}"
-          args: --verbose
+          command: test
+          args: --verbose --features "${{ matrix.features }}"
 
   clippy:
     name: Run Clippy
