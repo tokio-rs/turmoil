@@ -188,7 +188,7 @@ fn bounce() -> Result {
     });
 
     for i in 0..3 {
-        sim.client(format!("client-{}", i), async move {
+        sim.client(format!("client-{i}"), async move {
             let sock = bind_to(PORT + i).await?;
 
             send_ping(&sock).await?;

@@ -1,5 +1,5 @@
 use crate::envelope::Protocol;
-use crate::{config, Dns, Host, ToIpAddr, Topology, TRACING_TARGET};
+use crate::{config, Dns, Host, ToIpAddr, ToIpAddrs, Topology, TRACING_TARGET};
 
 use indexmap::IndexMap;
 use rand::RngCore;
@@ -70,6 +70,10 @@ impl World {
 
     pub(crate) fn lookup(&mut self, host: impl ToIpAddr) -> IpAddr {
         self.dns.lookup(host)
+    }
+
+    pub(crate) fn lookup_many(&mut self, hosts: impl ToIpAddrs) -> Vec<IpAddr> {
+        self.dns.lookup_many(hosts)
     }
 
     pub(crate) fn hold(&mut self, a: IpAddr, b: IpAddr) {

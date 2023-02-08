@@ -32,7 +32,7 @@ impl TcpListener {
             let host = world.current_host_mut();
 
             if !addr.ip().is_unspecified() {
-                panic!("{} is not supported", addr);
+                panic!("{addr} is not supported");
             }
 
             // Unspecified -> host's IP

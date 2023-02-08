@@ -70,13 +70,13 @@ pub(crate) fn hex(
     bytes: &Bytes,
     f: &mut std::fmt::Formatter<'_>,
 ) -> std::fmt::Result {
-    write!(f, "{} [", protocol)?;
+    write!(f, "{protocol} [")?;
 
     for (i, &b) in bytes.iter().enumerate() {
         if i < bytes.len() - 1 {
-            write!(f, "{:#2X}, ", b)?;
+            write!(f, "{b:#2X}, ")?;
         } else {
-            write!(f, "{:#2X}", b)?;
+            write!(f, "{b:#2X}")?;
         }
     }
 

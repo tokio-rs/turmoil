@@ -1,4 +1,4 @@
-use crate::{Config, LinksIter, Result, Role, Rt, ToIpAddr, World};
+use crate::{for_pairs, Config, LinksIter, Result, Role, Rt, ToIpAddr, ToIpAddrs, World};
 
 use indexmap::IndexMap;
 use std::cell::RefCell;
@@ -105,10 +105,11 @@ impl<'a> Sim<'a> {
         self.rts.insert(addr, Role::simulated(rt, host, handle));
     }
 
-    /// Crash a host. Nothing will be running on the host after this method. You
-    /// can use [`Sim::bounce`] to start the host up again.
-    pub fn crash(&mut self, addr: impl ToIpAddr) {
-        self.run_with_host(addr, |rt| match rt {
+    /// Crashes the resolved hosts. Nothing will be running on the matched hosts
+    /// after this method. You can use [`Sim::bounce`] to start the hosts up
+    /// again.
+    pub fn crash(&mut self, addrs: impl ToIpAddrs) {
+        self.run_with_hosts(addrs, |rt| match rt {
             Role::Client { .. } => panic!("can only bounce hosts, not clients"),
             Role::Simulated { rt, .. } => {
                 rt.cancel_tasks();
@@ -116,9 +117,9 @@ impl<'a> Sim<'a> {
         });
     }
 
-    /// Bounce a host. The software is restarted.
-    pub fn bounce(&mut self, addr: impl ToIpAddr) {
-        self.run_with_host(addr, |rt| match rt {
+    /// Bounces the resolved hosts. The software is restarted.
+    pub fn bounce(&mut self, addrs: impl ToIpAddrs) {
+        self.run_with_hosts(addrs, |rt| match rt {
             Role::Client { .. } => panic!("can only bounce hosts, not clients"),
             Role::Simulated {
                 rt,
@@ -131,19 +132,21 @@ impl<'a> Sim<'a> {
         });
     }
 
-    // Run `f` with the host at `addr` set on the world.
-    fn run_with_host(&mut self, addr: impl ToIpAddr, f: impl FnOnce(&mut Role)) {
-        let h = self.world.borrow_mut().lookup(addr);
-        let rt = self.rts.get_mut(&h).expect("missing host");
+    /// Run `f` with the resolved hosts at `addrs` set on the world.
+    fn run_with_hosts(&mut self, addrs: impl ToIpAddrs, mut f: impl FnMut(&mut Role)) {
+        let hosts = self.world.borrow_mut().lookup_many(addrs);
+        for h in hosts {
+            let rt = self.rts.get_mut(&h).expect("missing host");
 
-        self.world.borrow_mut().current = Some(h);
+            self.world.borrow_mut().current = Some(h);
 
-        World::enter(&self.world, || f(rt));
+            World::enter(&self.world, || f(rt));
+        }
 
         self.world.borrow_mut().current = None;
     }
 
-    /// Lookup an ip address by host name.
+    /// Lookup an IP address by host name.
     pub fn lookup(&self, addr: impl ToIpAddr) -> IpAddr {
         self.world.borrow_mut().lookup(addr)
     }
@@ -160,6 +163,11 @@ impl<'a> Sim<'a> {
         )
     }
 
+    /// Lookup IP addresses for resolved hosts.
+    pub fn lookup_many(&self, addr: impl ToIpAddrs) -> Vec<IpAddr> {
+        self.world.borrow_mut().lookup_many(addr)
+    }
+
     /// Set the max message latency
     pub fn set_max_message_latency(&self, value: Duration) {
         self.world
@@ -170,15 +178,17 @@ impl<'a> Sim<'a> {
 
     pub fn set_link_max_message_latency(
         &self,
-        a: impl ToIpAddr,
-        b: impl ToIpAddr,
+        a: impl ToIpAddrs,
+        b: impl ToIpAddrs,
         value: Duration,
     ) {
         let mut world = self.world.borrow_mut();
-        let a = world.lookup(a);
-        let b = world.lookup(b);
+        let a = world.lookup_many(a);
+        let b = world.lookup_many(b);
 
-        world.topology.set_link_max_message_latency(a, b, value);
+        for_pairs(&a, &b, |a, b| {
+            world.topology.set_link_max_message_latency(a, b, value);
+        });
     }
 
     /// Set the message latency distribution curve.
@@ -196,12 +206,14 @@ impl<'a> Sim<'a> {
         self.world.borrow_mut().topology.set_fail_rate(value);
     }
 
-    pub fn set_link_fail_rate(&mut self, a: impl ToIpAddr, b: impl ToIpAddr, value: f64) {
+    pub fn set_link_fail_rate(&mut self, a: impl ToIpAddrs, b: impl ToIpAddrs, value: f64) {
         let mut world = self.world.borrow_mut();
-        let a = world.lookup(a);
-        let b = world.lookup(b);
+        let a = world.lookup_many(a);
+        let b = world.lookup_many(b);
 
-        world.topology.set_link_fail_rate(a, b, value);
+        for_pairs(&a, &b, |a, b| {
+            world.topology.set_link_fail_rate(a, b, value);
+        });
     }
 
     /// Access a [`LinksIter`] to introspect inflight messages between hosts.
@@ -370,7 +382,7 @@ mod test {
             for client in 0..how_many {
                 let ct = ct.clone();
 
-                sim.client(format!("client-{}", client), async move {
+                sim.client(format!("client-{client}"), async move {
                     let ms = if run == client { 0 } else { 2 * tick_ms };
                     tokio::time::sleep(Duration::from_millis(ms)).await;
 
@@ -531,6 +543,32 @@ mod test {
         });
 
         assert!(sim.step()?);
+
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(feature = "regex")]
+    fn bounce_multiple_hosts_with_regex() -> Result {
+        let mut sim = Builder::new().build();
+
+        let count = Arc::new(AtomicU64::new(0));
+        for i in 1..=3 {
+            let count = count.clone();
+            sim.host(format!("host-{}", i), move || {
+                let count = count.clone();
+                async move {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    future::pending().await
+                }
+            });
+        }
+
+        sim.run()?;
+        assert_eq!(count.load(Ordering::SeqCst), 3);
+        sim.bounce(regex::Regex::new("host-[12]")?);
+        sim.run()?;
+        assert_eq!(count.load(Ordering::SeqCst), 5);
 
         Ok(())
     }
