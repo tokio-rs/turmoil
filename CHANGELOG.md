@@ -1,3 +1,28 @@
+# 0.5 (Feb 8, 2023)
+
+### Added
+
+- Expose a mechanism to manually drive the Sim ([#76])
+- Add option to query hosts via regex ([#77])
+- Add network topology introspection ([#78])
+
+[#76]: https://github.com/tokio-rs/turmoil/pull/76
+[#77]: https://github.com/tokio-rs/turmoil/pull/77
+[#78]: https://github.com/tokio-rs/turmoil/pull/78
+
+### Changed
+
+- The following methods use a new trait (`ToIpAddrs`) for host lookup which
+  includes the same implementations as `ToIpAddr`.
+  - `Sim#bounce`
+  - `Sim#crash`
+  - `Sim#set_link_fail_rate`
+  - `Sim#set_max_message_latency`
+  - `repair`
+  - `partition`
+  - `release`
+  - `hold`
+
 # 0.4 (Jan 10, 2023)
 
 ### Added
