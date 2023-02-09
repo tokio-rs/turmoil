@@ -33,7 +33,7 @@ fn main() {
     sim.host("server", move || {
         let greeter = greeter.clone();
         async move {
-            let listener = net::TcpListener::bind(addr).await.unwrap();
+            let listener = net::TcpListener::bind(addr).await?;
 
             let accept = from_stream(async_stream::stream! {
                 loop {
