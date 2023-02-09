@@ -16,6 +16,9 @@ readme = "README.md"
 keywords = ["Deterministic", "Simulation", "Testing"]
 categories = ["asynchronous", "network-programming", "simulation"]
 
+[workspace]
+members = ["examples/grpc"]
+
 [dependencies]
 bytes = "1.3"
 futures = "0.3"

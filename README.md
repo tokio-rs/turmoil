@@ -61,6 +61,11 @@ sim.run();
 See `ping_pong` in [udp.rs](tests/udp.rs) for a networking example. For more
 examples, check out the [tests](tests) directory.
 
+### Examples
+
+- [`gRPC`](https://github.com/tokio-rs/turmoil/blob/master/examples/grpc) using
+    `tonic` and `hyper`.
+
 ### tokio_unstable
 
 Turmoil uses [unhandled_panic] to forward host panics as test failures. See
