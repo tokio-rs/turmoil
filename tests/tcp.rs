@@ -27,6 +27,68 @@ async fn bind() -> std::result::Result<TcpListener, std::io::Error> {
 }
 
 #[test]
+fn connects_within_a_localhost() -> Result {
+    let mut sim = Builder::new().build();
+
+    sim.host("server", || async {
+        let listener = TcpListener::bind((IpAddr::from(Ipv4Addr::LOCALHOST), PORT)).await?;
+
+        tokio::spawn(async move {
+            loop {
+                if let Ok((mut stream, _socket)) = listener.accept().await {
+                    let _ = stream.write_u8(1).await;
+                }
+            }
+        });
+
+        let mut stream = TcpStream::connect(("localhost", PORT))
+            .await
+            .expect("should have connected");
+
+        assert_eq!(1, stream.read_u8().await.expect("successful read"));
+
+        let mut stream = TcpStream::connect(("127.0.0.1", PORT))
+            .await
+            .expect("should have connected");
+
+        assert_eq!(1, stream.read_u8().await.expect("successful read"));
+
+        Ok(())
+    });
+
+    sim.run()
+}
+
+#[test]
+fn doesnt_allow_connection_outside_localhost() -> Result {
+    let mut sim = Builder::new().build();
+
+    sim.host("server", || async {
+        let listener = TcpListener::bind((IpAddr::from(Ipv4Addr::LOCALHOST), PORT)).await?;
+
+        loop {
+            let _ = listener.accept().await;
+        }
+    });
+
+    sim.client("client", async {
+        assert_error_kind(
+            TcpStream::connect(("server", PORT)).await,
+            io::ErrorKind::ConnectionRefused,
+        );
+
+        assert_error_kind(
+            TcpStream::connect(("localhost", PORT)).await,
+            io::ErrorKind::ConnectionRefused,
+        );
+
+        Ok(())
+    });
+
+    sim.run()
+}
+
+#[test]
 fn network_partitions_during_connect() -> Result {
     let mut sim = Builder::new().build();
 

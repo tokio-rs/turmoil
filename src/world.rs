@@ -1,4 +1,4 @@
-use crate::envelope::Protocol;
+use crate::envelope::{Envelope, Protocol};
 use crate::{config, Dns, Host, ToIpAddr, ToIpAddrs, Topology, TRACING_TARGET};
 
 use indexmap::IndexMap;
@@ -110,11 +110,24 @@ impl World {
         self.hosts.insert(addr, Host::new(addr));
     }
 
-    /// Send `message` from `src` to `dst`. Delivery is asynchronous and not
-    /// guaranteed.
+    /// Send `message` from `src` to `dst`.
+    /// Delivery between hosts is asynchronous and not guaranteed.
+    /// localhost communication does not use a topology.
     pub(crate) fn send_message(&mut self, src: SocketAddr, dst: SocketAddr, message: Protocol) {
-        self.topology
-            .enqueue_message(&mut self.rng, src, dst, message);
+        if dst.ip().is_loopback() || src.ip().is_loopback() {
+            let localhost_ip = if dst.ip().is_loopback() {
+                src.ip()
+            } else {
+                dst.ip()
+            };
+
+            if let Some(host) = self.hosts.get_mut(&localhost_ip) {
+                let _ = host.receive_from_network(Envelope { src, dst, message });
+            }
+        } else {
+            self.topology
+                .enqueue_message(&mut self.rng, src, dst, message);
+        }
     }
 
     /// Tick the host at `addr` by `duration`.

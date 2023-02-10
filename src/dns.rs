@@ -1,8 +1,11 @@
 use indexmap::IndexMap;
 #[cfg(feature = "regex")]
 use regex::Regex;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
+/// Each new registered host is thought to have an IP in a subnet 192.168.0.0/24
+/// This is just a choice.
+/// localhost always resolves to 127.0.0.1, there is no localhost implementation for IPv6.
 pub struct Dns {
     next: u16,
     names: IndexMap<String, IpAddr>,
@@ -24,10 +27,13 @@ pub trait ToSocketAddrs: sealed::Sealed {
 
 impl Dns {
     pub(crate) fn new() -> Dns {
-        Dns {
-            next: 1,
-            names: IndexMap::new(),
-        }
+        let mut names: IndexMap<String, IpAddr> = IndexMap::new();
+        names.insert(
+            "localhost".to_string(),
+            std::net::Ipv4Addr::LOCALHOST.into(),
+        );
+
+        Dns { next: 1, names }
     }
 
     pub(crate) fn lookup(&mut self, addr: impl ToIpAddr) -> IpAddr {
@@ -62,7 +68,7 @@ impl<'a> ToIpAddr for &'a str {
             let a = (host >> 8) as u8;
             let b = (host & 0xFF) as u8;
 
-            std::net::Ipv4Addr::new(127, 0, a, b).into()
+            std::net::Ipv4Addr::new(192, 168, a, b).into()
         })
     }
 }
@@ -103,9 +109,14 @@ impl ToSocketAddrs for (String, u16) {
 
 impl<'a> ToSocketAddrs for (&'a str, u16) {
     fn to_socket_addr(&self, dns: &Dns) -> SocketAddr {
+        // When "x.y.a.b" is passed as a hostname.
+        if let Ok(ip) = self.0.parse::<Ipv4Addr>() {
+            return (ip, self.1).into();
+        }
+
         match dns.names.get(self.0) {
             Some(ip) => (*ip, self.1).into(),
-            None => panic!("no hostname found for ip address"),
+            None => panic!("no ip address found for a hostname"),
         }
     }
 }
@@ -176,8 +187,11 @@ mod tests {
     fn parse_str() {
         let mut dns = Dns::new();
         dns.names.insert("foo".into(), "127.0.0.1".parse().unwrap());
-        let s = "foo:5000".to_socket_addr(&dns);
+        let hostname_port = "foo:5000".to_socket_addr(&dns);
+        let ip_port = "127.0.0.1:5000".to_socket_addr(&dns);
 
-        assert_eq!(s, "127.0.0.1:5000".parse().unwrap());
+        let expected = "127.0.0.1:5000".parse().unwrap();
+        assert_eq!(hostname_port, expected);
+        assert_eq!(ip_port, expected);
     }
 }
