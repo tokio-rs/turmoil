@@ -1,4 +1,6 @@
-use crate::{for_pairs, Config, LinksIter, Result, Role, Rt, ToIpAddr, ToIpAddrs, World};
+use crate::{
+    for_pairs, Config, LinksIter, Result, Role, Rt, ToIpAddr, ToIpAddrs, World, TRACING_TARGET,
+};
 
 use indexmap::IndexMap;
 use std::cell::RefCell;
@@ -109,17 +111,18 @@ impl<'a> Sim<'a> {
     /// after this method. You can use [`Sim::bounce`] to start the hosts up
     /// again.
     pub fn crash(&mut self, addrs: impl ToIpAddrs) {
-        self.run_with_hosts(addrs, |rt| match rt {
+        self.run_with_hosts(addrs, |addr, rt| match rt {
             Role::Client { .. } => panic!("can only bounce hosts, not clients"),
             Role::Simulated { rt, .. } => {
                 rt.cancel_tasks();
+                tracing::trace!(target: TRACING_TARGET, addr = ?addr, "Crashed");
             }
         });
     }
 
     /// Bounces the resolved hosts. The software is restarted.
     pub fn bounce(&mut self, addrs: impl ToIpAddrs) {
-        self.run_with_hosts(addrs, |rt| match rt {
+        self.run_with_hosts(addrs, |addr, rt| match rt {
             Role::Client { .. } => panic!("can only bounce hosts, not clients"),
             Role::Simulated {
                 rt,
@@ -128,19 +131,20 @@ impl<'a> Sim<'a> {
             } => {
                 rt.cancel_tasks();
                 *handle = rt.with(|| tokio::task::spawn_local(software()));
+                tracing::trace!(target: TRACING_TARGET, addr = ?addr, "Bounced");
             }
         });
     }
 
     /// Run `f` with the resolved hosts at `addrs` set on the world.
-    fn run_with_hosts(&mut self, addrs: impl ToIpAddrs, mut f: impl FnMut(&mut Role)) {
+    fn run_with_hosts(&mut self, addrs: impl ToIpAddrs, mut f: impl FnMut(IpAddr, &mut Role)) {
         let hosts = self.world.borrow_mut().lookup_many(addrs);
         for h in hosts {
             let rt = self.rts.get_mut(&h).expect("missing host");
 
             self.world.borrow_mut().current = Some(h);
 
-            World::enter(&self.world, || f(rt));
+            World::enter(&self.world, || f(h, rt));
         }
 
         self.world.borrow_mut().current = None;
@@ -299,15 +303,20 @@ impl<'a> Sim<'a> {
 
         self.elapsed += tick;
 
-        // Check finished clients and hosts for err results. Runtimes are removed at
-        // this stage.
+        // Check finished clients and hosts for err results. Runtimes are removed
+        // at this stage.
         for addr in finished.into_iter() {
             if let Some(role) = self.rts.remove(&addr) {
                 let (rt, handle) = match role {
                     Role::Client { rt, handle } => (rt, handle),
                     Role::Simulated { rt, handle, .. } => (rt, handle),
                 };
-                rt.block_on(handle)??;
+                // If the host was crashed the JoinError will be canceled, which
+                // needs to be handled to not fail the simulation.
+                match rt.block_on(handle) {
+                    Err(j) if j.is_cancelled() => {}
+                    res => res??,
+                }
             }
         }
 
@@ -545,6 +554,20 @@ mod test {
         assert!(sim.step()?);
 
         Ok(())
+    }
+
+    /// This is a regression test that ensures JoinError::Cancelled is not
+    /// propagated to the test when the host crashes, which was causing
+    /// incorrect test failure.
+    #[test]
+    fn run_after_host_crashes() -> Result {
+        let mut sim = Builder::new().build();
+
+        sim.host("h", || async { future::pending().await });
+
+        sim.crash("h");
+
+        sim.run()
     }
 
     #[test]
