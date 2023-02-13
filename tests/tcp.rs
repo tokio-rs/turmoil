@@ -1,6 +1,6 @@
 use std::{
     io,
-    net::{IpAddr, Ipv4Addr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
     rc::Rc,
     time::Duration,
 };
@@ -30,28 +30,35 @@ async fn bind() -> std::result::Result<TcpListener, std::io::Error> {
 fn connects_within_a_localhost() -> Result {
     let mut sim = Builder::new().build();
 
-    sim.host("server", || async {
+    sim.client("server", async {
         let listener = TcpListener::bind((IpAddr::from(Ipv4Addr::LOCALHOST), PORT)).await?;
 
         tokio::spawn(async move {
             loop {
-                if let Ok((mut stream, _socket)) = listener.accept().await {
-                    let _ = stream.write_u8(1).await;
-                }
+                let _ = listener.accept().await;
             }
         });
 
-        let mut stream = TcpStream::connect(("localhost", PORT))
-            .await
-            .expect("should have connected");
+        TcpStream::connect(("localhost", PORT))
+            .await?;
 
-        assert_eq!(1, stream.read_u8().await.expect("successful read"));
+        TcpStream::connect(("127.0.0.1", PORT))
+            .await?;
 
-        let mut stream = TcpStream::connect(("127.0.0.1", PORT))
-            .await
-            .expect("should have connected");
+        Ok(())
+    });
 
-        assert_eq!(1, stream.read_u8().await.expect("successful read"));
+    sim.client("serveripv6", async {
+        let listener = TcpListener::bind((IpAddr::from(Ipv6Addr::LOCALHOST), PORT)).await?;
+
+        tokio::spawn(async move {
+            loop {
+                let _ = listener.accept().await;
+            }
+        });
+
+        TcpStream::connect(("::1", PORT))
+            .await?;
 
         Ok(())
     });

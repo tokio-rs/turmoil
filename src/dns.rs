@@ -1,9 +1,9 @@
 use indexmap::IndexMap;
 #[cfg(feature = "regex")]
 use regex::Regex;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, Ipv6Addr};
 
-/// Each new registered host is thought to have an IP in a subnet 192.168.0.0/24
+/// Each new registered host has an IP in a subnet 192.168.0.0/24
 /// This is just a choice.
 /// localhost always resolves to 127.0.0.1, there is no localhost implementation for IPv6.
 pub struct Dns {
@@ -114,6 +114,10 @@ impl<'a> ToSocketAddrs for (&'a str, u16) {
             return (ip, self.1).into();
         }
 
+        if let Ok(ip) = self.0.parse::<Ipv6Addr>() {
+            return (ip, self.1).into();
+        }
+
         match dns.names.get(self.0) {
             Some(ip) => (*ip, self.1).into(),
             None => panic!("no ip address found for a hostname"),
@@ -186,12 +190,14 @@ mod tests {
     #[test]
     fn parse_str() {
         let mut dns = Dns::new();
-        dns.names.insert("foo".into(), "127.0.0.1".parse().unwrap());
-        let hostname_port = "foo:5000".to_socket_addr(&dns);
-        let ip_port = "127.0.0.1:5000".to_socket_addr(&dns);
+        let generated_addr = dns.lookup("foo");
 
-        let expected = "127.0.0.1:5000".parse().unwrap();
-        assert_eq!(hostname_port, expected);
-        assert_eq!(ip_port, expected);
+        let hostname_port = "foo:5000".to_socket_addr(&dns);
+        let ipv4_port = "127.0.0.1:5000";
+        let ipv6_port = "[::1]:5000";
+
+        assert_eq!(hostname_port, format!("{}:5000", generated_addr).parse().unwrap());
+        assert_eq!(ipv4_port.to_socket_addr(&dns), ipv4_port.parse().unwrap());
+        assert_eq!(ipv6_port.to_socket_addr(&dns), ipv6_port.parse().unwrap());
     }
 }
