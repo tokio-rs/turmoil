@@ -1,4 +1,6 @@
-use crate::{for_pairs, Config, LinksIter, Result, Role, Rt, ToIpAddr, ToIpAddrs, World};
+use crate::{
+    for_pairs, Config, LinksIter, Result, Role, Rt, ToIpAddr, ToIpAddrs, World, TRACING_TARGET,
+};
 
 use indexmap::IndexMap;
 use std::cell::RefCell;
@@ -299,15 +301,24 @@ impl<'a> Sim<'a> {
 
         self.elapsed += tick;
 
-        // Check finished clients and hosts for err results. Runtimes are removed at
-        // this stage.
+        // Check finished clients and hosts for err results, ignoring cancelled
+        // tasks. Runtimes are removed at this stage.
         for addr in finished.into_iter() {
             if let Some(role) = self.rts.remove(&addr) {
                 let (rt, handle) = match role {
                     Role::Client { rt, handle } => (rt, handle),
                     Role::Simulated { rt, handle, .. } => (rt, handle),
                 };
-                rt.block_on(handle)??;
+                let result = rt.block_on(handle);
+                // Prevent JoinError::Cancelled to be propagated, assuming the task
+                // was crashed explicitly.
+                if let Err(e) = &result {
+                    if e.is_cancelled() {
+                        tracing::trace!(target: TRACING_TARGET, host = ?addr, "Crashed");
+                        continue;
+                    }
+                }
+                result??;
             }
         }
 
@@ -545,6 +556,20 @@ mod test {
         assert!(sim.step()?);
 
         Ok(())
+    }
+
+    /// This is a regression test that ensures JoinError::Cancelled is not
+    /// getting propagated to the test when the host crashes.
+    /// Before the fix the error returned by run function causing test to fail.
+    #[test]
+    fn run_after_host_crashes() -> Result {
+        let mut sim = Builder::new().build();
+
+        sim.host("h", || async { future::pending().await });
+
+        sim.crash("h");
+
+        sim.run()
     }
 
     #[test]
