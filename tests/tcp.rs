@@ -27,12 +27,31 @@ async fn bind() -> std::result::Result<TcpListener, std::io::Error> {
 }
 
 #[test]
+fn connects_within_a_host() -> Result {
+    let mut sim = Builder::new().build();
+
+    sim.client("server", async {
+        let listener = bind().await?;
+        tokio::spawn(async move {
+            loop {
+                let _ = listener.accept().await;
+            }
+        });
+
+        TcpStream::connect(("server", PORT))
+            .await?;
+        Ok(())
+    });
+
+    sim.run()
+}
+
+#[test]
 fn connects_within_a_localhost() -> Result {
     let mut sim = Builder::new().build();
 
     sim.client("server", async {
         let listener = TcpListener::bind((IpAddr::from(Ipv4Addr::LOCALHOST), PORT)).await?;
-
         tokio::spawn(async move {
             loop {
                 let _ = listener.accept().await;

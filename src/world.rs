@@ -1,11 +1,11 @@
-use crate::envelope::{Envelope, Protocol};
+use crate::envelope::{Protocol};
 use crate::{config, Dns, Host, ToIpAddr, ToIpAddrs, Topology, TRACING_TARGET};
 
 use indexmap::IndexMap;
 use rand::RngCore;
 use scoped_tls::scoped_thread_local;
 use std::cell::RefCell;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, SocketAddr, Ipv4Addr};
 use std::time::Duration;
 
 /// Tracks all the state for the simulated world.
@@ -101,6 +101,11 @@ impl World {
 
         tracing::info!(target: TRACING_TARGET, hostname = ?self.dns.reverse(addr), ?addr, "New");
 
+        // Handles connection within a host
+        self.topology.register(addr, addr);
+        // Handles both IPv4 and IPv6
+        self.topology.register(Ipv4Addr::LOCALHOST.into(), addr);
+
         // Register links between the new host and all existing hosts
         for existing in self.hosts.keys() {
             self.topology.register(*existing, addr);
@@ -112,22 +117,9 @@ impl World {
 
     /// Send `message` from `src` to `dst`.
     /// Delivery between hosts is asynchronous and not guaranteed.
-    /// localhost communication does not use a topology.
     pub(crate) fn send_message(&mut self, src: SocketAddr, dst: SocketAddr, message: Protocol) {
-        if dst.ip().is_loopback() || src.ip().is_loopback() {
-            let localhost_ip = if dst.ip().is_loopback() {
-                src.ip()
-            } else {
-                dst.ip()
-            };
-
-            if let Some(host) = self.hosts.get_mut(&localhost_ip) {
-                let _ = host.receive_from_network(Envelope { src, dst, message });
-            }
-        } else {
-            self.topology
-                .enqueue_message(&mut self.rng, src, dst, message);
-        }
+        self.topology
+            .enqueue_message(&mut self.rng, src, dst, message);
     }
 
     /// Tick the host at `addr` by `duration`.

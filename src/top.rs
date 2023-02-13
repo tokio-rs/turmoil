@@ -7,7 +7,7 @@ use indexmap::IndexMap;
 use rand::{Rng, RngCore};
 use rand_distr::{Distribution, Exp};
 use std::collections::VecDeque;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, SocketAddr, Ipv4Addr};
 use std::time::Duration;
 use tokio::time::Instant;
 
@@ -28,16 +28,21 @@ pub(crate) struct Topology {
 /// which orders the addrs, such that this type uniquely identifies the link
 /// between two hosts on the network.
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
-struct Pair(IpAddr, IpAddr);
+enum Pair {
+    Localhost(IpAddr),
+    External(IpAddr, IpAddr),
+}
 
 impl Pair {
     fn new(a: IpAddr, b: IpAddr) -> Pair {
-        assert_ne!(a, b);
-
-        if a < b {
-            Pair(a, b)
+        if a.is_loopback() {
+            Pair::Localhost(b)
+        } else if b.is_loopback() {
+            Pair::Localhost(a)
+        } else if a < b {
+            Pair::External(a, b)
         } else {
-            Pair(b, a)
+            Pair::External(b, a)
         }
     }
 }
@@ -51,8 +56,7 @@ pub struct LinksIter<'a> {
 /// An iterator for the link, providing access to sent messages that have not
 /// yet been delivered.
 pub struct LinkIter<'a> {
-    a: IpAddr,
-    b: IpAddr,
+    p: Pair,
     now: Instant,
     iter: std::collections::vec_deque::IterMut<'a, Sent>,
 }
@@ -61,7 +65,10 @@ impl<'a> LinkIter<'a> {
     /// The [`IpAddr`] pair for the link. Always ordered to uniquely identify
     /// the link.
     pub fn pair(&self) -> (IpAddr, IpAddr) {
-        (self.a, self.b)
+        match self.p {
+            Pair::Localhost(a) => (Ipv4Addr::LOCALHOST.into(), a),
+            Pair::External(a, b) => (a, b),
+        }
     }
 
     /// Schedule all messages on the link for delivery the next time the
@@ -107,8 +114,7 @@ impl<'a> Iterator for LinksIter<'a> {
         let (pair, link) = self.iter.next()?;
 
         Some(LinkIter {
-            a: pair.0,
-            b: pair.1,
+            p: pair.clone(),
             now: link.now,
             iter: link.sent.iter_mut(),
         })
@@ -130,6 +136,29 @@ impl<'a> Iterator for LinkIter<'a> {
     }
 }
 
+#[derive(Debug, Copy, Clone, Hash, Eq, PartialEq, Ord, PartialOrd)]
+struct Target(IpAddr, DeliveryKind);
+
+
+#[derive(Debug, Copy, Clone, Hash, Eq, PartialEq, Ord, PartialOrd)]
+enum DeliveryKind {
+    Localhost,
+    External,
+}
+
+impl Target {
+    fn new(src: IpAddr, dst: IpAddr) -> Target {
+        if src.is_loopback() {
+            Target(dst, DeliveryKind::Localhost)
+        } else if dst.is_loopback() {
+            Target(src, DeliveryKind::Localhost)
+        } else {
+            Target(dst, DeliveryKind::External)
+        }
+    }
+}
+
+
 /// A two-way link between two hosts on the network.
 struct Link {
     state: State,
@@ -142,7 +171,7 @@ struct Link {
     sent: VecDeque<Sent>,
 
     /// Messages that are ready to be delivered.
-    deliverable: IndexMap<IpAddr, VecDeque<Envelope>>,
+    deliverable: IndexMap<Target, VecDeque<Envelope>>,
 
     /// The current network time, moved forward with [`Link::tick`].
     now: Instant,
@@ -218,8 +247,17 @@ impl Topology {
     // Move messages from any network links to the `dst` host.
     pub(crate) fn deliver_messages(&mut self, rand: &mut dyn RngCore, dst: &mut Host) {
         for (pair, link) in &mut self.links {
-            if pair.0 == dst.addr || pair.1 == dst.addr {
-                link.deliver_messages(&self.config, rand, dst);
+            match pair {
+                Pair::Localhost(a) => {
+                    if *a == dst.addr {
+                        link.deliver_messages(&self.config, rand, dst, DeliveryKind::Localhost);
+                    }
+                }
+                Pair::External(a, b) => {
+                    if *a == dst.addr || *b == dst.addr {
+                        link.deliver_messages(&self.config, rand, dst, DeliveryKind::External);
+                    }
+                }
             }
         }
     }
@@ -358,10 +396,12 @@ impl Link {
                         dst: sent.dst,
                         message: sent.protocol,
                     };
+
                     self.deliverable
-                        .entry(sent.dst.ip())
+                        .entry(Target::new(sent.src.ip(), sent.dst.ip()))
                         .or_default()
                         .push_back(envelope);
+
                     deliverable += 1;
                 }
             }
@@ -376,10 +416,11 @@ impl Link {
         global_config: &config::Link,
         rand: &mut dyn RngCore,
         host: &mut Host,
+        kind: DeliveryKind,
     ) {
         let deliverable = self
             .deliverable
-            .entry(host.addr)
+            .entry(Target(host.addr, kind))
             .or_default()
             .drain(..)
             .collect::<Vec<Envelope>>();
@@ -464,4 +505,17 @@ impl Link {
             .message_loss
             .get_or_insert_with(|| global.clone())
     }
+}
+
+
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn xd() {
+
+    }
+
 }
