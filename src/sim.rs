@@ -311,7 +311,7 @@ impl<'a> Sim<'a> {
                     Role::Client { rt, handle } => (rt, handle),
                     Role::Simulated { rt, handle, .. } => (rt, handle),
                 };
-                // If the host was crashed the JoinError will be canceled, which
+                // If the host was crashed the JoinError is cancelled, which
                 // needs to be handled to not fail the simulation.
                 match rt.block_on(handle) {
                     Err(j) if j.is_cancelled() => {}
