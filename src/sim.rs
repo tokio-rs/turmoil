@@ -131,7 +131,7 @@ impl<'a> Sim<'a> {
             } => {
                 rt.cancel_tasks();
                 *handle = rt.with(|| tokio::task::spawn_local(software()));
-                tracing::trace!(target: TRACING_TARGET, addr = ?addr, "Bounced");
+                tracing::trace!(target: TRACING_TARGET, addr = ?addr, "Bounce");
             }
         });
     }
