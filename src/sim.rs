@@ -115,7 +115,7 @@ impl<'a> Sim<'a> {
             Role::Client { .. } => panic!("can only bounce hosts, not clients"),
             Role::Simulated { rt, .. } => {
                 rt.cancel_tasks();
-                tracing::trace!(target: TRACING_TARGET, addr = ?addr, "Crashed");
+                tracing::trace!(target: TRACING_TARGET, addr = ?addr, "Crash");
             }
         });
     }
