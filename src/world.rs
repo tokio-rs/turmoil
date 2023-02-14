@@ -5,7 +5,7 @@ use indexmap::IndexMap;
 use rand::RngCore;
 use scoped_tls::scoped_thread_local;
 use std::cell::RefCell;
-use std::net::{IpAddr, SocketAddr, Ipv4Addr};
+use std::net::{IpAddr, SocketAddr, Ipv4Addr, Ipv6Addr};
 use std::time::Duration;
 
 /// Tracks all the state for the simulated world.
@@ -101,10 +101,11 @@ impl World {
 
         tracing::info!(target: TRACING_TARGET, hostname = ?self.dns.reverse(addr), ?addr, "New");
 
-        // Handles connection within a host
+        // // Handles connection within a host
         self.topology.register(addr, addr);
-        // Handles both IPv4 and IPv6
         self.topology.register(Ipv4Addr::LOCALHOST.into(), addr);
+        self.topology.register(Ipv6Addr::LOCALHOST.into(), addr);
+
 
         // Register links between the new host and all existing hosts
         for existing in self.hosts.keys() {

@@ -7,7 +7,7 @@ use indexmap::IndexMap;
 use rand::{Rng, RngCore};
 use rand_distr::{Distribution, Exp};
 use std::collections::VecDeque;
-use std::net::{IpAddr, SocketAddr, Ipv4Addr};
+use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 use tokio::time::Instant;
 
@@ -28,21 +28,38 @@ pub(crate) struct Topology {
 /// which orders the addrs, such that this type uniquely identifies the link
 /// between two hosts on the network.
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
-enum Pair {
-    Localhost(IpAddr),
-    External(IpAddr, IpAddr),
+struct Pair {
+    a: IpAddr,
+    b: IpAddr,
+    interface: Interface,
 }
 
 impl Pair {
     fn new(a: IpAddr, b: IpAddr) -> Pair {
         if a.is_loopback() {
-            Pair::Localhost(b)
+            Pair {
+                a,
+                b,
+                interface: Interface::Localhost,
+            }
         } else if b.is_loopback() {
-            Pair::Localhost(a)
+            Pair {
+                a: b,
+                b: a,
+                interface: Interface::Localhost,
+            }
         } else if a < b {
-            Pair::External(a, b)
+            Pair {
+                a,
+                b,
+                interface: Interface::External,
+            }
         } else {
-            Pair::External(b, a)
+            Pair {
+                a: b,
+                b: a,
+                interface: Interface::External,
+            }
         }
     }
 }
@@ -65,10 +82,7 @@ impl<'a> LinkIter<'a> {
     /// The [`IpAddr`] pair for the link. Always ordered to uniquely identify
     /// the link.
     pub fn pair(&self) -> (IpAddr, IpAddr) {
-        match self.p {
-            Pair::Localhost(a) => (Ipv4Addr::LOCALHOST.into(), a),
-            Pair::External(a, b) => (a, b),
-        }
+        (self.p.a, self.p.b)
     }
 
     /// Schedule all messages on the link for delivery the next time the
@@ -137,11 +151,10 @@ impl<'a> Iterator for LinkIter<'a> {
 }
 
 #[derive(Debug, Copy, Clone, Hash, Eq, PartialEq, Ord, PartialOrd)]
-struct Target(IpAddr, DeliveryKind);
-
+struct Target(IpAddr, Interface);
 
 #[derive(Debug, Copy, Clone, Hash, Eq, PartialEq, Ord, PartialOrd)]
-enum DeliveryKind {
+enum Interface {
     Localhost,
     External,
 }
@@ -149,15 +162,14 @@ enum DeliveryKind {
 impl Target {
     fn new(src: IpAddr, dst: IpAddr) -> Target {
         if src.is_loopback() {
-            Target(dst, DeliveryKind::Localhost)
+            Target(dst, Interface::Localhost)
         } else if dst.is_loopback() {
-            Target(src, DeliveryKind::Localhost)
+            Target(src, Interface::Localhost)
         } else {
-            Target(dst, DeliveryKind::External)
+            Target(dst, Interface::External)
         }
     }
 }
-
 
 /// A two-way link between two hosts on the network.
 struct Link {
@@ -247,35 +259,26 @@ impl Topology {
     // Move messages from any network links to the `dst` host.
     pub(crate) fn deliver_messages(&mut self, rand: &mut dyn RngCore, dst: &mut Host) {
         for (pair, link) in &mut self.links {
-            match pair {
-                Pair::Localhost(a) => {
-                    if *a == dst.addr {
-                        link.deliver_messages(&self.config, rand, dst, DeliveryKind::Localhost);
-                    }
-                }
-                Pair::External(a, b) => {
-                    if *a == dst.addr || *b == dst.addr {
-                        link.deliver_messages(&self.config, rand, dst, DeliveryKind::External);
-                    }
-                }
+            if pair.a == dst.addr || pair.b == dst.addr {
+                link.deliver_messages(&self.config, rand, dst, pair.interface);
             }
         }
     }
 
     pub(crate) fn hold(&mut self, a: IpAddr, b: IpAddr) {
-        self.links[&Pair::new(a, b)].hold();
+        self.links[&Topology::validate(a, b)].hold();
     }
 
     pub(crate) fn release(&mut self, a: IpAddr, b: IpAddr) {
-        self.links[&Pair::new(a, b)].release();
+        self.links[&Topology::validate(a, b)].release();
     }
 
     pub(crate) fn partition(&mut self, a: IpAddr, b: IpAddr) {
-        self.links[&Pair::new(a, b)].explicit_partition();
+        self.links[&Topology::validate(a, b)].explicit_partition();
     }
 
     pub(crate) fn repair(&mut self, a: IpAddr, b: IpAddr) {
-        self.links[&Pair::new(a, b)].explicit_repair();
+        self.links[&Topology::validate(a, b)].explicit_repair();
     }
 
     pub(crate) fn tick_by(&mut self, duration: Duration) {
@@ -288,6 +291,16 @@ impl Topology {
     pub(crate) fn iter_mut(&mut self) -> LinksIter {
         LinksIter {
             iter: self.links.iter_mut(),
+        }
+    }
+
+    fn validate(a: IpAddr, b: IpAddr) -> Pair {
+        let pair = Pair::new(a, b);
+        match pair.interface {
+            Interface::Localhost => {
+                panic!("can't perform topology operations on localhost interfaces")
+            }
+            Interface::External => pair,
         }
     }
 }
@@ -416,11 +429,11 @@ impl Link {
         global_config: &config::Link,
         rand: &mut dyn RngCore,
         host: &mut Host,
-        kind: DeliveryKind,
+        interface: Interface,
     ) {
         let deliverable = self
             .deliverable
-            .entry(Target(host.addr, kind))
+            .entry(Target(host.addr, interface))
             .or_default()
             .drain(..)
             .collect::<Vec<Envelope>>();
@@ -505,17 +518,4 @@ impl Link {
             .message_loss
             .get_or_insert_with(|| global.clone())
     }
-}
-
-
-
-#[cfg(test)]
-mod test {
-    use super::*;
-
-    #[test]
-    fn xd() {
-
-    }
-
 }

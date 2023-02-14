@@ -64,6 +64,11 @@ fn connects_within_a_localhost() -> Result {
         TcpStream::connect(("127.0.0.1", PORT))
             .await?;
 
+        assert_error_kind(
+            TcpStream::connect(("::1", PORT)).await,
+            io::ErrorKind::ConnectionRefused,
+        );
+        
         Ok(())
     });
 
@@ -78,6 +83,11 @@ fn connects_within_a_localhost() -> Result {
 
         TcpStream::connect(("::1", PORT))
             .await?;
+
+        assert_error_kind(
+            TcpStream::connect(("localhost", PORT)).await,
+            io::ErrorKind::ConnectionRefused,
+        );
 
         Ok(())
     });
