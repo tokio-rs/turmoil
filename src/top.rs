@@ -150,25 +150,12 @@ impl<'a> Iterator for LinkIter<'a> {
     }
 }
 
-#[derive(Debug, Copy, Clone, Hash, Eq, PartialEq, Ord, PartialOrd)]
-struct Target(IpAddr, Interface);
-
-#[derive(Debug, Copy, Clone, Hash, Eq, PartialEq, Ord, PartialOrd)]
+/// Network interface kind.
+/// Represents a different semantics of localhost and host-to-host communication.
+#[derive(Debug, Clone, Hash, Eq, PartialEq)]
 enum Interface {
     Localhost,
     External,
-}
-
-impl Target {
-    fn new(src: IpAddr, dst: IpAddr) -> Target {
-        if src.is_loopback() {
-            Target(dst, Interface::Localhost)
-        } else if dst.is_loopback() {
-            Target(src, Interface::Localhost)
-        } else {
-            Target(dst, Interface::External)
-        }
-    }
 }
 
 /// A two-way link between two hosts on the network.
@@ -183,7 +170,7 @@ struct Link {
     sent: VecDeque<Sent>,
 
     /// Messages that are ready to be delivered.
-    deliverable: IndexMap<Target, VecDeque<Envelope>>,
+    deliverable: IndexMap<IpAddr, VecDeque<Envelope>>,
 
     /// The current network time, moved forward with [`Link::tick`].
     now: Instant,
@@ -260,7 +247,7 @@ impl Topology {
     pub(crate) fn deliver_messages(&mut self, rand: &mut dyn RngCore, dst: &mut Host) {
         for (pair, link) in &mut self.links {
             if pair.a == dst.addr || pair.b == dst.addr {
-                link.deliver_messages(&self.config, rand, dst, pair.interface);
+                link.deliver_messages(&self.config, rand, dst);
             }
         }
     }
@@ -410,8 +397,20 @@ impl Link {
                         message: sent.protocol,
                     };
 
+                    // If the communication is localhost, use a real ip address
+                    // of the host, instead of a localhost address to deliver a
+                    // message. One of them is guaranteed not to be a loopback
+                    // address.
+                    let ip_addr = if sent.src.ip().is_loopback() {
+                        sent.dst.ip()
+                    } else if sent.dst.ip().is_loopback() {
+                        sent.src.ip()
+                    } else {
+                        sent.dst.ip()
+                    };
+
                     self.deliverable
-                        .entry(Target::new(sent.src.ip(), sent.dst.ip()))
+                        .entry(ip_addr)
                         .or_default()
                         .push_back(envelope);
 
@@ -429,11 +428,10 @@ impl Link {
         global_config: &config::Link,
         rand: &mut dyn RngCore,
         host: &mut Host,
-        interface: Interface,
     ) {
         let deliverable = self
             .deliverable
-            .entry(Target(host.addr, interface))
+            .entry(host.addr)
             .or_default()
             .drain(..)
             .collect::<Vec<Envelope>>();

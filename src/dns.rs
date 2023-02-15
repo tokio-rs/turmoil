@@ -1,11 +1,15 @@
 use indexmap::IndexMap;
 #[cfg(feature = "regex")]
 use regex::Regex;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 /// Each new registered host has an IP in a subnet 192.168.0.0/24
 /// This is just a choice.
-/// localhost always resolves to 127.0.0.1, there is no localhost implementation for IPv6.
+///
+/// Default mappings:
+/// localhost -> 127.0.0.1
+/// ip6-localhost -> ::1
+/// ip6-loopback -> ::1
 pub struct Dns {
     next: u16,
     names: IndexMap<String, IpAddr>,
@@ -30,7 +34,15 @@ impl Dns {
         let mut names: IndexMap<String, IpAddr> = IndexMap::new();
         names.insert(
             "localhost".to_string(),
-            std::net::Ipv4Addr::LOCALHOST.into(),
+            Ipv4Addr::LOCALHOST.into(),
+        );
+        names.insert(
+            "ip6-localhost".to_string(),
+            Ipv6Addr::LOCALHOST.into(),
+        );
+        names.insert(
+            "ip6-loopback".to_string(),
+            Ipv6Addr::LOCALHOST.into(),
         );
 
         Dns { next: 1, names }
@@ -109,18 +121,14 @@ impl ToSocketAddrs for (String, u16) {
 
 impl<'a> ToSocketAddrs for (&'a str, u16) {
     fn to_socket_addr(&self, dns: &Dns) -> SocketAddr {
-        // When "x.y.a.b" is passed as a hostname.
-        if let Ok(ip) = self.0.parse::<Ipv4Addr>() {
-            return (ip, self.1).into();
-        }
-
-        if let Ok(ip) = self.0.parse::<Ipv6Addr>() {
+        // When IP address is passed directly as a hostname.
+        if let Ok(ip) = self.0.parse::<IpAddr>() {
             return (ip, self.1).into();
         }
 
         match dns.names.get(self.0) {
             Some(ip) => (*ip, self.1).into(),
-            None => panic!("no ip address found for a hostname"),
+            None => panic!("no ip address found for a hostname: {}", self.0),
         }
     }
 }
@@ -185,6 +193,8 @@ mod sealed {
 
 #[cfg(test)]
 mod tests {
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
     use crate::{dns::Dns, ToSocketAddrs};
 
     #[test]
@@ -196,8 +206,20 @@ mod tests {
         let ipv4_port = "127.0.0.1:5000";
         let ipv6_port = "[::1]:5000";
 
-        assert_eq!(hostname_port, format!("{}:5000", generated_addr).parse().unwrap());
+        assert_eq!(
+            hostname_port,
+            format!("{}:5000", generated_addr).parse().unwrap()
+        );
         assert_eq!(ipv4_port.to_socket_addr(&dns), ipv4_port.parse().unwrap());
         assert_eq!(ipv6_port.to_socket_addr(&dns), ipv6_port.parse().unwrap());
+    }
+
+    #[test]
+    fn localhosts() {
+        let mut dns = Dns::new();
+
+        assert_eq!(Ipv4Addr::LOCALHOST, dns.lookup("localhost"));
+        assert_eq!(Ipv6Addr::LOCALHOST, dns.lookup("ip6-localhost"));
+        assert_eq!(Ipv6Addr::LOCALHOST, dns.lookup("ip6-loopback"));
     }
 }
