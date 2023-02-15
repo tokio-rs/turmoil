@@ -172,7 +172,7 @@ impl<'a> Sim<'a> {
         self.world.borrow_mut().lookup_many(addr)
     }
 
-    /// Set the max message latency
+    /// Set the max message latency for all links.
     pub fn set_max_message_latency(&self, value: Duration) {
         self.world
             .borrow_mut()
@@ -180,6 +180,21 @@ impl<'a> Sim<'a> {
             .set_max_message_latency(value);
     }
 
+    /// Set the message latency for any links matching `a` and `b`.
+    ///
+    /// This sets the min and max to the same value eliminating any variance in
+    /// latency.
+    pub fn set_link_latency(&self, a: impl ToIpAddrs, b: impl ToIpAddrs, value: Duration) {
+        let mut world = self.world.borrow_mut();
+        let a = world.lookup_many(a);
+        let b = world.lookup_many(b);
+
+        for_pairs(&a, &b, |a, b| {
+            world.topology.set_link_message_latency(a, b, value);
+        });
+    }
+
+    /// Set the max message latency for any links matching `a` and `b`.
     pub fn set_link_max_message_latency(
         &self,
         a: impl ToIpAddrs,
@@ -195,7 +210,7 @@ impl<'a> Sim<'a> {
         });
     }
 
-    /// Set the message latency distribution curve.
+    /// Set the message latency distribution curve for all links.
     ///
     /// Message latency follows an exponential distribution curve. The `value`
     /// is the lambda argument to the probability function.
@@ -311,7 +326,7 @@ impl<'a> Sim<'a> {
                     Role::Client { rt, handle } => (rt, handle),
                     Role::Simulated { rt, handle, .. } => (rt, handle),
                 };
-                
+
                 // If the host was crashed the JoinError is cancelled, which
                 // needs to be handled to not fail the simulation.
                 match rt.block_on(handle) {
@@ -335,6 +350,7 @@ impl<'a> Sim<'a> {
 #[cfg(test)]
 mod test {
     use std::{
+        net::{IpAddr, Ipv4Addr},
         rc::Rc,
         sync::{
             atomic::{AtomicU64, Ordering},
@@ -344,7 +360,11 @@ mod test {
     };
 
     use std::future;
-    use tokio::sync::Semaphore;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        sync::Semaphore,
+        time::Instant,
+    };
 
     use crate::{
         elapsed, hold,
@@ -567,6 +587,54 @@ mod test {
         sim.host("h", || async { future::pending().await });
 
         sim.crash("h");
+
+        sim.run()
+    }
+
+    #[test]
+    fn override_link_latency() -> Result {
+        let global = Duration::from_millis(2);
+
+        let mut sim = Builder::new()
+            .min_message_latency(global)
+            .max_message_latency(global)
+            .build();
+
+        sim.host("server", || async {
+            let listener = TcpListener::bind((IpAddr::V4(Ipv4Addr::UNSPECIFIED), 1234)).await?;
+
+            while let Ok((mut s, _)) = listener.accept().await {
+                assert!(s.write_u8(9).await.is_ok());
+            }
+
+            Ok(())
+        });
+
+        sim.client("client", async move {
+            let mut s = TcpStream::connect("server:1234").await?;
+
+            let start = Instant::now();
+            s.read_u8().await?;
+            assert_eq!(global, start.elapsed());
+
+            Ok(())
+        });
+
+        sim.run()?;
+
+        let degraded = Duration::from_millis(10);
+
+        sim.client("client2", async move {
+            let mut s = TcpStream::connect("server:1234").await?;
+
+            let start = Instant::now();
+            s.read_u8().await?;
+            assert_eq!(degraded, start.elapsed());
+
+            Ok(())
+        });
+
+        sim.set_link_latency("client2", "server", degraded);
 
         sim.run()
     }

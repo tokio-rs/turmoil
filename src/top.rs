@@ -181,6 +181,12 @@ impl Topology {
         self.config.latency_mut().max_message_latency = value;
     }
 
+    pub(crate) fn set_link_message_latency(&mut self, a: IpAddr, b: IpAddr, value: Duration) {
+        let latency = self.links[&Pair::new(a, b)].latency(self.config.latency());
+        latency.min_message_latency = value;
+        latency.max_message_latency = value;
+    }
+
     pub(crate) fn set_link_max_message_latency(&mut self, a: IpAddr, b: IpAddr, value: Duration) {
         self.links[&Pair::new(a, b)]
             .latency(self.config.latency())
