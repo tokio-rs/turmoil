@@ -191,7 +191,6 @@ impl<'a> Sim<'a> {
 
         for_pairs(&a, &b, |a, b| {
             world.topology.set_link_message_latency(a, b, value);
-            world.topology.set_link_max_message_latency(a, b, value);
         });
     }
 
