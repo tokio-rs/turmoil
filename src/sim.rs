@@ -537,10 +537,10 @@ mod test {
 
         assert!(!sim.step()?);
 
-        sim.links(|mut l| {
-            while let Some(a_to_b) = l.next() {
+        sim.links(|l| {
+            for a_to_b in l {
                 a_to_b.deliver_all();
-            }            
+            }          
         });
 
         assert!(sim.step()?);

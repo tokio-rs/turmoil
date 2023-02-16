@@ -208,7 +208,7 @@ mod tests {
 
         assert_eq!(
             hostname_port,
-            format!("{}:5000", generated_addr).parse().unwrap()
+            format!("{generated_addr}:5000").parse().unwrap()
         );
         assert_eq!(ipv4_port.to_socket_addr(&dns), ipv4_port.parse().unwrap());
         assert_eq!(ipv6_port.to_socket_addr(&dns), ipv6_port.parse().unwrap());
