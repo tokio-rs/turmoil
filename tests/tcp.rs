@@ -23,7 +23,7 @@ fn assert_error_kind<T>(res: io::Result<T>, kind: io::ErrorKind) {
 }
 
 async fn bind() -> std::result::Result<TcpListener, std::io::Error> {
-    TcpListener::bind((IpAddr::from(Ipv4Addr::UNSPECIFIED), PORT)).await
+    TcpListener::bind((Ipv4Addr::UNSPECIFIED, PORT)).await
 }
 
 #[test]
@@ -38,8 +38,7 @@ fn connects_within_a_host() -> Result {
             }
         });
 
-        TcpStream::connect(("server", PORT))
-            .await?;
+        TcpStream::connect(("server", PORT)).await?;
         Ok(())
     });
 
@@ -51,29 +50,25 @@ fn connects_within_a_localhost() -> Result {
     let mut sim = Builder::new().build();
 
     sim.client("server", async {
-        let listener = TcpListener::bind((IpAddr::from(Ipv4Addr::LOCALHOST), PORT)).await?;
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, PORT)).await?;
         tokio::spawn(async move {
             loop {
                 let _ = listener.accept().await;
             }
         });
 
-        TcpStream::connect(("localhost", PORT))
-            .await?;
-
-        TcpStream::connect(("127.0.0.1", PORT))
-            .await?;
+        TcpStream::connect((Ipv4Addr::LOCALHOST, PORT)).await?;
 
         assert_error_kind(
-            TcpStream::connect(("::1", PORT)).await,
+            TcpStream::connect((Ipv6Addr::LOCALHOST, PORT)).await,
             io::ErrorKind::ConnectionRefused,
         );
-        
+
         Ok(())
     });
 
     sim.client("serveripv6", async {
-        let listener = TcpListener::bind((IpAddr::from(Ipv6Addr::LOCALHOST), PORT)).await?;
+        let listener = TcpListener::bind((Ipv6Addr::LOCALHOST, PORT)).await?;
 
         tokio::spawn(async move {
             loop {
@@ -81,11 +76,10 @@ fn connects_within_a_localhost() -> Result {
             }
         });
 
-        TcpStream::connect(("::1", PORT))
-            .await?;
+        TcpStream::connect((Ipv6Addr::LOCALHOST, PORT)).await?;
 
         assert_error_kind(
-            TcpStream::connect(("localhost", PORT)).await,
+            TcpStream::connect((Ipv4Addr::LOCALHOST, PORT)).await,
             io::ErrorKind::ConnectionRefused,
         );
 
@@ -100,7 +94,7 @@ fn doesnt_allow_connection_outside_localhost() -> Result {
     let mut sim = Builder::new().build();
 
     sim.host("server", || async {
-        let listener = TcpListener::bind((IpAddr::from(Ipv4Addr::LOCALHOST), PORT)).await?;
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, PORT)).await?;
 
         loop {
             let _ = listener.accept().await;
@@ -114,7 +108,7 @@ fn doesnt_allow_connection_outside_localhost() -> Result {
         );
 
         assert_error_kind(
-            TcpStream::connect(("localhost", PORT)).await,
+            TcpStream::connect((Ipv4Addr::LOCALHOST, PORT)).await,
             io::ErrorKind::ConnectionRefused,
         );
 

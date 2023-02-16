@@ -1,15 +1,10 @@
 use indexmap::IndexMap;
 #[cfg(feature = "regex")]
 use regex::Regex;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, SocketAddr, Ipv4Addr, Ipv6Addr};
 
-/// Each new registered host has an IP in a subnet 192.168.0.0/24
-/// This is just a choice.
-///
-/// Default mappings:
-/// localhost -> 127.0.0.1
-/// ip6-localhost -> ::1
-/// ip6-loopback -> ::1
+/// Each new registered host has an IP in a subnet 192.168.0.0/24.
+/// This is just a choice, can be changed in the future.
 pub struct Dns {
     next: u16,
     names: IndexMap<String, IpAddr>,
@@ -31,21 +26,10 @@ pub trait ToSocketAddrs: sealed::Sealed {
 
 impl Dns {
     pub(crate) fn new() -> Dns {
-        let mut names: IndexMap<String, IpAddr> = IndexMap::new();
-        names.insert(
-            "localhost".to_string(),
-            Ipv4Addr::LOCALHOST.into(),
-        );
-        names.insert(
-            "ip6-localhost".to_string(),
-            Ipv6Addr::LOCALHOST.into(),
-        );
-        names.insert(
-            "ip6-loopback".to_string(),
-            Ipv6Addr::LOCALHOST.into(),
-        );
-
-        Dns { next: 1, names }
+        Dns {
+            next: 1,
+            names: IndexMap::new(),
+        }
     }
 
     pub(crate) fn lookup(&mut self, addr: impl ToIpAddr) -> IpAddr {
@@ -119,6 +103,7 @@ impl ToSocketAddrs for (String, u16) {
     }
 }
 
+
 impl<'a> ToSocketAddrs for (&'a str, u16) {
     fn to_socket_addr(&self, dns: &Dns) -> SocketAddr {
         // When IP address is passed directly as a hostname.
@@ -140,6 +125,18 @@ impl ToSocketAddrs for SocketAddr {
 }
 
 impl ToSocketAddrs for (IpAddr, u16) {
+    fn to_socket_addr(&self, _: &Dns) -> SocketAddr {
+        (*self).into()
+    }
+}
+
+impl ToSocketAddrs for (Ipv4Addr, u16) {
+    fn to_socket_addr(&self, _: &Dns) -> SocketAddr {
+        (*self).into()
+    }
+}
+
+impl ToSocketAddrs for (Ipv6Addr, u16) {
     fn to_socket_addr(&self, _: &Dns) -> SocketAddr {
         (*self).into()
     }
@@ -193,8 +190,6 @@ mod sealed {
 
 #[cfg(test)]
 mod tests {
-    use std::net::{Ipv4Addr, Ipv6Addr};
-
     use crate::{dns::Dns, ToSocketAddrs};
 
     #[test]
@@ -212,14 +207,5 @@ mod tests {
         );
         assert_eq!(ipv4_port.to_socket_addr(&dns), ipv4_port.parse().unwrap());
         assert_eq!(ipv6_port.to_socket_addr(&dns), ipv6_port.parse().unwrap());
-    }
-
-    #[test]
-    fn localhosts() {
-        let mut dns = Dns::new();
-
-        assert_eq!(Ipv4Addr::LOCALHOST, dns.lookup("localhost"));
-        assert_eq!(Ipv6Addr::LOCALHOST, dns.lookup("ip6-localhost"));
-        assert_eq!(Ipv6Addr::LOCALHOST, dns.lookup("ip6-loopback"));
     }
 }
