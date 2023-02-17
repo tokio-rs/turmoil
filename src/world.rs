@@ -101,8 +101,7 @@ impl World {
 
         tracing::info!(target: TRACING_TARGET, hostname = ?self.dns.reverse(addr), ?addr, "New");
 
-        // Handles connections within a host
-        self.topology.register(addr, addr);
+        // Handles connections within a host on loopback interfaces.
         self.topology.register(Ipv4Addr::LOCALHOST.into(), addr);
         self.topology.register(Ipv6Addr::LOCALHOST.into(), addr);
 

@@ -106,7 +106,7 @@ impl ToSocketAddrs for (String, u16) {
 
 impl<'a> ToSocketAddrs for (&'a str, u16) {
     fn to_socket_addr(&self, dns: &Dns) -> SocketAddr {
-        // When IP address is passed directly as a hostname.
+        // When IP address is passed directly as a str.
         if let Ok(ip) = self.0.parse::<IpAddr>() {
             return (ip, self.1).into();
         }

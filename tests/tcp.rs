@@ -27,25 +27,6 @@ async fn bind() -> std::result::Result<TcpListener, std::io::Error> {
 }
 
 #[test]
-fn connects_within_a_host() -> Result {
-    let mut sim = Builder::new().build();
-
-    sim.client("server", async {
-        let listener = bind().await?;
-        tokio::spawn(async move {
-            loop {
-                let _ = listener.accept().await;
-            }
-        });
-
-        TcpStream::connect(("server", PORT)).await?;
-        Ok(())
-    });
-
-    sim.run()
-}
-
-#[test]
 fn connects_within_a_localhost() -> Result {
     let mut sim = Builder::new().build();
 
@@ -83,6 +64,29 @@ fn connects_within_a_localhost() -> Result {
             io::ErrorKind::ConnectionRefused,
         );
 
+        Ok(())
+    });
+
+    sim.run()
+}
+
+#[test]
+fn sends_data_within_a_localhost() -> Result {
+    let mut sim = Builder::new().build();
+
+    sim.client("server", async {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, PORT)).await?;
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let _ = stream.write_u8(1).await;
+                assert_eq!(2, stream.read_u8().await.unwrap());
+            }
+        });
+
+        let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, PORT)).await?;
+
+        assert_eq!(1, stream.read_u8().await?);
+        stream.write_u8(2).await?;
         Ok(())
     });
 

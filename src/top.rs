@@ -26,7 +26,8 @@ pub(crate) struct Topology {
 
 /// This type is used as the key in the [`Topology::links`] map. See [`new`]
 /// which orders the addrs, such that this type uniquely identifies the link
-/// between two hosts on the network.
+/// between two hosts on the network. 
+/// If one of the interfaces is loopback, it is always first in the pair.
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 struct Pair {
     a: IpAddr,
@@ -36,17 +37,19 @@ struct Pair {
 
 impl Pair {
     fn new(a: IpAddr, b: IpAddr) -> Pair {
+        assert_ne!(a, b);
+
         if a.is_loopback() {
             Pair {
                 a,
                 b,
-                interface: Interface::Localhost,
+                interface: Interface::Loopback,
             }
         } else if b.is_loopback() {
             Pair {
                 a: b,
                 b: a,
-                interface: Interface::Localhost,
+                interface: Interface::Loopback,
             }
         } else if a < b {
             Pair {
@@ -151,10 +154,10 @@ impl<'a> Iterator for LinkIter<'a> {
 }
 
 /// Network interface kind.
-/// Represents a different semantics of localhost and host-to-host communication.
+/// Differentiates the semantics of loopback and host-to-host communication.
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 enum Interface {
-    Localhost,
+    Loopback,
     External,
 }
 
@@ -283,11 +286,10 @@ impl Topology {
 
     fn validate(a: IpAddr, b: IpAddr) -> Pair {
         let pair = Pair::new(a, b);
-        match pair.interface {
-            Interface::Localhost => {
-                panic!("can't perform topology operations on localhost interfaces")
-            }
-            Interface::External => pair,
+        if let Interface::Loopback = pair.interface {
+            panic!("can't perform topology operations on localhost interfaces")
+        } else {
+            pair
         }
     }
 }

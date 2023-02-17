@@ -1,7 +1,7 @@
 use std::{
     fmt::Debug,
     io::{self, Result},
-    net::{SocketAddr},
+    net::SocketAddr,
     pin::Pin,
     sync::Arc,
     task::{ready, Context, Poll},
