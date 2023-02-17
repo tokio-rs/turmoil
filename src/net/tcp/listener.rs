@@ -32,10 +32,9 @@ impl TcpListener {
     /// If you bind to the 0.0.0.0, you're effectivly binding to the generated
     /// IP address of the host. Each host gets an IP from 192.168.0.0/24 subnet.
     /// 
-    /// You can bind to `localhost`, which translates to 127.0.0.1. Binding
-    /// directly 127.0.0.1 or ::1 is also possible. It allows for the TCP socket
-    /// to be only visible within a host and reachable *only* via localhost
-    /// IPv4/IPv6 addresses.
+    /// You can bind to loopback interfaces: 127.0.0.1 or ::1. It allows for the
+    /// TCP socket to be only visible within a host and reachable *only* via
+    /// loopback IPv4/IPv6 addresses.
     pub async fn bind<A: ToSocketAddrs>(addr: A) -> Result<TcpListener> {
         World::current(|world| {
             let mut addr = addr.to_socket_addr(&world.dns);

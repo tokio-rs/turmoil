@@ -285,11 +285,10 @@ impl Topology {
     }
 
     fn validate(a: IpAddr, b: IpAddr) -> Pair {
-        let pair = Pair::new(a, b);
-        if let Interface::Loopback = pair.interface {
+        if let Interface::Loopback = Pair::new(a, b).interface {
             panic!("can't perform topology operations on localhost interfaces")
         } else {
-            pair
+            Pair::new(a, b)
         }
     }
 }
