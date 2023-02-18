@@ -130,7 +130,7 @@ impl<'a> Sim<'a> {
                 handle,
             } => {
                 rt.cancel_tasks();
-                *handle = rt.with(|| tokio::task::spawn_local(software()));
+                *handle = Some(rt.with(|| tokio::task::spawn_local(software())));
                 tracing::trace!(target: TRACING_TARGET, addr = ?addr, "Bounce");
             }
         });
@@ -303,14 +303,18 @@ impl<'a> Sim<'a> {
 
             match rt {
                 Role::Client { handle, .. } => {
-                    if handle.is_finished() {
-                        finished.push(addr);
+                    if let Some(handle) = handle {
+                        if handle.is_finished() {
+                            finished.push(addr);
+                        }
+                        is_finished = is_finished && handle.is_finished();
                     }
-                    is_finished = is_finished && handle.is_finished();
                 }
                 Role::Simulated { handle, .. } => {
-                    if handle.is_finished() {
-                        finished.push(addr);
+                    if let Some(handle) = handle {
+                        if handle.is_finished() {
+                            finished.push(addr);
+                        }
                     }
                 }
             }
@@ -318,21 +322,26 @@ impl<'a> Sim<'a> {
 
         self.elapsed += tick;
 
-        // Check finished clients and hosts for err results. Runtimes are removed
-        // at this stage.
+        // Check finished clients and hosts for err results.
         for addr in finished.into_iter() {
-            if let Some(role) = self.rts.remove(&addr) {
+            if let Some(role) = self.rts.get_mut(&addr) {
                 let (rt, handle) = match role {
                     Role::Client { rt, handle } => (rt, handle),
                     Role::Simulated { rt, handle, .. } => (rt, handle),
                 };
 
-                // If the host was crashed the JoinError is cancelled, which
-                // needs to be handled to not fail the simulation.
-                match rt.block_on(handle) {
-                    Err(j) if j.is_cancelled() => {}
-                    res => res??,
+
+                if let Some(handle) = handle {
+                    // If the host was crashed the JoinError is cancelled, which
+                    // needs to be handled to not fail the simulation.
+                    match rt.block_on(handle) {
+                        Err(j) if j.is_cancelled() => {}
+                        res => res??,
+                    }
                 }
+                // Clear the handle to make sure it is not polled after
+                // completion.
+                *handle = None;
             }
         }
 
@@ -589,6 +598,23 @@ mod test {
         sim.crash("h");
 
         sim.run()
+    }
+
+    #[test]
+    fn restart_host_after_crash() -> Result {
+        let mut sim = Builder::new().build();
+
+        sim.host("h", || async { future::pending().await });
+
+        // crash and step to execute the err handling logic
+        sim.crash("h");
+        sim.step()?;
+
+        // restart and step to ensure the host software runs
+        sim.bounce("h");
+        sim.step()?;
+
+        Ok(())
     }
 
     #[test]

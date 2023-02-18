@@ -13,19 +13,24 @@ type Software<'a> = Box<dyn Fn() -> Pin<Box<dyn Future<Output = Result>>> + 'a>;
 /// Differentiates runtime fields for different host types
 pub(crate) enum Role<'a> {
     /// A client handle
-    Client { rt: Rt, handle: JoinHandle<Result> },
+    Client { 
+        rt: Rt, 
+        /// When the client is finished the handle is None
+        handle: Option<JoinHandle<Result>> 
+    },
 
     /// A simulated host
     Simulated {
         rt: Rt,
         software: Software<'a>,
-        handle: JoinHandle<Result>,
+        /// When the host finished the handle is None
+        handle: Option<JoinHandle<Result>>,
     },
 }
 
 impl<'a> Role<'a> {
     pub(crate) fn client(rt: Rt, handle: JoinHandle<Result>) -> Self {
-        Self::Client { rt, handle }
+        Self::Client { rt, handle: Some(handle) }
     }
 
     pub(crate) fn simulated<F, Fut>(rt: Rt, software: F, handle: JoinHandle<Result>) -> Self
@@ -38,7 +43,7 @@ impl<'a> Role<'a> {
         Self::Simulated {
             rt,
             software: wrapped,
-            handle,
+            handle: Some(handle),
         }
     }
 
