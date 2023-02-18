@@ -5,27 +5,37 @@ use tokio::{task::JoinHandle, time::Instant};
 
 use crate::{rt::Rt, Result};
 
-// To support re-creation, we need to store a factory of the future that
-// represents the software. This is somewhat annoying in that it requires
-// boxxing to avoid generics.
+/// To support re-creation, we need to store a factory of the future that
+/// represents the software. This is somewhat annoying in that it requires
+/// boxxing to avoid generics.
 type Software<'a> = Box<dyn Fn() -> Pin<Box<dyn Future<Output = Result>>> + 'a>;
 
 /// Differentiates runtime fields for different host types
-pub(crate) enum Role<'a> {
+enum RoleType<'a> {
     /// A client handle
-    Client { rt: Rt, handle: JoinHandle<Result> },
+    Client,
 
     /// A simulated host
-    Simulated {
-        rt: Rt,
-        software: Software<'a>,
-        handle: JoinHandle<Result>,
-    },
+    Simulated { software: Software<'a> },
+}
+
+/// Encapsulates state and type of the host.
+pub(crate) struct Role<'a> {
+    role: RoleType<'a>,
+    /// Dedicate runtime to run host's task
+    rt: Rt,
+    /// The handle is consumed as soon as task finishes or host crashes,
+    /// replaced with None to indicate finished task.
+    handle: Option<JoinHandle<Result>>,
 }
 
 impl<'a> Role<'a> {
     pub(crate) fn client(rt: Rt, handle: JoinHandle<Result>) -> Self {
-        Self::Client { rt, handle }
+        Self {
+            role: RoleType::Client,
+            rt,
+            handle: Some(handle),
+        }
     }
 
     pub(crate) fn simulated<F, Fut>(rt: Rt, software: F, handle: JoinHandle<Result>) -> Self
@@ -35,28 +45,74 @@ impl<'a> Role<'a> {
     {
         let wrapped: Software = Box::new(move || Box::pin(software()));
 
-        Self::Simulated {
+        Self {
+            role: RoleType::Simulated { software: wrapped },
             rt,
-            software: wrapped,
-            handle,
+            handle: Some(handle),
         }
     }
 
-    pub(crate) fn now(&self) -> Instant {
-        let rt = match self {
-            Role::Client { rt, .. } => rt,
-            Role::Simulated { rt, .. } => rt,
-        };
+    pub(crate) fn is_client(&self) -> bool {
+        matches!(self.role, RoleType::Client)
+    }
 
-        rt.now()
+    /// Runtime's current time
+    pub(crate) fn now(&self) -> Instant {
+        self.rt.now()
     }
 
     pub(crate) fn tick(&self, duration: Duration) {
-        let rt = match self {
-            Role::Client { rt, .. } => rt,
-            Role::Simulated { rt, .. } => rt,
-        };
+        self.rt.tick(duration);
+    }
 
-        rt.tick(duration)
+    /// Returns true if task was finished
+    pub(crate) fn is_finished(&self) -> bool {
+        self.handle.as_ref().map_or(true, JoinHandle::is_finished)
+    }
+
+    /// Checks finished runtime for errors.
+    ///
+    /// Consumes the handle to extract task's execution result.
+    /// No-op if errors were already pulled or still task is still running
+    pub(crate) fn finished_err(&mut self) -> Result<()> {
+        if matches!(&self.handle, Some(h) if h.is_finished()) {
+            // Task was finished. Pull for errors and consume handle
+            let handle = self.handle.take().expect("just checked it is present");
+            match self.rt.block_on(handle) {
+                // If the host was crashed the JoinError is cancelled, which
+                // needs to be handled to not fail the simulation.
+                Err(j) if j.is_cancelled() => Ok(()),
+                Err(j) => Err(j.into()),
+                Ok(res) => res,
+            }
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Crashes the host. Nothing will be running on the host after this call.
+    /// You can use [`Role::bounce`] to start the hosts up again.
+    pub(crate) fn crash(&mut self) {
+        match self.role {
+            RoleType::Client => panic!("can only bounce hosts, not clients"),
+            RoleType::Simulated { .. } => {
+                if self.handle.take().is_some() {
+                    self.rt.cancel_tasks();
+                };
+            }
+        }
+    }
+
+    /// Bounces the host. The software is restarted.
+    pub(crate) fn bounce(&mut self) {
+        match &self.role {
+            RoleType::Client => panic!("can only bounce hosts, not clients"),
+            RoleType::Simulated { software } => {
+                self.rt.cancel_tasks();
+
+                let h = self.rt.with(|| tokio::task::spawn_local(software()));
+                self.handle.replace(h);
+            }
+        }
     }
 }
