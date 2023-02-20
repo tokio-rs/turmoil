@@ -96,6 +96,26 @@ fn sends_data_within_a_localhost() -> Result {
 }
 
 #[test]
+fn connects_to_localhost_bind_to_any() -> Result {
+    let mut sim = Builder::new().build();
+
+    sim.client("server", async {
+        let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, PORT)).await?;
+
+        tokio::spawn(async move {
+            let _ = listener.accept().await;
+        });
+
+        _ = TcpStream::connect((Ipv4Addr::LOCALHOST, PORT)).await?;
+
+        Ok(())
+    });
+
+    sim.run()
+}
+
+
+#[test]
 fn doesnt_allow_connection_outside_localhost() -> Result {
     let mut sim = Builder::new().build();
 

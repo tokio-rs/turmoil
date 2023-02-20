@@ -8,7 +8,7 @@ use indexmap::IndexMap;
 use std::collections::VecDeque;
 use std::fmt::Display;
 use std::io;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Notify};
 use tokio::time::{Duration, Instant};
@@ -191,7 +191,7 @@ struct ServerSocket {
     notify: Arc<Notify>,
 
     /// Pending connections for the TcpListener to accept
-    deque: VecDeque<(Syn, SocketAddr)>,
+    deque: VecDeque<(Syn, SocketAddr, SocketAddr)>,
 }
 
 struct StreamSocket {
@@ -308,7 +308,7 @@ impl Tcp {
         rx
     }
 
-    pub(crate) fn accept(&mut self, addr: SocketAddr) -> Option<(Syn, SocketAddr)> {
+    pub(crate) fn accept(&mut self, addr: SocketAddr) -> Option<(Syn, SocketAddr, SocketAddr)> {
         self.binds[&addr].deque.pop_front()
     }
 
@@ -329,12 +329,26 @@ impl Tcp {
             Segment::Syn(syn) => {
                 // If bound, queue the syn; else we drop the syn triggering
                 // connection refused on the client.
-                if let Some(b) = self.binds.get_mut(&dst) {
+
+                let ipv4_unspec: SocketAddr = (Ipv4Addr::UNSPECIFIED, dst.port()).into();
+                let ipv6_unspec: SocketAddr = (Ipv6Addr::UNSPECIFIED, dst.port()).into();
+
+                let socket = if self.binds.contains_key(&dst) {
+                    self.binds.get_mut(&dst)
+                } else if self.binds.contains_key(&ipv4_unspec) {
+                    self.binds.get_mut(&ipv4_unspec)
+                } else if self.binds.contains_key(&ipv6_unspec) {
+                    self.binds.get_mut(&ipv6_unspec)
+                } else {
+                    None
+                };
+
+                if let Some(b) = socket {
                     if b.deque.len() == self.server_socket_capacity {
                         todo!("{} server socket buffer full", dst);
                     }
 
-                    b.deque.push_back((syn, src));
+                    b.deque.push_back((syn, src, dst));
                     b.notify.notify_one();
                 }
             }
