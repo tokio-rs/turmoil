@@ -76,7 +76,7 @@ fn sends_data_within_a_localhost() -> Result {
 
     sim.client("server", async {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, PORT)).await?;
-        tokio::spawn(async move {
+        let h = tokio::spawn(async move {
             if let Ok((mut stream, _)) = listener.accept().await {
                 let _ = stream.write_u8(1).await;
                 assert_eq!(2, stream.read_u8().await.unwrap());
@@ -87,6 +87,8 @@ fn sends_data_within_a_localhost() -> Result {
 
         assert_eq!(1, stream.read_u8().await?);
         stream.write_u8(2).await?;
+        
+        h.await?;
         Ok(())
     });
 
