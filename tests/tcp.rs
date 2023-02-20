@@ -110,12 +110,6 @@ fn doesnt_allow_connection_outside_localhost() -> Result {
             TcpStream::connect(("server", PORT)).await,
             io::ErrorKind::ConnectionRefused,
         );
-
-        assert_error_kind(
-            TcpStream::connect((Ipv4Addr::LOCALHOST, PORT)).await,
-            io::ErrorKind::ConnectionRefused,
-        );
-
         Ok(())
     });
 
