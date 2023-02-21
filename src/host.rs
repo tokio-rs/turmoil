@@ -283,6 +283,13 @@ impl Tcp {
     }
 
     pub(crate) fn bind(&mut self, addr: SocketAddr) -> io::Result<TcpListener> {
+        if !addr.ip().is_loopback() && !addr.ip().is_unspecified() {
+            return Err(io::Error::new(
+                io::ErrorKind::AddrNotAvailable,
+                addr.to_string(),
+            ));
+        }
+        
         let notify = Arc::new(Notify::new());
         let sock = ServerSocket {
             notify: notify.clone(),

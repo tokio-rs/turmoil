@@ -1,5 +1,5 @@
 use std::{
-    io::{self, Result},
+    io::Result,
     net::SocketAddr,
     sync::Arc,
 };
@@ -39,13 +39,6 @@ impl TcpListener {
         World::current(|world| {
             let addr = addr.to_socket_addr(&world.dns);
             let host = world.current_host_mut();
-
-            if addr.ip() != host.addr && !addr.ip().is_loopback() && !addr.ip().is_unspecified() {
-                return Err(io::Error::new(
-                    io::ErrorKind::AddrNotAvailable,
-                    addr.to_string(),
-                ));
-            }
 
             host.tcp.bind(addr)
         })
