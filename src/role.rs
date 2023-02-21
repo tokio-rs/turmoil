@@ -5,9 +5,9 @@ use tokio::{task::JoinHandle, time::Instant};
 
 use crate::{rt::Rt, Result};
 
-/// To support re-creation, we need to store a factory of the future that
-/// represents the software. This is somewhat annoying in that it requires
-/// boxxing to avoid generics.
+// To support re-creation, we need to store a factory of the future that
+// represents the software. This is somewhat annoying in that it requires
+// boxxing to avoid generics.
 type Software<'a> = Box<dyn Fn() -> Pin<Box<dyn Future<Output = Result>>> + 'a>;
 
 /// Differentiates runtime fields for different host types
@@ -56,7 +56,7 @@ impl<'a> Role<'a> {
         matches!(self.role, RoleType::Client)
     }
 
-    /// Runtime's current time
+    /// This runtime's current time
     pub(crate) fn now(&self) -> Instant {
         self.rt.now()
     }

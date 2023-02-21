@@ -250,14 +250,15 @@ impl<'a> Sim<'a> {
     /// Step the simulation.
     ///
     /// Runs each host in the simulation a fixed duration configured by
-    /// `tick_duration` in the builder. Ignores hosts that already finished.
+    /// `tick_duration` in the builder.
     ///
     /// The simulated network also steps, processing in flight messages, and
     /// delivering them to their destination if appropriate.
+    ///
+    /// Returns whether or not all clients have completed.
     pub fn step(&mut self) -> Result<bool> {
         let tick = self.config.tick;
 
-        // We stop simulation as soon as all clients finish
         let mut is_finished = true;
 
         // Tick the networking, processing messages. This is done before
@@ -555,8 +556,6 @@ mod test {
         sim.run()
     }
 
-    /// This is a regression test that ensures that host could be restarted
-    /// after crash and runs software.
     #[test]
     fn restart_host_after_crash() -> Result {
         let mut sim = Builder::new().build();
