@@ -264,12 +264,9 @@ impl<'a> Sim<'a> {
         // ticking any other runtime, as they might be waiting on network
         // IO. (It also might be waiting on something else, such as time.)
         self.world.borrow_mut().topology.tick_by(tick);
-
-        // Run each host, that is still running, in simulation and update it's
-        // state.If the host finishes during this step, task's result will be
-        // pulled and errors will be propagated.
-        let running_rts = self.rts.iter_mut().filter(|(_, rt)| !rt.is_finished());
-        for (&addr, rt) in running_rts {
+        // Tick each hosts with running software. If the software completes,
+        // extract the result and return early if an error is encountered.
+        for (&addr, rt) in self.rts.iter_mut().filter(|(_, rt)| rt.is_running()) {
             {
                 let mut world = self.world.borrow_mut();
                 // We need to move deliverable messages off the network and
@@ -288,20 +285,17 @@ impl<'a> Sim<'a> {
                 world.current_host_mut().now(rt.now());
             }
 
-            World::enter(&self.world, || rt.tick(tick));
+            let is_rt_finished = World::enter(&self.world, || rt.tick(tick))?;
+
+            if rt.is_client() {
+                is_finished = is_finished && is_rt_finished;
+            }
 
             // Unset the current host
             let mut world = self.world.borrow_mut();
             world.current = None;
 
             world.tick(addr, tick);
-
-            let is_rt_finished = rt.is_finished();
-            if rt.is_client() {
-                is_finished = is_finished && is_rt_finished;
-            }
-            // Check finished runtime errors
-            rt.finished_err()?;
         }
 
         self.elapsed += tick;

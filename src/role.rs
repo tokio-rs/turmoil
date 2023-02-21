@@ -61,33 +61,37 @@ impl<'a> Role<'a> {
         self.rt.now()
     }
 
-    pub(crate) fn tick(&self, duration: Duration) {
-        self.rt.tick(duration);
-    }
-
-    /// Returns true if task was finished
-    pub(crate) fn is_finished(&self) -> bool {
-        self.handle.as_ref().map_or(true, JoinHandle::is_finished)
-    }
-
-    /// Checks finished runtime for errors.
+    /// Ticks host's runtime.
     ///
-    /// Consumes the handle to extract task's execution result.
-    /// No-op if errors were already pulled or still task is still running
-    pub(crate) fn finished_err(&mut self) -> Result<()> {
-        if matches!(&self.handle, Some(h) if h.is_finished()) {
-            // Task was finished. Pull for errors and consume handle
-            let handle = self.handle.take().expect("just checked it is present");
-            match self.rt.block_on(handle) {
-                // If the host was crashed the JoinError is cancelled, which
-                // needs to be handled to not fail the simulation.
-                Err(j) if j.is_cancelled() => Ok(()),
-                Err(j) => Err(j.into()),
-                Ok(res) => res,
+    /// Returns whatever the host's software has completed after the tick.
+    /// Returns an error if the host's software has completed in error.
+    pub(crate) fn tick(&mut self, duration: Duration) -> Result<bool> {
+        self.rt.tick(duration);
+
+        match &self.handle {
+            Some(handle) if handle.is_finished() => {
+                // Consume handle to extract task result
+                if let Some(h) = self.handle.take() {
+                    match self.rt.block_on(h) {
+                        // If the host was crashed the JoinError is cancelled, which
+                        // needs to be handled to not fail the simulation.
+                        Err(je) if je.is_cancelled() => {}
+                        res => res??,
+                    }
+                };
+                Ok(true)
             }
-        } else {
-            Ok(())
+            Some(_) => Ok(false),
+            None => Ok(true),
         }
+    }
+
+    pub(crate) fn is_finished(&self) -> bool {
+        self.handle.is_none()
+    }
+
+    pub(crate) fn is_running(&self) -> bool {
+        !self.is_finished()
     }
 
     /// Crashes the host. Nothing will be running on the host after this call.
