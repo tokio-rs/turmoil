@@ -26,18 +26,43 @@ pub(crate) struct Topology {
 
 /// This type is used as the key in the [`Topology::links`] map. See [`new`]
 /// which orders the addrs, such that this type uniquely identifies the link
-/// between two hosts on the network.
+/// between two hosts on the network. 
+/// If one of the interfaces is loopback, it is always first in the pair.
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
-struct Pair(IpAddr, IpAddr);
+struct Pair {
+    a: IpAddr,
+    b: IpAddr,
+    interface: Interface,
+}
 
 impl Pair {
     fn new(a: IpAddr, b: IpAddr) -> Pair {
         assert_ne!(a, b);
 
-        if a < b {
-            Pair(a, b)
+        if a.is_loopback() {
+            Pair {
+                a,
+                b,
+                interface: Interface::Loopback,
+            }
+        } else if b.is_loopback() {
+            Pair {
+                a: b,
+                b: a,
+                interface: Interface::Loopback,
+            }
+        } else if a < b {
+            Pair {
+                a,
+                b,
+                interface: Interface::External,
+            }
         } else {
-            Pair(b, a)
+            Pair {
+                a: b,
+                b: a,
+                interface: Interface::External,
+            }
         }
     }
 }
@@ -51,8 +76,7 @@ pub struct LinksIter<'a> {
 /// An iterator for the link, providing access to sent messages that have not
 /// yet been delivered.
 pub struct LinkIter<'a> {
-    a: IpAddr,
-    b: IpAddr,
+    p: Pair,
     now: Instant,
     iter: std::collections::vec_deque::IterMut<'a, Sent>,
 }
@@ -61,7 +85,7 @@ impl<'a> LinkIter<'a> {
     /// The [`IpAddr`] pair for the link. Always ordered to uniquely identify
     /// the link.
     pub fn pair(&self) -> (IpAddr, IpAddr) {
-        (self.a, self.b)
+        (self.p.a, self.p.b)
     }
 
     /// Schedule all messages on the link for delivery the next time the
@@ -107,8 +131,7 @@ impl<'a> Iterator for LinksIter<'a> {
         let (pair, link) = self.iter.next()?;
 
         Some(LinkIter {
-            a: pair.0,
-            b: pair.1,
+            p: pair.clone(),
             now: link.now,
             iter: link.sent.iter_mut(),
         })
@@ -128,6 +151,14 @@ impl<'a> Iterator for LinkIter<'a> {
             sent,
         })
     }
+}
+
+/// Network interface kind.
+/// Differentiates the semantics of loopback and host-to-host communication.
+#[derive(Debug, Clone, Hash, Eq, PartialEq)]
+enum Interface {
+    Loopback,
+    External,
 }
 
 /// A two-way link between two hosts on the network.
@@ -224,26 +255,26 @@ impl Topology {
     // Move messages from any network links to the `dst` host.
     pub(crate) fn deliver_messages(&mut self, rand: &mut dyn RngCore, dst: &mut Host) {
         for (pair, link) in &mut self.links {
-            if pair.0 == dst.addr || pair.1 == dst.addr {
+            if pair.a == dst.addr || pair.b == dst.addr {
                 link.deliver_messages(&self.config, rand, dst);
             }
         }
     }
 
     pub(crate) fn hold(&mut self, a: IpAddr, b: IpAddr) {
-        self.links[&Pair::new(a, b)].hold();
+        self.links[&Topology::validate(a, b)].hold();
     }
 
     pub(crate) fn release(&mut self, a: IpAddr, b: IpAddr) {
-        self.links[&Pair::new(a, b)].release();
+        self.links[&Topology::validate(a, b)].release();
     }
 
     pub(crate) fn partition(&mut self, a: IpAddr, b: IpAddr) {
-        self.links[&Pair::new(a, b)].explicit_partition();
+        self.links[&Topology::validate(a, b)].explicit_partition();
     }
 
     pub(crate) fn repair(&mut self, a: IpAddr, b: IpAddr) {
-        self.links[&Pair::new(a, b)].explicit_repair();
+        self.links[&Topology::validate(a, b)].explicit_repair();
     }
 
     pub(crate) fn tick_by(&mut self, duration: Duration) {
@@ -256,6 +287,14 @@ impl Topology {
     pub(crate) fn iter_mut(&mut self) -> LinksIter {
         LinksIter {
             iter: self.links.iter_mut(),
+        }
+    }
+
+    fn validate(a: IpAddr, b: IpAddr) -> Pair {
+        if let Interface::Loopback = Pair::new(a, b).interface {
+            panic!("can't perform topology operations on localhost interfaces")
+        } else {
+            Pair::new(a, b)
         }
     }
 }
@@ -364,10 +403,24 @@ impl Link {
                         dst: sent.dst,
                         message: sent.protocol,
                     };
+
+                    // If the communication is localhost, use a real ip address
+                    // of the host, instead of a localhost address to deliver a
+                    // message. One of them is guaranteed not to be a loopback
+                    // address.
+                    let ip_addr = if sent.src.ip().is_loopback() {
+                        sent.dst.ip()
+                    } else if sent.dst.ip().is_loopback() {
+                        sent.src.ip()
+                    } else {
+                        sent.dst.ip()
+                    };
+
                     self.deliverable
-                        .entry(sent.dst.ip())
+                        .entry(ip_addr)
                         .or_default()
                         .push_back(envelope);
+
                     deliverable += 1;
                 }
             }
