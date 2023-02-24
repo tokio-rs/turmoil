@@ -1,0 +1,15 @@
+[package]
+name = "axum-example"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+axum = "0.6"
+hyper = { version = "0.14", features = ["full"] }
+async-stream = "0.3"
+turmoil = { path = "../.." }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+tokio = "1"
+tower = "0.4"
