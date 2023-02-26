@@ -119,7 +119,7 @@ impl World {
     /// Delivery between hosts is asynchronous and not guaranteed.
     pub(crate) fn send_message(&mut self, src: SocketAddr, dst: SocketAddr, message: Protocol) {
         self.topology
-            .enqueue_message(&mut self.rng, src, dst, message);
+            .enqueue_message(&mut self.rng, self.current.expect("Sending a message requires a sender host."), src, dst, message);
     }
 
     /// Tick the host at `addr` by `duration`.

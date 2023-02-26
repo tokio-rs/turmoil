@@ -1,6 +1,6 @@
 use std::{
     matches,
-    net::{IpAddr, Ipv4Addr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     rc::Rc,
     sync::{atomic::AtomicUsize, atomic::Ordering},
     time::Duration,
@@ -63,6 +63,93 @@ fn ping_pong() -> Result {
         let sock = bind().await?;
 
         send_ping(&sock).await?;
+        recv_pong(&sock).await
+    });
+
+    sim.run()
+}
+
+#[test]
+fn ping_pong_unspecified_localhost() -> Result {
+    let mut sim = Builder::new().build();
+
+    sim.client("server", async {
+        tokio::spawn(async move {
+            let sock = bind().await.unwrap();
+            let origin = recv_ping(&sock).await.unwrap();
+            send_pong(&sock, origin).await.unwrap();
+        });
+
+        let sock = net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 1337)).await?;
+
+        sock.send_to(b"ping", (Ipv4Addr::LOCALHOST, PORT)).await?;
+        recv_pong(&sock).await
+    });
+
+    sim.run()
+}
+
+
+// TODO: failing
+// TODO: make it into a tabular test
+#[test]
+fn ping_pong_unspecified_localhost_ipv6() -> Result {
+    let mut sim = Builder::new().build();
+
+    sim.client("server", async {
+        tokio::spawn(async move {
+            let sock = net::UdpSocket::bind((Ipv6Addr::UNSPECIFIED, PORT)).await.unwrap();
+            let origin = recv_ping(&sock).await.unwrap();
+            send_pong(&sock, origin).await.unwrap();
+        });
+
+        let sock = net::UdpSocket::bind((Ipv6Addr::UNSPECIFIED, 1337)).await?;
+
+        sock.send_to(b"ping", (Ipv6Addr::LOCALHOST, PORT)).await?;
+        recv_pong(&sock).await
+    });
+
+    sim.run()
+}
+
+#[test]
+fn ping_pong_localhost_only() -> Result {
+    let mut sim = Builder::new().build();
+
+    sim.client("server", async {
+        tokio::spawn(async move {
+            let sock = net::UdpSocket::bind((Ipv4Addr::LOCALHOST, PORT))
+                .await
+                .unwrap();
+            let origin = recv_ping(&sock).await.unwrap();
+            send_pong(&sock, origin).await.unwrap();
+        });
+
+        let sock = net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 1337)).await?;
+
+        sock.send_to(b"ping", (Ipv4Addr::LOCALHOST, PORT)).await?;
+        recv_pong(&sock).await
+    });
+
+    sim.run()
+}
+
+#[test]
+fn ping_pong_localhost_ipv6_only() -> Result {
+    let mut sim = Builder::new().build();
+
+    sim.client("server", async {
+        tokio::spawn(async move {
+            let sock = net::UdpSocket::bind((Ipv6Addr::LOCALHOST, PORT))
+                .await
+                .unwrap();
+            let origin = recv_ping(&sock).await.unwrap();
+            send_pong(&sock, origin).await.unwrap();
+        });
+
+        let sock = net::UdpSocket::bind((Ipv6Addr::LOCALHOST, 1337)).await?;
+
+        sock.send_to(b"ping", (Ipv6Addr::LOCALHOST, PORT)).await?;
         recv_pong(&sock).await
     });
 

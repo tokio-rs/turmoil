@@ -6,7 +6,7 @@ use crate::{
     ToSocketAddrs, World, TRACING_TARGET,
 };
 
-use std::{cmp, io::Result, net::SocketAddr};
+use std::{cmp, io::Result, net::{SocketAddr}};
 
 /// A simulated UDP socket.
 ///
@@ -27,18 +27,14 @@ impl UdpSocket {
     /// Create a new simulated UDP socket and attempt to bind it to the `addr`
     /// provided.
     ///
-    /// Only 0.0.0.0 is currently supported.
+    /// Supports binding to IPv4/IPv6 interfaces:
+    /// - Unspecified: 0.0.0.0, :: 
+    /// - Loopback: 127.0.0.1, ::1
+    /// Binding directly to an IP address other than loopback is unsupported.
     pub async fn bind<A: ToSocketAddrs>(addr: A) -> Result<UdpSocket> {
         World::current(|world| {
-            let mut addr = addr.to_socket_addr(&world.dns);
+            let addr = addr.to_socket_addr(&world.dns);
             let host = world.current_host_mut();
-
-            if !addr.ip().is_unspecified() {
-                panic!("{addr} is not supported");
-            }
-
-            // Unspecified -> host's IP
-            addr.set_ip(host.addr);
 
             host.udp.bind(addr)
         })
@@ -50,8 +46,16 @@ impl UdpSocket {
         World::current(|world| {
             let dst = target.to_socket_addr(&world.dns);
 
+            // Use the sending host's primary address as sending interface.
+            let src = if self.local_addr.ip().is_unspecified() {
+                let host_addr = world.current_host_mut().addr;
+                (host_addr, self.local_addr.port()).into()
+            } else {
+                self.local_addr
+            };
+
             world.send_message(
-                self.local_addr,
+                src,
                 dst,
                 Protocol::Udp(Datagram(Bytes::copy_from_slice(buf))),
             );
@@ -69,7 +73,7 @@ impl UdpSocket {
     pub async fn recv_from(&self, buf: &mut [u8]) -> Result<(usize, SocketAddr)> {
         let (datagram, origin) = self.rx.lock().await.recv().await.unwrap();
 
-        tracing::trace!(target: TRACING_TARGET, dst = ?self.local_addr, src = ?origin, protocol = %datagram, "Recv");
+        tracing::trace!(target: TRACING_TARGET, local_addr = ?self.local_addr, src = ?origin, protocol = %datagram, "Recv");
 
         let bytes = datagram.0;
         let limit = cmp::min(buf.len(), bytes.len());

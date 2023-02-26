@@ -96,9 +96,9 @@ impl Host {
     // key problem is that the Host doesn't actually send messages, rather the
     // World is borrowed, and it sends.
     pub(crate) fn receive_from_network(&mut self, envelope: Envelope) -> Result<(), Protocol> {
-        let Envelope { src, dst, message } = envelope;
+        let Envelope { src, dst, message, sender } = envelope;
 
-        tracing::trace!(target: TRACING_TARGET, ?dst, ?src, protocol = %message, "Delivered");
+        tracing::trace!(target: TRACING_TARGET, ?dst, ?src, protocol = %message, ?sender, "Delivered");
 
         match message {
             Protocol::Tcp(segment) => self.tcp.receive_from_network(src, dst, segment),
@@ -145,6 +145,13 @@ impl Udp {
     }
 
     pub(crate) fn bind(&mut self, addr: SocketAddr) -> io::Result<UdpSocket> {
+        if !addr.ip().is_loopback() && !addr.ip().is_unspecified() {
+            return Err(io::Error::new(
+                io::ErrorKind::AddrNotAvailable,
+                addr.to_string(),
+            ));
+        }
+        
         let (tx, rx) = mpsc::channel(self.capacity);
 
         if self.binds.insert(addr, tx).is_some() {
@@ -157,7 +164,20 @@ impl Udp {
     }
 
     fn receive_from_network(&mut self, src: SocketAddr, dst: SocketAddr, datagram: Datagram) {
-        if let Some(s) = self.binds.get_mut(&dst) {
+        let ipv4_unspec: SocketAddr = (Ipv4Addr::UNSPECIFIED, dst.port()).into();
+        let ipv6_unspec: SocketAddr = (Ipv6Addr::UNSPECIFIED, dst.port()).into();
+        let socket = if self.binds.contains_key(&dst) {
+            self.binds.get_mut(&dst)
+        } else if dst.ip().is_ipv4() && self.binds.contains_key(&ipv4_unspec) {
+            self.binds.get_mut(&ipv4_unspec)
+        } else if dst.ip().is_ipv6() && self.binds.contains_key(&ipv6_unspec) {
+            self.binds.get_mut(&ipv6_unspec)
+        } else {
+            None
+        };
+
+
+        if let Some(s) = socket {
             s.try_send((datagram, src))
                 .unwrap_or_else(|_| panic!("unable to send to {dst}"))
         }
