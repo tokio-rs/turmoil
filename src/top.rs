@@ -7,7 +7,7 @@ use indexmap::IndexMap;
 use rand::{Rng, RngCore};
 use rand_distr::{Distribution, Exp};
 use std::collections::VecDeque;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 use tokio::time::Instant;
 
@@ -26,7 +26,7 @@ pub(crate) struct Topology {
 
 /// This type is used as the key in the [`Topology::links`] map. See [`new`]
 /// which orders the addrs, such that this type uniquely identifies the link
-/// between two hosts on the network. 
+/// between two hosts on the network.
 /// If one of the interfaces is loopback, it is always first in the pair.
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 struct Pair {
@@ -114,7 +114,7 @@ impl<'a> SentRef<'a> {
 
     /// The message [`Protocol`].
     pub fn protocol(&self) -> &Protocol {
-        &self.sent.protocol
+        &self.sent.envelope.message
     }
 
     /// Schedule the message for delivery the next time the simulation steps,
@@ -145,8 +145,8 @@ impl<'a> Iterator for LinkIter<'a> {
         let sent = self.iter.next()?;
 
         Some(SentRef {
-            src: sent.src,
-            dst: sent.dst,
+            src: sent.envelope.src,
+            dst: sent.envelope.dst,
             now: self.now,
             sent,
         })
@@ -244,12 +244,30 @@ impl Topology {
     pub(crate) fn enqueue_message(
         &mut self,
         rand: &mut dyn RngCore,
+        sender: IpAddr,
         src: SocketAddr,
         dst: SocketAddr,
         message: Protocol,
     ) {
-        let link = &mut self.links[&Pair::new(src.ip(), dst.ip())];
-        link.enqueue_message(&self.config, rand, src, dst, message);
+        let link = if src.ip() == dst.ip() {
+            if src.is_ipv4() {
+                &mut self.links[&Pair::new(Ipv4Addr::LOCALHOST.into(), sender)]
+            } else {
+                &mut self.links[&Pair::new(Ipv6Addr::LOCALHOST.into(), sender)]
+            }
+        } else {
+            &mut self.links[&Pair::new(src.ip(), dst.ip())]
+        };
+        link.enqueue_message(
+            &self.config,
+            rand,
+            Envelope {
+                src,
+                dst,
+                sender,
+                message,
+            },
+        );
     }
 
     // Move messages from any network links to the `dst` host.
@@ -300,10 +318,8 @@ impl Topology {
 }
 
 struct Sent {
-    src: SocketAddr,
-    dst: SocketAddr,
+    envelope: Envelope,
     status: DeliveryStatus,
-    protocol: Protocol,
 }
 
 impl Sent {
@@ -332,14 +348,12 @@ impl Link {
         &mut self,
         global_config: &config::Link,
         rand: &mut dyn RngCore,
-        src: SocketAddr,
-        dst: SocketAddr,
-        message: Protocol,
+        envelope: Envelope,
     ) {
-        tracing::trace!(target: TRACING_TARGET, ?src, ?dst, protocol = %message, "Send");
+        tracing::trace!(target: TRACING_TARGET, src = ?envelope.src, ?envelope.dst, protocol = %envelope.message, "Send");
 
         self.rand_partition_or_repair(global_config, rand);
-        self.enqueue(global_config, rand, src, dst, message);
+        self.enqueue(global_config, rand, envelope);
         self.process_deliverables();
     }
 
@@ -352,9 +366,7 @@ impl Link {
         &mut self,
         global_config: &config::Link,
         rand: &mut dyn RngCore,
-        src: SocketAddr,
-        dst: SocketAddr,
-        message: Protocol,
+        envelope: Envelope,
     ) {
         let status = match self.state {
             State::Healthy => {
@@ -362,23 +374,18 @@ impl Link {
                 DeliveryStatus::DeliverAfter(self.now + delay)
             }
             State::Hold => {
-                tracing::trace!(target: TRACING_TARGET,?src, ?dst, protocol = %message, "Hold");
+                tracing::trace!(target: TRACING_TARGET, src = ?envelope.src, dst = ?envelope.dst, protocol = %envelope.message, "Hold");
 
                 DeliveryStatus::Hold
             }
             _ => {
-                tracing::trace!(target: TRACING_TARGET,?src, ?dst, protocol = %message, "Drop");
+                tracing::trace!(target: TRACING_TARGET, src = ?envelope.src, dst = ?envelope.dst, protocol = %envelope.message, "Drop");
 
                 return;
             }
         };
 
-        let sent = Sent {
-            src,
-            dst,
-            status,
-            protocol: message,
-        };
+        let sent = Sent { status, envelope };
 
         self.sent.push_back(sent);
     }
@@ -398,28 +405,19 @@ impl Link {
             if let DeliveryStatus::DeliverAfter(time) = sent.status {
                 if time <= self.now {
                     let sent = self.sent.remove(index).unwrap();
-                    let envelope = Envelope {
-                        src: sent.src,
-                        dst: sent.dst,
-                        message: sent.protocol,
-                    };
 
-                    // If the communication is localhost, use a real ip address
-                    // of the host, instead of a localhost address to deliver a
-                    // message. One of them is guaranteed not to be a loopback
-                    // address.
-                    let ip_addr = if sent.src.ip().is_loopback() {
-                        sent.dst.ip()
-                    } else if sent.dst.ip().is_loopback() {
-                        sent.src.ip()
+                    // If a destination is localhost, use a real ip address
+                    // of the host.
+                    let dst = if sent.envelope.dst.ip().is_loopback() {
+                        sent.envelope.sender
                     } else {
-                        sent.dst.ip()
+                        sent.envelope.dst.ip()
                     };
 
                     self.deliverable
-                        .entry(ip_addr)
+                        .entry(dst)
                         .or_default()
-                        .push_back(envelope);
+                        .push_back(sent.envelope);
 
                     deliverable += 1;
                 }
@@ -446,7 +444,16 @@ impl Link {
         for message in deliverable {
             let (src, dst) = (message.src, message.dst);
             if let Err(message) = host.receive_from_network(message) {
-                self.enqueue_message(global_config, rand, dst, src, message);
+                self.enqueue_message(
+                    global_config,
+                    rand,
+                    Envelope {
+                        sender: host.addr,
+                        src: dst,
+                        dst: src,
+                        message,
+                    },
+                );
             }
         }
     }

@@ -96,9 +96,9 @@ impl Host {
     // key problem is that the Host doesn't actually send messages, rather the
     // World is borrowed, and it sends.
     pub(crate) fn receive_from_network(&mut self, envelope: Envelope) -> Result<(), Protocol> {
-        let Envelope { src, dst, message } = envelope;
+        let Envelope { src, dst, message, sender } = envelope;
 
-        tracing::trace!(target: TRACING_TARGET, ?dst, ?src, protocol = %message, "Delivered");
+        tracing::trace!(target: TRACING_TARGET, ?dst, ?src, protocol = %message, ?sender, "Delivered");
 
         match message {
             Protocol::Tcp(segment) => self.tcp.receive_from_network(src, dst, segment),

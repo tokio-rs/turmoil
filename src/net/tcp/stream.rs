@@ -1,7 +1,7 @@
 use std::{
     fmt::Debug,
     io::{self, Result},
-    net::SocketAddr,
+    net::{Ipv6Addr, SocketAddr},
     pin::Pin,
     sync::Arc,
     task::{ready, Context, Poll},
@@ -58,10 +58,19 @@ impl TcpStream {
 
         let (pair, rx) = World::current(|world| {
             let dst = addr.to_socket_addr(&world.dns);
+            assert!(
+                !dst.is_ipv6() || dst.ip().is_loopback(),
+                "communication to IPv6 addresses outside loopback is not supported"
+            );
+
             let syn = Segment::Syn(Syn { ack });
 
             let host = world.current_host_mut();
-            let local_addr = (host.addr, host.assign_ephemeral_port()).into();
+            let local_addr = if dst.is_ipv6() {
+                (Ipv6Addr::LOCALHOST, host.assign_ephemeral_port()).into()
+            } else {
+                (host.addr, host.assign_ephemeral_port()).into()
+            };
 
             let pair = SocketPair::new(local_addr, dst);
             let rx = host.tcp.new_stream(pair);

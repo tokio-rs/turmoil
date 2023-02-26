@@ -1,10 +1,14 @@
-use std::{fmt::Display, net::SocketAddr};
+use std::{fmt::Display, net::{SocketAddr, IpAddr}};
 
 use bytes::Bytes;
 use tokio::sync::oneshot;
 
 #[derive(Debug)]
 pub(crate) struct Envelope {
+    /// Each host is uniquely identified by an generated IPv4 address.
+    /// Sender field allows to identify the host when src/dst addresses don't.
+    /// Example: 127.0.0.1 <-> 127.0.0.1 communication.
+    pub(crate) sender: IpAddr,
     pub(crate) src: SocketAddr,
     pub(crate) dst: SocketAddr,
     pub(crate) message: Protocol,
