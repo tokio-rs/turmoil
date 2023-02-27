@@ -74,7 +74,7 @@ fn ping_pong_single_host(a: SocketAddr, b: SocketAddr) -> Result {
 
     sim.client("server", async move {
         let h = tokio::spawn(async move {
-            let sock = net::UdpSocket::bind(a.clone()).await.unwrap();
+            let sock = net::UdpSocket::bind(a).await.unwrap();
             let origin = recv_ping(&sock).await.unwrap();
             send_pong(&sock, origin).await.unwrap();
         });
