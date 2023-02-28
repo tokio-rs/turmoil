@@ -1,8 +1,4 @@
-use std::{
-    io::Result,
-    net::SocketAddr,
-    sync::Arc,
-};
+use std::{io::Result, net::SocketAddr, sync::Arc};
 
 use tokio::sync::Notify;
 
@@ -29,16 +25,18 @@ impl TcpListener {
     ///
     /// The returned listener is ready for accepting connections.
     ///
-    /// If you bind to the 0.0.0.0, you're effectivly binding to the generated
-    /// IP address of the host. Each host gets an IP from 192.168.0.0/24 subnet.
-    ///
-    /// You can bind to loopback interfaces: 127.0.0.1 or ::1. It allows for the
-    /// TCP socket to be only visible within a host and reachable *only* via
-    /// loopback IPv4/IPv6 addresses.
+    /// Only 0.0.0.0 is currently supported.
     pub async fn bind<A: ToSocketAddrs>(addr: A) -> Result<TcpListener> {
         World::current(|world| {
-            let addr = addr.to_socket_addr(&world.dns);
+            let mut addr = addr.to_socket_addr(&world.dns);
             let host = world.current_host_mut();
+
+            if !addr.ip().is_unspecified() {
+                panic!("{addr} is not supported");
+            }
+
+            // Unspecified -> host's IP
+            addr.set_ip(host.addr);
 
             host.tcp.bind(addr)
         })
@@ -53,20 +51,20 @@ impl TcpListener {
         loop {
             let maybe_accept = World::current(|world| {
                 let host = world.current_host_mut();
-                let (syn, origin, destination) = host.tcp.accept(self.local_addr)?;
+                let (syn, origin) = host.tcp.accept(self.local_addr)?;
 
-                tracing::trace!(target: TRACING_TARGET, dst = ?origin, src = ?destination, protocol = %"TCP SYN", "Recv");
+                tracing::trace!(target: TRACING_TARGET, dst = ?origin, src = ?self.local_addr, protocol = %"TCP SYN", "Recv");
 
                 // Send SYN-ACK -> origin. If Ok we proceed (acts as the ACK),
                 // else we return early to avoid host mutations.
                 let ack = syn.ack.send(());
-                tracing::trace!(target: TRACING_TARGET, src = ?origin, dst = ?destination, protocol = %"TCP SYN-ACK", "Send");
+                tracing::trace!(target: TRACING_TARGET, src = ?self.local_addr, dst = ?origin, protocol = %"TCP SYN-ACK", "Send");
 
                 if ack.is_err() {
                     return None;
                 }
 
-                let pair = SocketPair::new(destination, origin);
+                let pair = SocketPair::new(self.local_addr, origin);
                 let rx = host.tcp.new_stream(pair);
 
                 Some((TcpStream::new(pair, rx), origin))
