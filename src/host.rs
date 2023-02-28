@@ -8,7 +8,7 @@ use indexmap::IndexMap;
 use std::collections::VecDeque;
 use std::fmt::Display;
 use std::io;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Notify};
 use tokio::time::{Duration, Instant};
@@ -348,16 +348,11 @@ impl Tcp {
                 // If bound, queue the syn; else we drop the syn triggering
                 // connection refused on the client.
 
-                let ipv4_unspec: SocketAddr = (Ipv4Addr::UNSPECIFIED, dst.port()).into();
-                let ipv6_unspec: SocketAddr = (Ipv6Addr::UNSPECIFIED, dst.port()).into();
                 let socket = if self.binds.contains_key(&dst) {
                     self.binds.get_mut(&dst)
-                } else if dst.ip().is_ipv4() && self.binds.contains_key(&ipv4_unspec) {
-                    self.binds.get_mut(&ipv4_unspec)
-                } else if dst.ip().is_ipv6() && self.binds.contains_key(&ipv6_unspec) {
-                    self.binds.get_mut(&ipv6_unspec)
                 } else {
-                    None
+                    let unspec: SocketAddr = (Ipv4Addr::UNSPECIFIED, dst.port()).into();
+                    self.binds.get_mut(&unspec)
                 };
 
                 if let Some(b) = socket {
