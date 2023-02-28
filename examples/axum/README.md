@@ -1,4 +1,4 @@
-# Turmoil gRPC Example
+# Turmoil axum Example
 
 This examples shows how to setup [`axum`] using `turmoil`'s simulation runtime.
 
