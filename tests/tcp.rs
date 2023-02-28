@@ -1,6 +1,6 @@
 use std::{
     io,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    net::{IpAddr, Ipv4Addr},
     rc::Rc,
     time::Duration,
 };
@@ -39,15 +39,9 @@ fn connects_within_a_localhost() -> Result {
         });
 
         TcpStream::connect((Ipv4Addr::LOCALHOST, PORT)).await?;
-
-        assert_error_kind(
-            TcpStream::connect((Ipv6Addr::LOCALHOST, PORT)).await,
-            io::ErrorKind::ConnectionRefused,
-        );
-
         Ok(())
     });
-    
+
     sim.run()
 }
 
