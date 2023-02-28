@@ -7,7 +7,7 @@ use indexmap::IndexMap;
 use rand::{Rng, RngCore};
 use rand_distr::{Distribution, Exp};
 use std::collections::VecDeque;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 use tokio::time::Instant;
 
@@ -250,11 +250,7 @@ impl Topology {
         message: Protocol,
     ) {
         let link = if src.ip() == dst.ip() {
-            if src.is_ipv4() {
-                &mut self.links[&Pair::new(Ipv4Addr::LOCALHOST.into(), sender)]
-            } else {
-                &mut self.links[&Pair::new(Ipv6Addr::LOCALHOST.into(), sender)]
-            }
+            &mut self.links[&Pair::new(Ipv4Addr::LOCALHOST.into(), sender)]
         } else {
             &mut self.links[&Pair::new(src.ip(), dst.ip())]
         };

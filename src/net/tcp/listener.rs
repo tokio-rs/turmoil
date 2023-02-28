@@ -29,9 +29,9 @@ impl TcpListener {
     ///
     /// The returned listener is ready for accepting connections.
     ///
-    /// Supports binding to IPv4/IPv6 interfaces:
-    /// - Unspecified: 0.0.0.0, :: 
-    /// - Loopback: 127.0.0.1, ::1
+    /// Supports binding to IPv4 interfaces:
+    /// - Unspecified: 0.0.0.0
+    /// - Loopback: 127.0.0.1
     /// Binding directly to an IP address other than loopback is unsupported.
     pub async fn bind<A: ToSocketAddrs>(addr: A) -> Result<TcpListener> {
         World::current(|world| {

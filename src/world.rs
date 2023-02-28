@@ -5,7 +5,7 @@ use indexmap::IndexMap;
 use rand::RngCore;
 use scoped_tls::scoped_thread_local;
 use std::cell::RefCell;
-use std::net::{IpAddr, SocketAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, SocketAddr, Ipv4Addr};
 use std::time::Duration;
 
 /// Tracks all the state for the simulated world.
@@ -103,8 +103,6 @@ impl World {
 
         // Handles connections within a host on loopback interfaces.
         self.topology.register(Ipv4Addr::LOCALHOST.into(), addr);
-        self.topology.register(Ipv6Addr::LOCALHOST.into(), addr);
-
 
         // Register links between the new host and all existing hosts
         for existing in self.hosts.keys() {

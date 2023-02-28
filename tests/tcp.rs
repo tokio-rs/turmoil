@@ -47,26 +47,7 @@ fn connects_within_a_localhost() -> Result {
 
         Ok(())
     });
-
-    sim.client("serveripv6", async {
-        let listener = TcpListener::bind((Ipv6Addr::LOCALHOST, PORT)).await?;
-
-        tokio::spawn(async move {
-            loop {
-                let _ = listener.accept().await;
-            }
-        });
-
-        TcpStream::connect((Ipv6Addr::LOCALHOST, PORT)).await?;
-
-        assert_error_kind(
-            TcpStream::connect((Ipv4Addr::LOCALHOST, PORT)).await,
-            io::ErrorKind::ConnectionRefused,
-        );
-
-        Ok(())
-    });
-
+    
     sim.run()
 }
 

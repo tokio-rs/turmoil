@@ -8,7 +8,7 @@ use indexmap::IndexMap;
 use std::collections::VecDeque;
 use std::fmt::Display;
 use std::io;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Notify};
 use tokio::time::{Duration, Instant};
@@ -145,6 +145,7 @@ impl Udp {
     }
 
     pub(crate) fn bind(&mut self, addr: SocketAddr) -> io::Result<UdpSocket> {
+        assert!(!addr.is_ipv6(), "IPv6 is unsupported");
         let (tx, rx) = mpsc::channel(self.capacity);
 
         if self.binds.insert(addr, tx).is_some() {
@@ -283,6 +284,8 @@ impl Tcp {
     }
 
     pub(crate) fn bind(&mut self, addr: SocketAddr) -> io::Result<TcpListener> {
+        assert!(!addr.is_ipv6(), "IPv6 is unsupported");
+
         if !addr.ip().is_loopback() && !addr.ip().is_unspecified() {
             return Err(io::Error::new(
                 io::ErrorKind::AddrNotAvailable,
@@ -336,19 +339,13 @@ impl Tcp {
             Segment::Syn(syn) => {
                 // If bound, queue the syn; else we drop the syn triggering
                 // connection refused on the client.
-
-                let ipv4_unspec: SocketAddr = (Ipv4Addr::UNSPECIFIED, dst.port()).into();
-                let ipv6_unspec: SocketAddr = (Ipv6Addr::UNSPECIFIED, dst.port()).into();
                 let socket = if self.binds.contains_key(&dst) {
                     self.binds.get_mut(&dst)
-                } else if dst.ip().is_ipv4() && self.binds.contains_key(&ipv4_unspec) {
-                    self.binds.get_mut(&ipv4_unspec)
-                } else if dst.ip().is_ipv6() && self.binds.contains_key(&ipv6_unspec) {
-                    self.binds.get_mut(&ipv6_unspec)
                 } else {
-                    None
+                    let unspec: SocketAddr = (Ipv4Addr::UNSPECIFIED, dst.port()).into();
+                    self.binds.get_mut(&unspec)
                 };
-
+            
                 if let Some(b) = socket {
                     if b.deque.len() == self.server_socket_capacity {
                         todo!("{} server socket buffer full", dst);
