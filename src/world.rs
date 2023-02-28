@@ -110,8 +110,8 @@ impl World {
         self.hosts.insert(addr, Host::new(addr));
     }
 
-    /// Send `message` from `src` to `dst`. Delivery is asynchronous and not
-    /// guaranteed.
+    /// Send `message` from `src` to `dst`.
+    /// Delivery between hosts is asynchronous and not guaranteed.
     pub(crate) fn send_message(&mut self, src: SocketAddr, dst: SocketAddr, message: Protocol) {
         self.topology
             .enqueue_message(&mut self.rng, src, dst, message);

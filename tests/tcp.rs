@@ -23,7 +23,95 @@ fn assert_error_kind<T>(res: io::Result<T>, kind: io::ErrorKind) {
 }
 
 async fn bind() -> std::result::Result<TcpListener, std::io::Error> {
-    TcpListener::bind((IpAddr::from(Ipv4Addr::UNSPECIFIED), PORT)).await
+    TcpListener::bind((Ipv4Addr::UNSPECIFIED, PORT)).await
+}
+
+#[test]
+fn connects_within_a_localhost() -> Result {
+    let mut sim = Builder::new().build();
+
+    sim.client("server", async {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, PORT)).await?;
+        tokio::spawn(async move {
+            loop {
+                let _ = listener.accept().await;
+            }
+        });
+
+        TcpStream::connect((Ipv4Addr::LOCALHOST, PORT)).await?;
+
+        Ok(())
+    });
+
+    sim.run()
+}
+
+#[test]
+fn sends_data_within_a_localhost() -> Result {
+    let mut sim = Builder::new().build();
+
+    sim.client("server", async {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, PORT)).await?;
+        let h = tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let _ = stream.write_u8(1).await;
+                assert_eq!(2, stream.read_u8().await.unwrap());
+            }
+        });
+
+        let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, PORT)).await?;
+
+        assert_eq!(1, stream.read_u8().await?);
+        stream.write_u8(2).await?;
+        
+        h.await?;
+        Ok(())
+    });
+
+    sim.run()
+}
+
+#[test]
+fn connects_to_localhost_bind_to_any() -> Result {
+    let mut sim = Builder::new().build();
+
+    sim.client("server", async {
+        let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, PORT)).await?;
+
+        tokio::spawn(async move {
+            let _ = listener.accept().await;
+        });
+
+        _ = TcpStream::connect((Ipv4Addr::LOCALHOST, PORT)).await?;
+
+        Ok(())
+    });
+
+    sim.run()
+}
+
+
+#[test]
+fn doesnt_allow_connection_outside_localhost() -> Result {
+    let mut sim = Builder::new().build();
+
+    sim.host("server", || async {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, PORT)).await?;
+
+        loop {
+            let _ = listener.accept().await;
+        }
+    });
+
+    sim.client("client", async {
+        assert_error_kind(
+            TcpStream::connect(("server", PORT)).await,
+            io::ErrorKind::ConnectionRefused,
+        );
+        Ok(())
+    });
+
+    sim.run()
 }
 
 #[test]
