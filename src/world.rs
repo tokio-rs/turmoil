@@ -123,9 +123,18 @@ impl World {
     pub(crate) fn send_message(&mut self, src: SocketAddr, dst: SocketAddr, message: Protocol) {
         // Loopback communication does not use Topology.
         if self.sent_within_current_host(src, dst) {
-            let _ = self
-                .current_host_mut()
-                .receive_from_network(Envelope { src, dst, message });
+            if let Err(message) =
+                self.current_host_mut()
+                    .receive_from_network(Envelope { src, dst, message })
+            {
+                // Handle first response, ignore rest of them to avoid infinte loop.
+                // If it failed, it means RST. Can't do anything about it.
+                let _ = self.current_host_mut().receive_from_network(Envelope {
+                    src: dst,
+                    dst: src,
+                    message
+                });
+            }
         } else {
             self.topology
                 .enqueue_message(&mut self.rng, src, dst, message);
