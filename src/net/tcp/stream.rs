@@ -258,7 +258,7 @@ impl WriteHalf {
             .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "Broken pipe"))
     }
 
-    fn send(&self, world: &mut World, segment: Segment) {   
+    fn send(&self, world: &mut World, segment: Segment) {
         world.send_message(self.pair.local, self.pair.remote, Protocol::Tcp(segment));
     }
 }
