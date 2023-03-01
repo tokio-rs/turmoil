@@ -15,17 +15,18 @@ type Software<'a> = Box<dyn Fn() -> Pin<Box<dyn Future<Output = Result>>> + 'a>;
 
 /// Type of runtime
 enum Kind<'a> {
-    /// A runtime that is running client software
+    /// A runtime for executing test code.
     Client,
 
     /// A runtime that is running simulated host software
     Host { software: Software<'a> },
 
-    /// A runtime that with no software running
+    /// A runtime without any software. The network topology uses this for 
+    /// time tracking and message delivery.
     NoSoftware,
 }
 
-/// Per host simulated runtime that runs software
+/// Per host simulated runtime.
 ///
 /// The tokio runtime is paused (see [`Builder::start_paused`]), which gives us
 /// control over when and how to advance time. In particular, see [`Rt::tick`],
@@ -40,9 +41,8 @@ pub(crate) struct Rt<'a> {
     /// Local task set used for running !Send tasks.
     local: LocalSet,
 
-    /// Software's handle
-    /// The handle is consumed as soon as software finishes or host crashes,
-    /// replaced with None to indicate finished software.
+    /// Optional handle to a host's software. When software finishes, the handle is
+    /// consumed to check for error, which is propagated up to fail the simulation.
     handle: Option<JoinHandle<Result>>,
 }
 
@@ -82,8 +82,6 @@ impl<'a> Rt<'a> {
         }
     }
 
-    // Creates special instance of `Rt` that has no running software and used
-    // only by Topology to advance simulated time.
     pub(crate) fn no_software() -> Self {
         let (tokio, local) = init();
         Self {
@@ -111,14 +109,6 @@ impl<'a> Rt<'a> {
         Instant::now()
     }
 
-    /// Advances runtime's time forward by the specified `duration` and
-    /// allows software to run for give `duration.
-    ///
-    /// Returns whether the software has finished successfully or the error
-    /// that caused it to fail. The error could be returned only once, all
-    /// following calls will return Ok(true). Return Ok(false) if software is
-    /// still running.
-    //
     // This method is called by [`Sim::run`], which iterates through all the
     // runtimes and ticks each one. The magic of this method is described in the
     // documentation for [`LocalSet::run_until`], but it may not be entirely
@@ -137,6 +127,10 @@ impl<'a> Rt<'a> {
     // 3. Other tasks on the `LocalSet` get a chance to run
     // 4. The sleep finishes
     // 5. The runtime pauses
+    //
+    // Returns whether the software has finished successfully or the error
+    // that caused failure. Subsequent calls do not return the error as it is
+    // expected to fail the simulation.
     pub(crate) fn tick(&mut self, duration: Duration) -> Result<bool> {
         self.tokio.block_on(async {
             self.local
