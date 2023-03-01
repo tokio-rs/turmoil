@@ -27,9 +27,6 @@ use host::Host;
 
 pub mod net;
 
-mod role;
-use role::Role;
-
 mod rt;
 use rt::Rt;
 

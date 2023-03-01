@@ -1,6 +1,4 @@
-use crate::{
-    for_pairs, Config, LinksIter, Result, Role, Rt, ToIpAddr, ToIpAddrs, World, TRACING_TARGET,
-};
+use crate::{for_pairs, Config, LinksIter, Result, Rt, ToIpAddr, ToIpAddrs, World, TRACING_TARGET};
 
 use indexmap::IndexMap;
 use std::cell::RefCell;
@@ -21,7 +19,7 @@ pub struct Sim<'a> {
     world: RefCell<World>,
 
     /// Per simulated host runtimes
-    rts: IndexMap<IpAddr, Role<'a>>,
+    rts: IndexMap<IpAddr, Rt<'a>>,
 
     /// Simulation duration since unix epoch. Set when the simulation is
     /// created.
@@ -66,7 +64,6 @@ impl<'a> Sim<'a> {
     where
         F: Future<Output = Result> + 'static,
     {
-        let rt = Rt::new();
         let addr = self.lookup(addr);
 
         {
@@ -76,9 +73,9 @@ impl<'a> Sim<'a> {
             world.register(addr);
         }
 
-        let handle = World::enter(&self.world, || rt.with(|| tokio::task::spawn_local(client)));
+        let rt = World::enter(&self.world, || Rt::client(client));
 
-        self.rts.insert(addr, Role::client(rt, handle));
+        self.rts.insert(addr, rt);
     }
 
     /// Register a host with the simulation.
@@ -92,7 +89,6 @@ impl<'a> Sim<'a> {
         F: Fn() -> Fut + 'a,
         Fut: Future<Output = Result> + 'static,
     {
-        let rt = Rt::new();
         let addr = self.lookup(addr);
 
         {
@@ -102,42 +98,33 @@ impl<'a> Sim<'a> {
             world.register(addr);
         }
 
-        let handle = World::enter(&self.world, || rt.with(|| tokio::task::spawn_local(host())));
+        let rt = World::enter(&self.world, || Rt::host(host));
 
-        self.rts.insert(addr, Role::simulated(rt, host, handle));
+        self.rts.insert(addr, rt);
     }
 
     /// Crashes the resolved hosts. Nothing will be running on the matched hosts
     /// after this method. You can use [`Sim::bounce`] to start the hosts up
     /// again.
     pub fn crash(&mut self, addrs: impl ToIpAddrs) {
-        self.run_with_hosts(addrs, |addr, rt| match rt {
-            Role::Client { .. } => panic!("can only bounce hosts, not clients"),
-            Role::Simulated { rt, .. } => {
-                rt.cancel_tasks();
-                tracing::trace!(target: TRACING_TARGET, addr = ?addr, "Crash");
-            }
+        self.run_with_hosts(addrs, |addr, rt| {
+            rt.crash();
+
+            tracing::trace!(target: TRACING_TARGET, addr = ?addr, "Crash");
         });
     }
 
     /// Bounces the resolved hosts. The software is restarted.
     pub fn bounce(&mut self, addrs: impl ToIpAddrs) {
-        self.run_with_hosts(addrs, |addr, rt| match rt {
-            Role::Client { .. } => panic!("can only bounce hosts, not clients"),
-            Role::Simulated {
-                rt,
-                software,
-                handle,
-            } => {
-                rt.cancel_tasks();
-                *handle = rt.with(|| tokio::task::spawn_local(software()));
-                tracing::trace!(target: TRACING_TARGET, addr = ?addr, "Bounce");
-            }
+        self.run_with_hosts(addrs, |addr, rt| {
+            rt.bounce();
+
+            tracing::trace!(target: TRACING_TARGET, addr = ?addr, "Bounce");
         });
     }
 
     /// Run `f` with the resolved hosts at `addrs` set on the world.
-    fn run_with_hosts(&mut self, addrs: impl ToIpAddrs, mut f: impl FnMut(IpAddr, &mut Role)) {
+    fn run_with_hosts(&mut self, addrs: impl ToIpAddrs, mut f: impl FnMut(IpAddr, &mut Rt)) {
         let hosts = self.world.borrow_mut().lookup_many(addrs);
         for h in hosts {
             let rt = self.rts.get_mut(&h).expect("missing host");
@@ -263,18 +250,26 @@ impl<'a> Sim<'a> {
     ///
     /// The simulated network also steps, processing in flight messages, and
     /// delivering them to their destination if appropriate.
+    ///
+    /// Returns whether or not all clients have completed.
     pub fn step(&mut self) -> Result<bool> {
         let tick = self.config.tick;
 
         let mut is_finished = true;
-        let mut finished = vec![];
 
         // Tick the networking, processing messages. This is done before
         // ticking any other runtime, as they might be waiting on network
         // IO. (It also might be waiting on something else, such as time.)
         self.world.borrow_mut().topology.tick_by(tick);
 
-        for (&addr, rt) in self.rts.iter() {
+        // Tick each host runtimes with running software. If the software
+        // completes, extract the result and return early if an error is
+        // encountered.
+        for (&addr, rt) in self
+            .rts
+            .iter_mut()
+            .filter(|(_, rt)| rt.is_software_running())
+        {
             {
                 let mut world = self.world.borrow_mut();
                 // We need to move deliverable messages off the network and
@@ -293,48 +288,20 @@ impl<'a> Sim<'a> {
                 world.current_host_mut().now(rt.now());
             }
 
-            World::enter(&self.world, || rt.tick(tick));
+            let is_software_finished = World::enter(&self.world, || rt.tick(tick))?;
+
+            if rt.is_client() {
+                is_finished = is_finished && is_software_finished;
+            }
 
             // Unset the current host
             let mut world = self.world.borrow_mut();
             world.current = None;
 
             world.tick(addr, tick);
-
-            match rt {
-                Role::Client { handle, .. } => {
-                    if handle.is_finished() {
-                        finished.push(addr);
-                    }
-                    is_finished = is_finished && handle.is_finished();
-                }
-                Role::Simulated { handle, .. } => {
-                    if handle.is_finished() {
-                        finished.push(addr);
-                    }
-                }
-            }
         }
 
         self.elapsed += tick;
-
-        // Check finished clients and hosts for err results. Runtimes are removed
-        // at this stage.
-        for addr in finished.into_iter() {
-            if let Some(role) = self.rts.remove(&addr) {
-                let (rt, handle) = match role {
-                    Role::Client { rt, handle } => (rt, handle),
-                    Role::Simulated { rt, handle, .. } => (rt, handle),
-                };
-
-                // If the host was crashed the JoinError is cancelled, which
-                // needs to be handled to not fail the simulation.
-                match rt.block_on(handle) {
-                    Err(j) if j.is_cancelled() => {}
-                    res => res??,
-                }
-            }
-        }
 
         if self.elapsed > self.config.duration && !is_finished {
             return Err(format!(
@@ -589,6 +556,34 @@ mod test {
         sim.crash("h");
 
         sim.run()
+    }
+
+    #[test]
+    fn restart_host_after_crash() -> Result {
+        let mut sim = Builder::new().build();
+
+        let data = Arc::new(AtomicU64::new(0));
+        let data_cloned = data.clone();
+
+        sim.host("h", move || {
+            let data_cloned = data_cloned.clone();
+            async move {
+                data_cloned.store(data_cloned.load(Ordering::SeqCst) + 1, Ordering::SeqCst);
+                Ok(())
+            }
+        });
+
+        // crash and step to execute the err handling logic
+        sim.crash("h");
+        sim.step()?;
+
+        // restart and step to ensure the host software runs
+        sim.bounce("h");
+        sim.step()?;
+        // check that software actually runs
+        assert_eq!(1, data.load(Ordering::SeqCst));
+
+        Ok(())
     }
 
     #[test]
