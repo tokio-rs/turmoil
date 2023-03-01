@@ -102,12 +102,8 @@ impl<'a> Rt<'a> {
         matches!(self.kind, Kind::Host { .. })
     }
 
-    pub(crate) fn is_software_finished(&self) -> bool {
-        self.handle.is_none()
-    }
-
     pub(crate) fn is_software_running(&self) -> bool {
-        !self.is_software_finished()
+        self.handle.is_some()
     }
 
     pub(crate) fn now(&self) -> Instant {
