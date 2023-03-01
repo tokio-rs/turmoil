@@ -21,7 +21,7 @@ pub(crate) struct Topology {
     /// We don't use a Rt for async. Right now, we just use it to tick time
     /// forward in the same way we do it elsewhere. We'd like to represent
     /// network state with async in the future.
-    rt: Rt,
+    rt: Rt<'static>,
 }
 
 /// This type is used as the key in the [`Topology::links`] map. See [`new`]
@@ -167,7 +167,7 @@ impl Topology {
         Topology {
             config,
             links: IndexMap::new(),
-            rt: Rt::new(),
+            rt: Rt::no_software(),
         }
     }
 
@@ -247,7 +247,7 @@ impl Topology {
     }
 
     pub(crate) fn tick_by(&mut self, duration: Duration) {
-        self.rt.tick(duration);
+        let _ = self.rt.tick(duration);
         for link in self.links.values_mut() {
             link.tick(self.rt.now());
         }

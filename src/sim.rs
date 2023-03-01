@@ -1,6 +1,4 @@
-use crate::{
-    for_pairs, Config, LinksIter, Result, Role, Rt, ToIpAddr, ToIpAddrs, World, TRACING_TARGET,
-};
+use crate::{for_pairs, Config, LinksIter, Result, Rt, ToIpAddr, ToIpAddrs, World, TRACING_TARGET};
 
 use indexmap::IndexMap;
 use std::cell::RefCell;
@@ -21,7 +19,7 @@ pub struct Sim<'a> {
     world: RefCell<World>,
 
     /// Per simulated host runtimes
-    rts: IndexMap<IpAddr, Role<'a>>,
+    rts: IndexMap<IpAddr, Rt<'a>>,
 
     /// Simulation duration since unix epoch. Set when the simulation is
     /// created.
@@ -66,7 +64,6 @@ impl<'a> Sim<'a> {
     where
         F: Future<Output = Result> + 'static,
     {
-        let rt = Rt::new();
         let addr = self.lookup(addr);
 
         {
@@ -76,9 +73,9 @@ impl<'a> Sim<'a> {
             world.register(addr);
         }
 
-        let handle = World::enter(&self.world, || rt.with(|| tokio::task::spawn_local(client)));
+        let rt = World::enter(&self.world, || Rt::client(client));
 
-        self.rts.insert(addr, Role::client(rt, handle));
+        self.rts.insert(addr, rt);
     }
 
     /// Register a host with the simulation.
@@ -92,7 +89,6 @@ impl<'a> Sim<'a> {
         F: Fn() -> Fut + 'a,
         Fut: Future<Output = Result> + 'static,
     {
-        let rt = Rt::new();
         let addr = self.lookup(addr);
 
         {
@@ -102,9 +98,9 @@ impl<'a> Sim<'a> {
             world.register(addr);
         }
 
-        let handle = World::enter(&self.world, || rt.with(|| tokio::task::spawn_local(host())));
+        let rt = World::enter(&self.world, || Rt::host(host));
 
-        self.rts.insert(addr, Role::simulated(rt, host, handle));
+        self.rts.insert(addr, rt);
     }
 
     /// Crashes the resolved hosts. Nothing will be running on the matched hosts
@@ -128,7 +124,7 @@ impl<'a> Sim<'a> {
     }
 
     /// Run `f` with the resolved hosts at `addrs` set on the world.
-    fn run_with_hosts(&mut self, addrs: impl ToIpAddrs, mut f: impl FnMut(IpAddr, &mut Role)) {
+    fn run_with_hosts(&mut self, addrs: impl ToIpAddrs, mut f: impl FnMut(IpAddr, &mut Rt)) {
         let hosts = self.world.borrow_mut().lookup_many(addrs);
         for h in hosts {
             let rt = self.rts.get_mut(&h).expect("missing host");
@@ -265,9 +261,15 @@ impl<'a> Sim<'a> {
         // ticking any other runtime, as they might be waiting on network
         // IO. (It also might be waiting on something else, such as time.)
         self.world.borrow_mut().topology.tick_by(tick);
-        // Tick each hosts with running software. If the software completes,
-        // extract the result and return early if an error is encountered.
-        for (&addr, rt) in self.rts.iter_mut().filter(|(_, rt)| rt.is_running()) {
+
+        // Tick each host runtimes with running software. If the software
+        // completes, extract the result and return early if an error is
+        // encountered.
+        for (&addr, rt) in self
+            .rts
+            .iter_mut()
+            .filter(|(_, rt)| rt.is_software_running())
+        {
             {
                 let mut world = self.world.borrow_mut();
                 // We need to move deliverable messages off the network and
@@ -286,10 +288,10 @@ impl<'a> Sim<'a> {
                 world.current_host_mut().now(rt.now());
             }
 
-            let is_rt_finished = World::enter(&self.world, || rt.tick(tick))?;
+            let is_software_finished = World::enter(&self.world, || rt.tick(tick))?;
 
             if rt.is_client() {
-                is_finished = is_finished && is_rt_finished;
+                is_finished = is_finished && is_software_finished;
             }
 
             // Unset the current host
