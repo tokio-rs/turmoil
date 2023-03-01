@@ -14,9 +14,9 @@
 //! capabilities as normal hosts, such as networking support.
 //!
 //! ```
-//! use turmoil:
+//! use turmoil;
 //!
-//! let mut sim = Builder::new().build();
+//! let mut sim = turmoil::Builder::new().build();
 //!
 //! // register a host
 //! sim.host("host", || async {
@@ -24,7 +24,7 @@
 //!     // host software goes here
 //!
 //!     Ok(())
-//! })
+//! });
 //!
 //! // define test code
 //! sim.client("test", async {
