@@ -145,6 +145,7 @@ impl Udp {
     }
 
     pub(crate) fn bind(&mut self, addr: SocketAddr) -> io::Result<UdpSocket> {
+        assert!(!addr.is_ipv6(), "IPv6 is unsupported");
         let (tx, rx) = mpsc::channel(self.capacity);
 
         if self.binds.insert(addr, tx).is_some() {
@@ -294,6 +295,8 @@ impl Tcp {
     }
 
     pub(crate) fn bind(&mut self, addr: SocketAddr) -> io::Result<TcpListener> {
+        assert!(!addr.is_ipv6(), "IPv6 is unsupported");
+        
         if !addr.ip().is_loopback() && !addr.ip().is_unspecified() {
             return Err(io::Error::new(
                 io::ErrorKind::AddrNotAvailable,

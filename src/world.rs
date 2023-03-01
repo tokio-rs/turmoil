@@ -1,4 +1,4 @@
-use crate::envelope::Protocol;
+use crate::envelope::{Envelope, Protocol};
 use crate::{config, Dns, Host, ToIpAddr, ToIpAddrs, Topology, TRACING_TARGET};
 
 use indexmap::IndexMap;
@@ -110,11 +110,26 @@ impl World {
         self.hosts.insert(addr, Host::new(addr));
     }
 
+    fn sent_within_current_host(&self, src: SocketAddr, dst: SocketAddr) -> bool {
+        let ip = self.current.expect("current host missing");
+
+        src.ip().is_loopback() && dst.ip().is_loopback()
+            || src.ip().is_loopback() && dst.ip() == ip
+            || src.ip() == ip && dst.ip().is_loopback()
+    }
+
     /// Send `message` from `src` to `dst`.
     /// Delivery between hosts is asynchronous and not guaranteed.
     pub(crate) fn send_message(&mut self, src: SocketAddr, dst: SocketAddr, message: Protocol) {
-        self.topology
-            .enqueue_message(&mut self.rng, src, dst, message);
+        // Loopback communication does not use Topology.
+        if self.sent_within_current_host(src, dst) {
+            let _ = self
+                .current_host_mut()
+                .receive_from_network(Envelope { src, dst, message });
+        } else {
+            self.topology
+                .enqueue_message(&mut self.rng, src, dst, message);
+        }
     }
 
     /// Tick the host at `addr` by `duration`.

@@ -28,12 +28,6 @@ async fn bind() -> std::result::Result<TcpListener, std::io::Error> {
 
 #[test]
 fn connects_within_a_localhost() -> Result {
-    // if std::env::var("RUST_LOG").is_err() {
-    //     std::env::set_var("RUST_LOG", "trace");
-    // }
-    
-    // tracing_subscriber::fmt::init();
-
     let mut sim = Builder::new().build();
 
     sim.client("server", async {

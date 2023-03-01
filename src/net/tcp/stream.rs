@@ -14,7 +14,7 @@ use tokio::{
 };
 
 use crate::{
-    envelope::{Envelope, Protocol, Segment, Syn},
+    envelope::{Protocol, Segment, Syn},
     host::SequencedSegment,
     net::SocketPair,
     world::World,
@@ -68,15 +68,7 @@ impl TcpStream {
 
             let pair = SocketPair::new(local_addr, dst);
             let rx = host.tcp.new_stream(pair);
-            if dst.ip().is_loopback() {
-                let _ = host.receive_from_network(Envelope {
-                    src: local_addr,
-                    dst,
-                    message: Protocol::Tcp(syn),
-                });
-            } else {
-                world.send_message(local_addr, dst, Protocol::Tcp(syn));
-            }
+            world.send_message(local_addr, dst, Protocol::Tcp(syn));
 
             (pair, rx)
         });
@@ -266,20 +258,8 @@ impl WriteHalf {
             .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "Broken pipe"))
     }
 
-    fn send(&self, world: &mut World, segment: Segment) {
-        let a = 
-            self.pair.local.ip().is_loopback() && self.pair.remote.ip() == world.current.unwrap();
-        let b = 
-            self.pair.remote.ip().is_loopback() && self.pair.local.ip() == world.current.unwrap();
-        if a || b {
-            let _ = world.current_host_mut().receive_from_network(Envelope {
-                src: self.pair.local,
-                dst: self.pair.remote,
-                message: Protocol::Tcp(segment),
-            });
-        } else {
-            world.send_message(self.pair.local, self.pair.remote, Protocol::Tcp(segment));
-        }
+    fn send(&self, world: &mut World, segment: Segment) {   
+        world.send_message(self.pair.local, self.pair.remote, Protocol::Tcp(segment));
     }
 }
 
