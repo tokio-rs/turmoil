@@ -33,6 +33,7 @@ struct Pair(IpAddr, IpAddr);
 impl Pair {
     fn new(a: IpAddr, b: IpAddr) -> Pair {
         assert_ne!(a, b);
+        assert!(!a.is_loopback() && !b.is_loopback(), "cannot perform topology operations on loopback interfaces");
 
         if a < b {
             Pair(a, b)
