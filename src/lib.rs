@@ -1,3 +1,81 @@
+//! Turmoil is a framework for developing and testing distributed systems. It
+//! provides deterministic execution by running multiple concurrent hosts within
+//! a single thread. It introduces "hardship" into the system via changes in the
+//! simulated network. The network can be controlled manually or with a seeded
+//! rng.
+//!
+//! # Hosts and Software
+//!
+//! A turmoil simulation is comprised of one or more hosts. Hosts run software,
+//! which is represented as a `Future`.
+//!
+//! Test code is also executed on a special host, called a client. This allows
+//! for an entry point into the simulated system. Client hosts have all the same
+//! capabilities as normal hosts, such as networking support.
+//!
+//! ```
+//! use turmoil:
+//!
+//! let mut sim = Builder::new().build();
+//!
+//! // register a host
+//! sim.host("host", || async {
+//!
+//!     // host software goes here
+//!
+//!     Ok(())
+//! })
+//!
+//! // define test code
+//! sim.client("test", async {
+//!
+//!     // we can interact with other hosts from here
+//!
+//!     Ok(())
+//! });
+//!
+//! // run the simulation and handle the result
+//! _ = sim.run();
+//!
+//! ```
+//!
+//! # Networking
+//!
+//! Simulated networking types that mirror `tokio::net` are included in the
+//! `turmoil::net` module.
+//!
+//! Turmoil is not yet oppinionated on how to structure your application code to
+//! swap in simulated types under test. More on this coming soon...
+//!
+//! # Network Manipulation
+//!
+//! The simulation has the following network manipulation capabilities:
+//!
+//! * [`partition`], which introduces a network partition between hosts
+//! * [`repair`], which repairs a network partition between hosts
+//! * [`hold`], which holds all "in flight" messages between hosts. Messages are
+//!   available for introspection using [`Sim`]'s `links` method.
+//! * [`release`], which releases all "in flight" messages between hosts
+//!
+//! # Tracing
+//!
+//! The `tracing` crate is used to emit important events during the lifetime of
+//! a simulation.
+//!
+//! This can be configured using `RUST_LOG=turmoil=info`.
+//!
+//! # Feature flags
+//!
+//! * `regex`: Enables regex host resolution through `ToIpAddrs`
+//!
+//! ## tokio_unstable
+//!
+//! Turmoil uses [unhandled_panic] to forward host panics as test failures. See
+//! [unstable features] to opt in.
+//!
+//! [unhandled_panic]: https://docs.rs/tokio/latest/tokio/runtime/struct.Builder.html#method.unhandled_panic
+//! [unstable features]: https://docs.rs/tokio/latest/tokio/#unstable-features
+
 #[cfg(doctest)]
 mod readme;
 
@@ -52,7 +130,7 @@ pub(crate) fn for_pairs(a: &Vec<IpAddr>, b: &Vec<IpAddr>, mut f: impl FnMut(IpAd
     }
 }
 
-/// Lookup an ip address by host name.
+/// Lookup an IP address by host name.
 ///
 /// Must be called from within a Turmoil simulation.
 pub fn lookup(addr: impl ToIpAddr) -> IpAddr {

@@ -8,11 +8,15 @@ pub struct Dns {
     names: IndexMap<String, IpAddr>,
 }
 
-pub trait ToIpAddr {
+/// Converts or resolves to an [`IpAddr`].
+pub trait ToIpAddr: sealed::Sealed {
+    #[doc(hidden)]
     fn to_ip_addr(&self, dns: &mut Dns) -> IpAddr;
 }
 
-pub trait ToIpAddrs {
+/// Converts or resolves to one or more [`IpAddr`] values.
+pub trait ToIpAddrs: sealed::Sealed {
+    #[doc(hidden)]
     fn to_ip_addrs(&self, dns: &mut Dns) -> Vec<IpAddr>;
 }
 

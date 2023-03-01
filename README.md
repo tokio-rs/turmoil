@@ -32,47 +32,15 @@ Add this to your `Cargo.toml`.
 turmoil = "0.5"
 ```
 
-Next, create a test file and add a test:
-
-```rust
-let mut sim = turmoil::Builder::new().build();
-
-// register a host
-sim.host("server", || async move {
-    // host software goes here
-
-    Ok(())
-});
-
-// register a client
-sim.client("client", async move {
-    // dns lookup for "server"
-    let addr = turmoil::lookup("server");
-
-    // test code goes here
-
-    Ok(())
-});
-
-// run the simulation
-sim.run();
-```
-
-See `ping_pong` in [udp.rs](tests/udp.rs) for a networking example. For more
-examples, check out the [tests](tests) directory.
+See crate documentation for simulation setup instructions.
 
 ### Examples
 
-- [`gRPC`](https://github.com/tokio-rs/turmoil/blob/master/examples/grpc) using
+- [/tests](https://github.com/tokio-rs/turmoil/tree/main/tests) for TCP and UDP.
+- [`gRPC`](https://github.com/tokio-rs/turmoil/tree/main/examples/grpc) using
     `tonic` and `hyper`.
+- [`axum`](https://github.com/tokio-rs/turmoil/tree/main/examples/axum)
 
-### tokio_unstable
-
-Turmoil uses [unhandled_panic] to forward host panics as test failures. See
-[unstable features] to opt in.
-
-[unhandled_panic]: https://docs.rs/tokio/latest/tokio/runtime/struct.Builder.html#method.unhandled_panic
-[unstable features]: https://docs.rs/tokio/latest/tokio/#unstable-features
 
 ## License
 
