@@ -1,3 +1,20 @@
+# 0.5.1 (Mar 1, 2023)
+
+### Added
+
+- gRPC example ([#81])
+- axum example ([#91])
+
+### Fixed
+
+- Handle task cancellation due to crashing a host ([#85])
+- Remove runtime after host crashes ([#89])
+
+[#81]: https://github.com/tokio-rs/turmoil/pull/81
+[#85]: https://github.com/tokio-rs/turmoil/pull/85
+[#89]: https://github.com/tokio-rs/turmoil/pull/89
+[#91]: https://github.com/tokio-rs/turmoil/pull/91
+
 # 0.5 (Feb 8, 2023)
 
 ### Added
