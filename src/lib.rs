@@ -1,6 +1,6 @@
-//! Turmoil is a framework for developing and testing distributed systems. It
-//! provides deterministic execution by running multiple concurrent hosts within
-//! a single thread. It introduces "hardship" into the system via changes in the
+//! Turmoil is a framework for testing distributed systems. It provides
+//! deterministic execution by running multiple concurrent hosts within a single
+//! thread. It introduces "hardship" into the system via changes in the
 //! simulated network. The network can be controlled manually or with a seeded
 //! rng.
 //!
@@ -73,7 +73,8 @@
 //! Turmoil uses [unhandled_panic] to forward host panics as test failures. See
 //! [unstable features] to opt in.
 //!
-//! [unhandled_panic]: https://docs.rs/tokio/latest/tokio/runtime/struct.Builder.html#method.unhandled_panic
+//! [unhandled_panic]:
+//!     https://docs.rs/tokio/latest/tokio/runtime/struct.Builder.html#method.unhandled_panic
 //! [unstable features]: https://docs.rs/tokio/latest/tokio/#unstable-features
 
 #[cfg(doctest)]

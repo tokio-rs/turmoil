@@ -4,10 +4,10 @@
 
 Add hardship to your tests.
 
-Turmoil is a framework for developing and testing distributed systems. It
-provides deterministic execution by running multiple concurrent hosts within
-a single thread. It introduces "hardship" into the system via changes in the
-simulated network. The network can be controlled manually or with a seeded rng.
+Turmoil is a framework for testing distributed systems. It provides
+deterministic execution by running multiple concurrent hosts within a single
+thread. It introduces "hardship" into the system via changes in the simulated
+network. The network can be controlled manually or with a seeded rng.
 
 [![Crates.io][crates-badge]][crates-url]
 [![Documentation][docs-badge]][docs-url]
