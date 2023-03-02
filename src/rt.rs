@@ -13,15 +13,15 @@ use tokio::time::{sleep, Duration, Instant};
 // boxxing to avoid generics.
 type Software<'a> = Box<dyn Fn() -> Pin<Box<dyn Future<Output = Result>>> + 'a>;
 
-/// Type of runtime
+/// Runtime kinds.
 enum Kind<'a> {
     /// A runtime for executing test code.
     Client,
 
-    /// A runtime that is running simulated host software
+    /// A runtime that is running simulated host software.
     Host { software: Software<'a> },
 
-    /// A runtime without any software. The network topology uses this for 
+    /// A runtime without any software. The network topology uses this for
     /// time tracking and message delivery.
     NoSoftware,
 }
@@ -71,7 +71,6 @@ impl<'a> Rt<'a> {
         let (tokio, local) = init();
 
         let software: Software = Box::new(move || Box::pin(software()));
-
         let handle = with(&tokio, &local, || tokio::task::spawn_local(software()));
 
         Self {
@@ -84,6 +83,7 @@ impl<'a> Rt<'a> {
 
     pub(crate) fn no_software() -> Self {
         let (tokio, local) = init();
+
         Self {
             kind: Kind::NoSoftware,
             tokio,
@@ -96,7 +96,7 @@ impl<'a> Rt<'a> {
         matches!(self.kind, Kind::Client)
     }
 
-    pub(crate) fn is_host(&self) -> bool {
+    fn is_host(&self) -> bool {
         matches!(self.kind, Kind::Host { .. })
     }
 
@@ -162,7 +162,9 @@ impl<'a> Rt<'a> {
     pub(crate) fn crash(&mut self) {
         if !self.is_host() {
             panic!("can only crash host's software");
-        } else if self.handle.take().is_some() {
+        }
+
+        if self.handle.take().is_some() {
             self.cancel_tasks();
         };
     }
@@ -170,15 +172,16 @@ impl<'a> Rt<'a> {
     pub(crate) fn bounce(&mut self) {
         if !self.is_host() {
             panic!("can only bounce host's software");
-        } else {
-            self.cancel_tasks();
-            if let Kind::Host { software } = &self.kind {
-                let handle = with(&self.tokio, &self.local, || {
-                    tokio::task::spawn_local(software())
-                });
-                self.handle.replace(handle);
-            };
         }
+
+        self.cancel_tasks();
+
+        if let Kind::Host { software } = &self.kind {
+            let handle = with(&self.tokio, &self.local, || {
+                tokio::task::spawn_local(software())
+            });
+            self.handle.replace(handle);
+        };
     }
 
     /// Cancel all tasks within the [`Rt`] by dropping the current tokio
