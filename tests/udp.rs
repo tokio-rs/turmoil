@@ -265,3 +265,42 @@ fn bounce() -> Result {
 
     Ok(())
 }
+
+#[test]
+fn bulk_transfer() -> Result {
+    let mut sim = Builder::new().build();
+
+    sim.client("server", async {
+        let sock = bind_to(123).await?;
+
+        let mut total = 0;
+        loop {
+            let recv = recv_ping(&sock);
+            let recv = tokio::time::timeout(Duration::from_secs(1), recv);
+            if recv.await.is_err() {
+                break;
+            }
+            total += 1;
+        }
+
+        // There may have been some loss since we were saturating the channel but at least 3/4 of
+        // the messages should have been received
+        assert!(1500 < total && total <= 2000);
+
+        Ok(())
+    });
+
+    sim.client("client", async {
+        let sock = bind_to(456).await?;
+
+        let server = (lookup("server"), 123);
+
+        for _ in 0..2000 {
+            let _ = sock.send_to(b"ping", server).await?;
+        }
+
+        Ok(())
+    });
+
+    sim.run()
+}

@@ -158,8 +158,19 @@ impl Udp {
 
     fn receive_from_network(&mut self, src: SocketAddr, dst: SocketAddr, datagram: Datagram) {
         if let Some(s) = self.binds.get_mut(&dst) {
-            s.try_send((datagram, src))
-                .unwrap_or_else(|_| panic!("unable to send to {dst}"))
+            if let Err(err) = s.try_send((datagram, src)) {
+                // drop any packets that exceed the capacity
+                // TODO: ideally we should drop the oldest packets instead of new ones, but this would
+                //       require a different channel implementation.
+                match err {
+                    mpsc::error::TrySendError::Full((datagram, _)) => {
+                        tracing::trace!(target: TRACING_TARGET, ?dst, ?src, protocol = %Protocol::Udp(datagram), "Dropped (Full buffer)");
+                    }
+                    mpsc::error::TrySendError::Closed((datagram, _)) => {
+                        tracing::trace!(target: TRACING_TARGET, ?dst, ?src, protocol = %Protocol::Udp(datagram), "Dropped (Receiver closed)");
+                    }
+                }
+            }
         }
     }
 
