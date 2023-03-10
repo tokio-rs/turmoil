@@ -78,6 +78,27 @@ impl UdpSocket {
 
         Ok((limit, origin))
     }
+
+    /// Returns the local address that this socket is bound to.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use turmoil::net::UdpSocket;
+    /// # use std::{io, net::SocketAddr};
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() -> io::Result<()> {
+    /// let addr = "0.0.0.0:8080".parse::<SocketAddr>().unwrap();
+    /// let sock = UdpSocket::bind(addr).await?;
+    /// // the address the socket is bound to
+    /// let local_addr = sock.local_addr()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn local_addr(&self) -> Result<SocketAddr> {
+        Ok(self.local_addr)
+    }
 }
 
 impl Drop for UdpSocket {
