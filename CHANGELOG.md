@@ -1,3 +1,13 @@
+# 0.5.1 (Mar 13, 2023)
+
+### Added
+
+- Add more support for UDP([#100], [#101], [#102])
+
+[#100]: https://github.com/tokio-rs/turmoil/pull/100
+[#101]: https://github.com/tokio-rs/turmoil/pull/101
+[#102]: https://github.com/tokio-rs/turmoil/pull/102
+
 # 0.5.1 (Mar 1, 2023)
 
 ### Added
