@@ -268,9 +268,25 @@ fn bounce() -> Result {
 
 #[test]
 fn bulk_transfer() -> Result {
-    let mut sim = Builder::new().build();
+    // set the latency to a well-known value
+    let latency = Duration::from_millis(1);
+    // perform several rounds of sending packets and sleeping for the latency
+    let send_rounds = 10;
+    // the UDP socket currently has a queue size of 64 packets; it should drop any packets that
+    // exceed this amount.
+    let queue_size = 64;
+    // for each send round, we'll send double the number of packets that can be received by the
+    // peer.
+    let send_batch_size = queue_size * 2;
 
-    sim.client("server", async {
+    // make the test deterministic
+    let mut sim = Builder::new()
+        .fail_rate(0.0)
+        .min_message_latency(latency)
+        .max_message_latency(latency)
+        .build();
+
+    sim.client("server", async move {
         let sock = bind_to(123).await?;
 
         let mut total = 0;
@@ -283,20 +299,23 @@ fn bulk_transfer() -> Result {
             total += 1;
         }
 
-        // There may have been some loss since we were saturating the channel but at least 3/4 of
-        // the messages should have been received
-        assert!(1500 < total && total <= 2000);
+        // the receiver should be bounded by its queue size
+        assert_eq!(total, send_rounds * queue_size);
 
         Ok(())
     });
 
-    sim.client("client", async {
+    sim.client("client", async move {
         let sock = bind_to(456).await?;
 
         let server = (lookup("server"), 123);
 
-        for _ in 0..2000 {
-            let _ = sock.send_to(b"ping", server).await?;
+        for _ in 0..send_rounds {
+            for _ in 0..send_batch_size {
+                let _ = sock.send_to(b"ping", server).await?;
+            }
+            // sleep for the latency to allow the peer to flush its receive queue
+            tokio::time::sleep(latency).await;
         }
 
         Ok(())
