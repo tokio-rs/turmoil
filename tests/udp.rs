@@ -24,26 +24,60 @@ async fn send_ping(sock: &net::UdpSocket) -> Result<()> {
     Ok(())
 }
 
+fn try_send_ping(sock: &net::UdpSocket) -> Result<()> {
+    sock.try_send_to(b"ping", (lookup("server"), 1738))?;
+
+    Ok(())
+}
+
 async fn send_pong(sock: &net::UdpSocket, target: SocketAddr) -> Result<()> {
     sock.send_to(b"pong", target).await?;
 
     Ok(())
 }
 
+fn try_send_pong(sock: &net::UdpSocket, target: SocketAddr) -> Result<()> {
+    sock.try_send_to(b"pong", target)?;
+
+    Ok(())
+}
+
 async fn recv_ping(sock: &net::UdpSocket) -> Result<SocketAddr> {
-    let mut buf = vec![0; 4];
+    let mut buf = vec![123; 8];
     let (_, origin) = sock.recv_from(&mut buf).await?;
 
-    assert_eq!(b"ping", &buf[..]);
+    assert_eq!(b"ping", &buf[..4]);
+    assert_eq!(&[123; 4], &buf[4..]);
+
+    Ok(origin)
+}
+
+fn try_recv_ping(sock: &net::UdpSocket) -> Result<SocketAddr> {
+    let mut buf = vec![123; 8];
+    let (_, origin) = sock.try_recv_from(&mut buf)?;
+
+    assert_eq!(b"ping", &buf[..4]);
+    assert_eq!(&[123; 4], &buf[4..]);
 
     Ok(origin)
 }
 
 async fn recv_pong(sock: &net::UdpSocket) -> Result<()> {
-    let mut buf = vec![0; 4];
+    let mut buf = vec![123; 8];
     sock.recv_from(&mut buf).await?;
 
-    assert_eq!(b"pong", &buf[..]);
+    assert_eq!(b"pong", &buf[..4]);
+    assert_eq!(&[123; 4], &buf[4..]);
+
+    Ok(())
+}
+
+fn try_recv_pong(sock: &net::UdpSocket) -> Result<()> {
+    let mut buf = vec![123; 8];
+    sock.try_recv_from(&mut buf)?;
+
+    assert_eq!(b"pong", &buf[..4]);
+    assert_eq!(&[123; 4], &buf[4..]);
 
     Ok(())
 }
@@ -64,6 +98,33 @@ fn ping_pong() -> Result {
 
         send_ping(&sock).await?;
         recv_pong(&sock).await
+    });
+
+    sim.run()
+}
+
+#[test]
+fn try_ping_pong() -> Result {
+    let mut sim = Builder::new().build();
+
+    sim.client("server", async {
+        let sock = bind().await?;
+
+        sock.readable().await?;
+        let origin = try_recv_ping(&sock)?;
+
+        sock.writable().await?;
+        try_send_pong(&sock, origin)
+    });
+
+    sim.client("client", async {
+        let sock = bind().await?;
+
+        sock.writable().await?;
+        try_send_ping(&sock)?;
+
+        sock.readable().await?;
+        try_recv_pong(&sock)
     });
 
     sim.run()

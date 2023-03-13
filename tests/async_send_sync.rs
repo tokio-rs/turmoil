@@ -92,6 +92,7 @@ macro_rules! assert_value {
 
 assert_value!(turmoil::net::TcpListener: Send & Sync & Unpin);
 assert_value!(turmoil::net::TcpStream: Send & Sync & Unpin);
+assert_value!(turmoil::net::UdpSocket: Send & Sync & Unpin);
 assert_value!(turmoil::net::tcp::OwnedReadHalf: Send & Sync & Unpin);
 assert_value!(turmoil::net::tcp::OwnedWriteHalf: Send & Sync & Unpin);
 assert_value!(turmoil::net::tcp::ReuniteError: Send & Sync & Unpin);
