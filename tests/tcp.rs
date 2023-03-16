@@ -573,6 +573,41 @@ fn write_zero_bytes() -> Result {
 }
 
 #[test]
+fn read_buf_smaller_than_msg() -> Result {
+    let mut sim = Builder::new().build();
+
+    sim.client("server", async {
+        let listener = bind().await?;
+        let (mut s, _) = listener.accept().await?;
+
+        s.write_u64(1234).await?;
+        s.write_u64(5678).await?;
+
+        Ok(())
+    });
+
+    // client reads < message size; then reads the rest
+    sim.client("client", async {
+        let mut s = TcpStream::connect(("server", PORT)).await?;
+
+        // read < message len
+        let mut one_byte = [0; 1];
+        assert_eq!(1, s.read(&mut one_byte).await?);
+
+        // read the rest
+        let mut rest = [0; 7];
+        assert_eq!(7, s.read(&mut rest).await?);
+
+        // one more to fallback to polling
+        assert_eq!(5678, s.read_u64().await?);
+
+        Ok(())
+    });
+
+    sim.run()
+}
+
+#[test]
 fn split() -> Result {
     let mut sim = Builder::new().build();
 

@@ -24,8 +24,8 @@ struct Rx {
     recv: mpsc::Receiver<(Datagram, SocketAddr)>,
     /// A buffered received message.
     ///
-    /// This is used to support the `readable` method, as [`mpsc::Receiver`] doesn't expose a way
-    /// to query channel readiness.
+    /// This is used to support the `readable` method, as [`mpsc::Receiver`]
+    /// doesn't expose a way to query channel readiness.
     buffer: Option<(Datagram, SocketAddr)>,
 }
 
