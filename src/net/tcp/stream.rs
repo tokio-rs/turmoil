@@ -37,7 +37,10 @@ impl TcpStream {
         let pair = Arc::new(pair);
         let read_half = ReadHalf {
             pair: pair.clone(),
-            receiver,
+            rx: Rx {
+                recv: receiver,
+                buffer: None,
+            },
             is_closed: false,
         };
 
@@ -117,9 +120,18 @@ impl TcpStream {
 
 pub(crate) struct ReadHalf {
     pub(crate) pair: Arc<SocketPair>,
-    receiver: mpsc::Receiver<SequencedSegment>,
-    /// FIN received, EOF for reades
+    rx: Rx,
+    /// FIN received, EOF for reads
     is_closed: bool,
+}
+
+struct Rx {
+    recv: mpsc::Receiver<SequencedSegment>,
+    /// The remaining bytes of a received data segment.
+    ///
+    /// This is used to support read impls by stashing available bytes for
+    /// subsequent reads.
+    buffer: Option<Bytes>,
 }
 
 impl ReadHalf {
@@ -128,13 +140,19 @@ impl ReadHalf {
             return Poll::Ready(Ok(()));
         }
 
-        match ready!(self.receiver.poll_recv(cx)) {
+        if let Some(bytes) = self.rx.buffer.take() {
+            self.rx.buffer = Self::put_slice(bytes, buf);
+
+            return Poll::Ready(Ok(()));
+        }
+
+        match ready!(self.rx.recv.poll_recv(cx)) {
             Some(seg) => {
                 tracing::trace!(target: TRACING_TARGET, dst = ?self.pair.local, src = ?self.pair.remote, protocol = %seg, "Recv");
 
                 match seg {
                     SequencedSegment::Data(bytes) => {
-                        buf.put_slice(bytes.as_ref());
+                        self.rx.buffer = Self::put_slice(bytes, buf);
                     }
                     SequencedSegment::Fin => {
                         self.is_closed = true;
@@ -147,6 +165,24 @@ impl ReadHalf {
                 io::ErrorKind::ConnectionReset,
                 "Connection reset",
             ))),
+        }
+    }
+
+    /// Put bytes in `buf` based on the minimum of `avail` and its remaining
+    /// capacity.
+    ///
+    /// Returns an optional `Bytes` containing any remainder of `avail` that was
+    /// not consumed.
+    fn put_slice(mut avail: Bytes, buf: &mut ReadBuf) -> Option<Bytes> {
+        let amt = std::cmp::min(avail.len(), buf.remaining());
+
+        buf.put_slice(&avail[..amt]);
+        avail.advance(amt);
+
+        if avail.is_empty() {
+            None
+        } else {
+            Some(avail)
         }
     }
 }
