@@ -173,16 +173,16 @@ impl ReadHalf {
     ///
     /// Returns an optional `Bytes` containing any remainder of `avail` that was
     /// not consumed.
-    fn put_slice(avail: Bytes, buf: &mut ReadBuf) -> Option<Bytes> {
+    fn put_slice(mut avail: Bytes, buf: &mut ReadBuf) -> Option<Bytes> {
         let amt = std::cmp::min(avail.len(), buf.remaining());
-        let (a, b) = avail.split_at(amt);
 
-        buf.put_slice(a);
+        buf.put_slice(&avail[..amt]);
+        avail.advance(amt);
 
-        if b.is_empty() {
+        if avail.is_empty() {
             None
         } else {
-            Some(Bytes::copy_from_slice(b))
+            Some(avail)
         }
     }
 }
