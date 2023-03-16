@@ -586,7 +586,6 @@ fn read_buf_smaller_than_msg() -> Result {
         Ok(())
     });
 
-    // client reads < message size; then reads the rest
     sim.client("client", async {
         let mut s = TcpStream::connect(("server", PORT)).await?;
 
