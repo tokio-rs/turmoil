@@ -1,8 +1,10 @@
 use indexmap::IndexMap;
 #[cfg(feature = "regex")]
 use regex::Regex;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, SocketAddr, Ipv4Addr, Ipv6Addr};
 
+/// Each new registered host has an IP in a subnet 192.168.0.0/24.
+/// This is just a choice, can be changed in the future.
 pub struct Dns {
     next: u16,
     names: IndexMap<String, IpAddr>,
@@ -66,7 +68,7 @@ impl<'a> ToIpAddr for &'a str {
             let a = (host >> 8) as u8;
             let b = (host & 0xFF) as u8;
 
-            std::net::Ipv4Addr::new(127, 0, a, b).into()
+            std::net::Ipv4Addr::new(192, 168, a, b).into()
         })
     }
 }
@@ -107,9 +109,14 @@ impl ToSocketAddrs for (String, u16) {
 
 impl<'a> ToSocketAddrs for (&'a str, u16) {
     fn to_socket_addr(&self, dns: &Dns) -> SocketAddr {
+        // When IP address is passed directly as a str.
+        if let Ok(ip) = self.0.parse::<IpAddr>() {
+            return (ip, self.1).into();
+        }
+
         match dns.names.get(self.0) {
             Some(ip) => (*ip, self.1).into(),
-            None => panic!("no hostname found for ip address"),
+            None => panic!("no ip address found for a hostname: {}", self.0),
         }
     }
 }
@@ -121,6 +128,18 @@ impl ToSocketAddrs for SocketAddr {
 }
 
 impl ToSocketAddrs for (IpAddr, u16) {
+    fn to_socket_addr(&self, _: &Dns) -> SocketAddr {
+        (*self).into()
+    }
+}
+
+impl ToSocketAddrs for (Ipv4Addr, u16) {
+    fn to_socket_addr(&self, _: &Dns) -> SocketAddr {
+        (*self).into()
+    }
+}
+
+impl ToSocketAddrs for (Ipv6Addr, u16) {
     fn to_socket_addr(&self, _: &Dns) -> SocketAddr {
         (*self).into()
     }
@@ -179,9 +198,17 @@ mod tests {
     #[test]
     fn parse_str() {
         let mut dns = Dns::new();
-        dns.names.insert("foo".into(), "127.0.0.1".parse().unwrap());
-        let s = "foo:5000".to_socket_addr(&dns);
+        let generated_addr = dns.lookup("foo");
 
-        assert_eq!(s, "127.0.0.1:5000".parse().unwrap());
+        let hostname_port = "foo:5000".to_socket_addr(&dns);
+        let ipv4_port = "127.0.0.1:5000";
+        let ipv6_port = "[::1]:5000";
+
+        assert_eq!(
+            hostname_port,
+            format!("{generated_addr}:5000").parse().unwrap()
+        );
+        assert_eq!(ipv4_port.to_socket_addr(&dns), ipv4_port.parse().unwrap());
+        assert_eq!(ipv6_port.to_socket_addr(&dns), ipv6_port.parse().unwrap());
     }
 }
