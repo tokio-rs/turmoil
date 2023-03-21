@@ -94,6 +94,7 @@ impl UdpSocket {
     /// provided.
     ///
     /// Only 0.0.0.0 is currently supported.
+    /// When the port is unspecified (0), an ephemeral port number is generated.
     pub async fn bind<A: ToSocketAddrs>(addr: A) -> Result<UdpSocket> {
         World::current(|world| {
             let mut addr = addr.to_socket_addr(&world.dns);
@@ -102,9 +103,12 @@ impl UdpSocket {
             if !addr.ip().is_unspecified() {
                 panic!("{addr} is not supported");
             }
-
+            
             // Unspecified -> host's IP
             addr.set_ip(host.addr);
+            if addr.port() == 0 {
+                addr.set_port(host.assign_ephemeral_port());
+            }
 
             host.udp.bind(addr)
         })

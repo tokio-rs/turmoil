@@ -22,8 +22,12 @@ fn assert_error_kind<T>(res: io::Result<T>, kind: io::ErrorKind) {
     assert_eq!(res.err().map(|e| e.kind()), Some(kind));
 }
 
+async fn bind_to(port: u16) -> std::result::Result<TcpListener, std::io::Error> {
+    TcpListener::bind((IpAddr::from(Ipv4Addr::UNSPECIFIED), port)).await
+}
+
 async fn bind() -> std::result::Result<TcpListener, std::io::Error> {
-    TcpListener::bind((IpAddr::from(Ipv4Addr::UNSPECIFIED), PORT)).await
+    bind_to(PORT).await
 }
 
 #[test]
@@ -53,6 +57,22 @@ fn network_partitions_during_connect() -> Result {
                 .await
                 .is_err()
         );
+
+        Ok(())
+    });
+
+    sim.run()
+}
+
+#[test]
+fn ephemeral_port() -> Result {
+    let mut sim = Builder::new().build();
+
+    sim.client("client", async {
+        let sock = bind_to(0).await?;
+
+        assert_ne!(sock.local_addr()?.port(), 0);
+        assert!(sock.local_addr()?.port() >= 49152);
 
         Ok(())
     });

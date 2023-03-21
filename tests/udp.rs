@@ -104,6 +104,22 @@ fn ping_pong() -> Result {
 }
 
 #[test]
+fn ephemeral_port() -> Result {
+    let mut sim = Builder::new().build();
+
+    sim.client("client", async {
+        let sock = bind_to(0).await?;
+
+        assert_ne!(sock.local_addr()?.port(), 0);
+        assert!(sock.local_addr()?.port() >= 49152);
+
+        Ok(())
+    });
+
+    sim.run()
+}
+
+#[test]
 fn try_ping_pong() -> Result {
     let mut sim = Builder::new().build();
 

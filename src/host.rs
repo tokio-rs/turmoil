@@ -28,7 +28,9 @@ pub(crate) struct Host {
     /// L4 Transmission Control Protocol (TCP).
     pub(crate) tcp: Tcp,
 
-    /// Ports 1024..=65535 for client connections.
+
+    /// Ports 49152..=65535 for client connections.
+    /// https://www.rfc-editor.org/rfc/rfc6335#section-6
     next_ephemeral_port: u16,
 
     /// Host elapsed time.
@@ -44,7 +46,7 @@ impl Host {
             addr,
             udp: Udp::new(),
             tcp: Tcp::new(),
-            next_ephemeral_port: 1024,
+            next_ephemeral_port: 49152,
             elapsed: Duration::ZERO,
             now: None,
         }
@@ -74,7 +76,7 @@ impl Host {
 
             if self.next_ephemeral_port == 65535 {
                 // re-load
-                self.next_ephemeral_port = 1024;
+                self.next_ephemeral_port = 49152;
             } else {
                 // advance
                 self.next_ephemeral_port += 1;
@@ -399,11 +401,11 @@ mod test {
         host.udp.bind((host.addr, 65534).into())?;
         host.udp.bind((host.addr, 65535).into())?;
 
-        for _ in 1024..65534 {
+        for _ in 49152..65534 {
             host.assign_ephemeral_port();
         }
 
-        assert_eq!(1024, host.assign_ephemeral_port());
+        assert_eq!(49152, host.assign_ephemeral_port());
 
         Ok(())
     }
