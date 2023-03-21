@@ -3,8 +3,7 @@ use indexmap::IndexMap;
 use regex::Regex;
 use std::net::{IpAddr, SocketAddr, Ipv4Addr, Ipv6Addr};
 
-/// Each new registered host has an IP in a subnet 192.168.0.0/24.
-/// This is just a choice, can be changed in the future.
+/// Each new host has an IP in the subnet 192.168.0.0/24.
 pub struct Dns {
     next: u16,
     names: IndexMap<String, IpAddr>,
