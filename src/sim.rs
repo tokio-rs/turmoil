@@ -137,6 +137,16 @@ impl<'a> Sim<'a> {
         self.world.borrow_mut().current = None;
     }
 
+    /// Check whether a host has software running.
+    pub fn is_host_running(&mut self, addr: impl ToIpAddr) -> bool {
+        let host = self.world.borrow_mut().lookup(addr);
+
+        self.rts
+            .get(&host)
+            .expect("missing host")
+            .is_software_running()
+    }
+
     /// Lookup an IP address by host name.
     pub fn lookup(&self, addr: impl ToIpAddr) -> IpAddr {
         self.world.borrow_mut().lookup(addr)
@@ -632,6 +642,24 @@ mod test {
         sim.set_link_latency("client2", "server", degraded);
 
         sim.run()
+    }
+
+    #[test]
+    fn is_host_running() -> Result {
+        let mut sim = Builder::new().build();
+
+        sim.client("client", async { future::pending().await });
+        sim.host("host", || async { future::pending().await });
+
+        assert!(!sim.step()?);
+
+        assert!(sim.is_host_running("client"));
+        assert!(sim.is_host_running("host"));
+
+        sim.crash("host");
+        assert!(!sim.is_host_running("host"));
+
+        Ok(())
     }
 
     #[test]
