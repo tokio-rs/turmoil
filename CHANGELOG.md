@@ -1,4 +1,19 @@
-# 0.5.1 (Mar 13, 2023)
+# 0.5.3 (Mar 22, 2023)
+
+### Added
+
+- Expose whether a host has software running ([#108])
+- DNS improvments ([#109])
+
+### Fixed
+
+- Fix AsyncRead impl for TcpStream ([#107])
+
+[#107]: https://github.com/tokio-rs/turmoil/pull/107
+[#108]: https://github.com/tokio-rs/turmoil/pull/108
+[#109]: https://github.com/tokio-rs/turmoil/pull/109
+
+# 0.5.2 (Mar 13, 2023)
 
 ### Added
 
