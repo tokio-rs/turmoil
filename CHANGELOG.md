@@ -3,7 +3,7 @@
 ### Added
 
 - Expose whether a host has software running ([#108])
-- DNS improvments ([#109])
+- DNS improvements ([#109])
 
 ### Fixed
 
