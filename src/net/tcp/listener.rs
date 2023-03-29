@@ -25,8 +25,10 @@ impl TcpListener {
     ///
     /// The returned listener is ready for accepting connections.
     ///
+    /// Binding with a port number of 0 will request that the OS assigns a port
+    /// to this listener. The port allocated can be queried via the `local_addr`
+    /// method.
     /// Only 0.0.0.0 is currently supported.
-    /// When the port is unspecified (0), an ephemeral port number is generated.
     pub async fn bind<A: ToSocketAddrs>(addr: A) -> Result<TcpListener> {
         World::current(|world| {
             let mut addr = addr.to_socket_addr(&world.dns);
