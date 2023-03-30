@@ -96,6 +96,7 @@ impl UdpSocket {
     /// Binding with a port number of 0 will request that the OS assigns a port
     /// to this listener. The port allocated can be queried via the `local_addr`
     /// method.
+    
     /// Only 0.0.0.0 is currently supported.
     pub async fn bind<A: ToSocketAddrs>(addr: A) -> Result<UdpSocket> {
         World::current(|world| {
