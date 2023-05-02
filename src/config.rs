@@ -1,5 +1,8 @@
 use rand_distr::Exp;
-use std::time::{Duration, SystemTime};
+use std::{
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    time::{Duration, SystemTime},
+};
 
 #[derive(Clone)]
 pub(crate) struct Config {
@@ -11,6 +14,70 @@ pub(crate) struct Config {
 
     /// When the simulation starts
     pub(crate) epoch: SystemTime,
+
+    /// What addresses are valid in the simulated network
+    pub(crate) ip_network: IpNetwork,
+}
+
+/// The kinds of networks that can be simulated in turmoil
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum IpNetwork {
+    /// An Ipv4 network with an address space of 192.168.0.0/16
+    #[default]
+    V4,
+    /// An local area Ipv6 network with an address space of fe80::/64
+    V6,
+}
+
+impl IpNetwork {
+    pub(crate) fn iter(&self) -> IpNetworkAddrIter {
+        match self {
+            Self::V4 => IpNetworkAddrIter::V4(1),
+            Self::V6 => IpNetworkAddrIter::V6(1),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum IpNetworkAddrIter {
+    /// the next ip addr without the network prefix, as u32
+    V4(u32),
+    /// the next ip addr without the network prefix, as u128
+    V6(u128),
+}
+
+impl Default for IpNetworkAddrIter {
+    fn default() -> Self {
+        Self::V4(1)
+    }
+}
+
+impl Iterator for IpNetworkAddrIter {
+    type Item = IpAddr;
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::V4(next) => {
+                let host = *next;
+                *next += 1;
+
+                let a = (host >> 8) as u8;
+                let b = (host & 0xFF) as u8;
+
+                Some(IpAddr::V4(Ipv4Addr::new(192, 168, a, b)))
+            }
+            Self::V6(next) => {
+                let host = *next;
+                *next += 1;
+
+                let a = ((host >> 48) & 0xffff) as u16;
+                let b = ((host >> 32) & 0xffff) as u16;
+                let c = ((host >> 16) & 0xffff) as u16;
+                let d = (host & 0xffff) as u16;
+
+                Some(IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, a, b, c, d)))
+            }
+        }
+    }
 }
 
 /// Configures link behavior.
@@ -52,6 +119,7 @@ impl Default for Config {
             duration: Duration::from_secs(10),
             tick: Duration::from_millis(1),
             epoch: SystemTime::now(),
+            ip_network: IpNetwork::V4,
         }
     }
 }

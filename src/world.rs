@@ -1,3 +1,4 @@
+use crate::config::IpNetworkAddrIter;
 use crate::envelope::Protocol;
 use crate::{config, Dns, Host, ToIpAddr, ToIpAddrs, Topology, TRACING_TARGET};
 
@@ -31,11 +32,15 @@ scoped_thread_local!(static CURRENT: RefCell<World>);
 
 impl World {
     /// Initialize a new world.
-    pub(crate) fn new(link: config::Link, rng: Box<dyn RngCore>) -> World {
+    pub(crate) fn new(
+        link: config::Link,
+        rng: Box<dyn RngCore>,
+        addrs: IpNetworkAddrIter,
+    ) -> World {
         World {
             hosts: IndexMap::new(),
             topology: Topology::new(link),
-            dns: Dns::new(),
+            dns: Dns::new(addrs),
             current: None,
             rng,
         }

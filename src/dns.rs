@@ -1,11 +1,13 @@
 use indexmap::IndexMap;
 #[cfg(feature = "regex")]
 use regex::Regex;
-use std::net::{IpAddr, SocketAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+
+use crate::config::IpNetworkAddrIter;
 
 /// Each new host has an IP in the subnet 192.168.0.0/24.
 pub struct Dns {
-    next: u16,
+    addrs: IpNetworkAddrIter,
     names: IndexMap<String, IpAddr>,
 }
 
@@ -28,9 +30,9 @@ pub trait ToSocketAddrs: sealed::Sealed {
 }
 
 impl Dns {
-    pub(crate) fn new() -> Dns {
+    pub(crate) fn new(addrs: IpNetworkAddrIter) -> Dns {
         Dns {
-            next: 1,
+            addrs,
             names: IndexMap::new(),
         }
     }
@@ -61,13 +63,9 @@ impl ToIpAddr for String {
 impl<'a> ToIpAddr for &'a str {
     fn to_ip_addr(&self, dns: &mut Dns) -> IpAddr {
         *dns.names.entry(self.to_string()).or_insert_with(|| {
-            let host = dns.next;
-            dns.next += 1;
-
-            let a = (host >> 8) as u8;
-            let b = (host & 0xFF) as u8;
-
-            std::net::Ipv4Addr::new(192, 168, a, b).into()
+            dns.addrs
+                .next()
+                .expect("Cannot generate any more addresses")
         })
     }
 }
@@ -192,11 +190,11 @@ mod sealed {
 
 #[cfg(test)]
 mod tests {
-    use crate::{dns::Dns, ToSocketAddrs};
+    use crate::{config::IpNetworkAddrIter, dns::Dns, ToSocketAddrs};
 
     #[test]
     fn parse_str() {
-        let mut dns = Dns::new();
+        let mut dns = Dns::new(IpNetworkAddrIter::default());
         let generated_addr = dns.lookup("foo");
 
         let hostname_port = "foo:5000".to_socket_addr(&dns);

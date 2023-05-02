@@ -106,7 +106,11 @@ impl UdpSocket {
             if !addr.ip().is_unspecified() {
                 panic!("{addr} is not supported");
             }
-            
+
+            if addr.is_ipv4() != host.addr.is_ipv4() {
+                panic!("{addr} is not supported (Ipv4/Ipv6 missmatch)")
+            }
+
             // Unspecified -> host's IP
             addr.set_ip(host.addr);
             if addr.port() == 0 {

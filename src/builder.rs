@@ -1,4 +1,4 @@
-use crate::*;
+use crate::{config::IpNetwork, *};
 
 use rand::{RngCore, SeedableRng};
 use std::time::{Duration, SystemTime};
@@ -48,6 +48,12 @@ impl Builder {
         self
     }
 
+    /// Which kind of network should be simulated.
+    pub fn ip_network(&mut self, value: IpNetwork) -> &mut Self {
+        self.config.ip_network = value;
+        self
+    }
+
     /// Set the random number generator used to fuzz
     pub fn rng(&mut self, rng: impl RngCore + 'static) -> &mut Self {
         self.rng = Some(Box::new(rng));
@@ -87,7 +93,7 @@ impl Builder {
     }
 
     pub fn build_with_rng<'a>(&self, rng: Box<dyn RngCore>) -> Sim<'a> {
-        let world = World::new(self.link.clone(), rng);
+        let world = World::new(self.link.clone(), rng, self.config.ip_network.iter());
         Sim::new(self.config.clone(), world)
     }
 }
