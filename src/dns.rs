@@ -62,11 +62,9 @@ impl ToIpAddr for String {
 
 impl<'a> ToIpAddr for &'a str {
     fn to_ip_addr(&self, dns: &mut Dns) -> IpAddr {
-        *dns.names.entry(self.to_string()).or_insert_with(|| {
-            dns.addrs
-                .next()
-                .expect("Cannot generate any more addresses")
-        })
+        *dns.names
+            .entry(self.to_string())
+            .or_insert_with(|| dns.addrs.next())
     }
 }
 

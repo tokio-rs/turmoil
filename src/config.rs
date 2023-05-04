@@ -49,29 +49,28 @@ impl Default for IpNetworkAddrIter {
     }
 }
 
-impl Iterator for IpNetworkAddrIter {
-    type Item = IpAddr;
-    fn next(&mut self) -> Option<Self::Item> {
+impl IpNetworkAddrIter {
+    pub(crate) fn next(&mut self) -> IpAddr {
         match self {
             Self::V4(next) => {
                 let host = *next;
-                *next += 1;
+                *next = next.wrapping_add(1);
 
                 let a = (host >> 8) as u8;
                 let b = (host & 0xFF) as u8;
 
-                Some(IpAddr::V4(Ipv4Addr::new(192, 168, a, b)))
+                IpAddr::V4(Ipv4Addr::new(192, 168, a, b))
             }
             Self::V6(next) => {
                 let host = *next;
-                *next += 1;
+                *next = next.wrapping_add(1);
 
                 let a = ((host >> 48) & 0xffff) as u16;
                 let b = ((host >> 32) & 0xffff) as u16;
                 let c = ((host >> 16) & 0xffff) as u16;
                 let d = (host & 0xffff) as u16;
 
-                Some(IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, a, b, c, d)))
+                IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, a, b, c, d))
             }
         }
     }
