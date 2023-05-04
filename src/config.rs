@@ -14,9 +14,6 @@ pub(crate) struct Config {
 
     /// When the simulation starts
     pub(crate) epoch: SystemTime,
-
-    /// What addresses are valid in the simulated network
-    pub(crate) ip_network: IpNetwork,
 }
 
 /// The kinds of networks that can be simulated in turmoil
@@ -119,7 +116,6 @@ impl Default for Config {
             duration: Duration::from_secs(10),
             tick: Duration::from_millis(1),
             epoch: SystemTime::now(),
-            ip_network: IpNetwork::V4,
         }
     }
 }

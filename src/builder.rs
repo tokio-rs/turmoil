@@ -9,6 +9,8 @@ pub struct Builder {
 
     config: Config,
 
+    network: IpNetwork,
+
     link: config::Link,
 }
 
@@ -23,6 +25,7 @@ impl Builder {
         Self {
             rng: None,
             config: Config::default(),
+            network: IpNetwork::default(),
             link: config::Link {
                 latency: Some(config::Latency::default()),
                 message_loss: Some(config::MessageLoss::default()),
@@ -49,8 +52,8 @@ impl Builder {
     }
 
     /// Which kind of network should be simulated.
-    pub fn ip_network(&mut self, value: IpNetwork) -> &mut Self {
-        self.config.ip_network = value;
+    pub fn network(&mut self, value: IpNetwork) -> &mut Self {
+        self.network = value;
         self
     }
 
@@ -93,7 +96,7 @@ impl Builder {
     }
 
     pub fn build_with_rng<'a>(&self, rng: Box<dyn RngCore>) -> Sim<'a> {
-        let world = World::new(self.link.clone(), rng, self.config.ip_network.iter());
+        let world = World::new(self.link.clone(), rng, self.network.iter());
         Sim::new(self.config.clone(), world)
     }
 }
