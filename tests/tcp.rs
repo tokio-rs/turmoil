@@ -1,6 +1,6 @@
 use std::{
     io,
-    net::{IpAddr, Ipv4Addr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
     rc::Rc,
     time::Duration,
 };
@@ -13,7 +13,7 @@ use tokio::{
 };
 use turmoil::{
     net::{TcpListener, TcpStream},
-    Builder, Result,
+    Builder, IpVersion, Result,
 };
 
 const PORT: u16 = 1738;
@@ -22,12 +22,16 @@ fn assert_error_kind<T>(res: io::Result<T>, kind: io::ErrorKind) {
     assert_eq!(res.err().map(|e| e.kind()), Some(kind));
 }
 
-async fn bind_to(port: u16) -> std::result::Result<TcpListener, std::io::Error> {
+async fn bind_to_v4(port: u16) -> std::result::Result<TcpListener, std::io::Error> {
     TcpListener::bind((IpAddr::from(Ipv4Addr::UNSPECIFIED), port)).await
 }
 
+async fn bind_to_v6(port: u16) -> std::result::Result<TcpListener, std::io::Error> {
+    TcpListener::bind((IpAddr::from(Ipv6Addr::UNSPECIFIED), port)).await
+}
+
 async fn bind() -> std::result::Result<TcpListener, std::io::Error> {
-    bind_to(PORT).await
+    bind_to_v4(PORT).await
 }
 
 #[test]
@@ -69,7 +73,7 @@ fn ephemeral_port() -> Result {
     let mut sim = Builder::new().build();
 
     sim.client("client", async {
-        let sock = bind_to(0).await?;
+        let sock = bind_to_v4(0).await?;
 
         assert_ne!(sock.local_addr()?.port(), 0);
         assert!(sock.local_addr()?.port() >= 49152);
@@ -676,4 +680,50 @@ fn split() -> Result {
     });
 
     sim.run()
+}
+
+// # IpVersion specific tests
+
+#[test]
+fn bind_ipv4_socket() -> Result {
+    let mut sim = Builder::new().ip_version(IpVersion::V4).build();
+    sim.client("client", async move {
+        let sock = bind_to_v4(0).await?;
+        assert!(sock.local_addr().unwrap().is_ipv4());
+        Ok(())
+    });
+    sim.run()
+}
+
+#[test]
+fn bind_ipv6_socket() -> Result {
+    let mut sim = Builder::new().ip_version(IpVersion::V6).build();
+    sim.client("client", async move {
+        let sock = bind_to_v6(0).await?;
+        assert!(sock.local_addr().unwrap().is_ipv6());
+        Ok(())
+    });
+    sim.run()
+}
+
+#[test]
+#[should_panic]
+fn bind_ipv4_version_missmatch() {
+    let mut sim = Builder::new().ip_version(IpVersion::V6).build();
+    sim.client("client", async move {
+        let _sock = bind_to_v4(0).await?;
+        Ok(())
+    });
+    sim.run().unwrap()
+}
+
+#[test]
+#[should_panic]
+fn bind_ipv6_version_missmatch() {
+    let mut sim = Builder::new().ip_version(IpVersion::V4).build();
+    sim.client("client", async move {
+        let _sock = bind_to_v6(0).await?;
+        Ok(())
+    });
+    sim.run().unwrap()
 }

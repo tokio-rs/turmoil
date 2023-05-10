@@ -88,7 +88,6 @@ pub use builder::Builder;
 
 mod config;
 use config::Config;
-pub use config::IpNetwork;
 
 mod dns;
 use dns::Dns;
@@ -104,6 +103,9 @@ pub use error::Result;
 mod host;
 pub use host::elapsed;
 use host::Host;
+
+mod ip;
+pub use ip::IpVersion;
 
 pub mod net;
 

@@ -40,7 +40,7 @@ impl TcpListener {
             }
 
             if addr.is_ipv4() != host.addr.is_ipv4() {
-                panic!("{addr} is not supported (Ipv4/Ipv6 missmatch)")
+                panic!("ip version mismatch: {:?} host: {:?}", addr, host.addr)
             }
 
             // Unspecified -> host's IP

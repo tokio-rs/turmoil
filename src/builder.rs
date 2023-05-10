@@ -1,4 +1,4 @@
-use crate::{config::IpNetwork, *};
+use crate::*;
 
 use rand::{RngCore, SeedableRng};
 use std::time::{Duration, SystemTime};
@@ -9,7 +9,7 @@ pub struct Builder {
 
     config: Config,
 
-    network: IpNetwork,
+    ip_version: IpVersion,
 
     link: config::Link,
 }
@@ -25,7 +25,7 @@ impl Builder {
         Self {
             rng: None,
             config: Config::default(),
-            network: IpNetwork::default(),
+            ip_version: IpVersion::default(),
             link: config::Link {
                 latency: Some(config::Latency::default()),
                 message_loss: Some(config::MessageLoss::default()),
@@ -52,8 +52,8 @@ impl Builder {
     }
 
     /// Which kind of network should be simulated.
-    pub fn network(&mut self, value: IpNetwork) -> &mut Self {
-        self.network = value;
+    pub fn ip_version(&mut self, value: IpVersion) -> &mut Self {
+        self.ip_version = value;
         self
     }
 
@@ -96,7 +96,7 @@ impl Builder {
     }
 
     pub fn build_with_rng<'a>(&self, rng: Box<dyn RngCore>) -> Sim<'a> {
-        let world = World::new(self.link.clone(), rng, self.network.iter());
+        let world = World::new(self.link.clone(), rng, self.ip_version.iter());
         Sim::new(self.config.clone(), world)
     }
 }

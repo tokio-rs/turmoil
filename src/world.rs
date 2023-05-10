@@ -1,5 +1,5 @@
-use crate::config::IpNetworkAddrIter;
 use crate::envelope::Protocol;
+use crate::ip::IpVersionAddrIter;
 use crate::{config, Dns, Host, ToIpAddr, ToIpAddrs, Topology, TRACING_TARGET};
 
 use indexmap::IndexMap;
@@ -35,7 +35,7 @@ impl World {
     pub(crate) fn new(
         link: config::Link,
         rng: Box<dyn RngCore>,
-        addrs: IpNetworkAddrIter,
+        addrs: IpVersionAddrIter,
     ) -> World {
         World {
             hosts: IndexMap::new(),
