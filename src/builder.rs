@@ -9,6 +9,8 @@ pub struct Builder {
 
     config: Config,
 
+    ip_version: IpVersion,
+
     link: config::Link,
 }
 
@@ -23,6 +25,7 @@ impl Builder {
         Self {
             rng: None,
             config: Config::default(),
+            ip_version: IpVersion::default(),
             link: config::Link {
                 latency: Some(config::Latency::default()),
                 message_loss: Some(config::MessageLoss::default()),
@@ -45,6 +48,12 @@ impl Builder {
     /// How much simulated time should elapse each tick.
     pub fn tick_duration(&mut self, value: Duration) -> &mut Self {
         self.config.tick = value;
+        self
+    }
+
+    /// Which kind of network should be simulated.
+    pub fn ip_version(&mut self, value: IpVersion) -> &mut Self {
+        self.ip_version = value;
         self
     }
 
@@ -87,7 +96,7 @@ impl Builder {
     }
 
     pub fn build_with_rng<'a>(&self, rng: Box<dyn RngCore>) -> Sim<'a> {
-        let world = World::new(self.link.clone(), rng);
+        let world = World::new(self.link.clone(), rng, self.ip_version.iter());
         Sim::new(self.config.clone(), world)
     }
 }

@@ -1,11 +1,17 @@
 use indexmap::IndexMap;
 #[cfg(feature = "regex")]
 use regex::Regex;
-use std::net::{IpAddr, SocketAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
-/// Each new host has an IP in the subnet 192.168.0.0/24.
+use crate::ip::IpVersionAddrIter;
+
+/// Each new host has an IP in the subnet defined by the
+/// ip version of the simulation.
+///
+/// Ipv4 simulations use the subnet 192.168.0.0/16.
+/// Ipv6 simulations use the link local subnet fe80:::/64
 pub struct Dns {
-    next: u16,
+    addrs: IpVersionAddrIter,
     names: IndexMap<String, IpAddr>,
 }
 
@@ -28,9 +34,9 @@ pub trait ToSocketAddrs: sealed::Sealed {
 }
 
 impl Dns {
-    pub(crate) fn new() -> Dns {
+    pub(crate) fn new(addrs: IpVersionAddrIter) -> Dns {
         Dns {
-            next: 1,
+            addrs,
             names: IndexMap::new(),
         }
     }
@@ -60,15 +66,9 @@ impl ToIpAddr for String {
 
 impl<'a> ToIpAddr for &'a str {
     fn to_ip_addr(&self, dns: &mut Dns) -> IpAddr {
-        *dns.names.entry(self.to_string()).or_insert_with(|| {
-            let host = dns.next;
-            dns.next += 1;
-
-            let a = (host >> 8) as u8;
-            let b = (host & 0xFF) as u8;
-
-            std::net::Ipv4Addr::new(192, 168, a, b).into()
-        })
+        *dns.names
+            .entry(self.to_string())
+            .or_insert_with(|| dns.addrs.next())
     }
 }
 
@@ -192,11 +192,11 @@ mod sealed {
 
 #[cfg(test)]
 mod tests {
-    use crate::{dns::Dns, ToSocketAddrs};
+    use crate::{dns::Dns, ip::IpVersionAddrIter, ToSocketAddrs};
 
     #[test]
     fn parse_str() {
-        let mut dns = Dns::new();
+        let mut dns = Dns::new(IpVersionAddrIter::default());
         let generated_addr = dns.lookup("foo");
 
         let hostname_port = "foo:5000".to_socket_addr(&dns);

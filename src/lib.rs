@@ -104,6 +104,9 @@ mod host;
 pub use host::elapsed;
 use host::Host;
 
+mod ip;
+pub use ip::IpVersion;
+
 pub mod net;
 
 mod rt;
