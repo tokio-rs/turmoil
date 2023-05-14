@@ -6,7 +6,11 @@ use std::{
     time::Duration,
 };
 use tokio::time::timeout;
-use turmoil::{lookup, net, Builder, IpVersion, Result};
+use turmoil::{
+    lookup,
+    net::{self, UdpSocket},
+    Builder, IpVersion, Result,
+};
 
 const PORT: u16 = 1738;
 
@@ -388,4 +392,22 @@ fn bind_ipv6_version_missmatch() {
         Ok(())
     });
     sim.run().unwrap()
+}
+
+#[test]
+fn ipv6_connectivity() -> Result {
+    let mut sim = Builder::new().ip_version(IpVersion::V6).build();
+    sim.client("client", async move {
+        let sock = UdpSocket::bind(":::0").await.unwrap();
+        sock.send_to(&[1], "server:80").await.unwrap();
+        let _ = sock;
+        Ok(())
+    });
+    sim.client("server", async move {
+        let sock = UdpSocket::bind(":::80").await.unwrap();
+        let mut buf = [0; 512];
+        let _stream = sock.recv_from(&mut buf).await.unwrap();
+        Ok(())
+    });
+    sim.run()
 }

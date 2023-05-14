@@ -19,7 +19,7 @@ impl IpVersion {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug)]
 pub(crate) enum IpVersionAddrIter {
     /// the next ip addr without the network prefix, as u32
     V4(u32),
