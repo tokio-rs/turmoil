@@ -29,7 +29,7 @@ impl TcpListener {
     /// to this listener. The port allocated can be queried via the `local_addr`
     /// method.
     ///
-    /// Only 0.0.0.0 is currently supported.
+    /// Only `0.0.0.0` or `::` are currently supported.
     pub async fn bind<A: ToSocketAddrs>(addr: A) -> Result<TcpListener> {
         World::current(|world| {
             let mut addr = addr.to_socket_addr(&world.dns);
