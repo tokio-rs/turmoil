@@ -5,16 +5,18 @@ use std::{
     pin::Pin,
     sync::Arc,
     task::{ready, Context, Poll},
+    time::Duration,
 };
 
 use bytes::{Buf, Bytes};
 use tokio::{
     io::{AsyncRead, AsyncWrite, ReadBuf},
     sync::{mpsc, oneshot},
+    time::sleep,
 };
 
 use crate::{
-    envelope::{Protocol, Segment, Syn},
+    envelope::{Envelope, Protocol, Segment, Syn},
     host::SequencedSegment,
     net::SocketPair,
     world::World,
@@ -61,14 +63,22 @@ impl TcpStream {
 
         let (pair, rx) = World::current(|world| {
             let dst = addr.to_socket_addr(&world.dns);
-            let syn = Segment::Syn(Syn { ack });
 
             let host = world.current_host_mut();
-            let local_addr = (host.addr, host.assign_ephemeral_port()).into();
+            let mut local_addr = SocketAddr::new(host.addr, host.assign_ephemeral_port());
+            if dst.ip().is_loopback() {
+                local_addr.set_ip(dst.ip());
+            }
 
             let pair = SocketPair::new(local_addr, dst);
             let rx = host.tcp.new_stream(pair);
-            world.send_message(local_addr, dst, Protocol::Tcp(syn));
+
+            let syn = Protocol::Tcp(Segment::Syn(Syn { ack }));
+            if !dst.ip().is_loopback() {
+                world.send_message(local_addr, dst, syn);
+            } else {
+                send_loopback(local_addr, dst, syn);
+            };
 
             (pair, rx)
         });
@@ -259,8 +269,24 @@ impl WriteHalf {
     }
 
     fn send(&self, world: &mut World, segment: Segment) {
-        world.send_message(self.pair.local, self.pair.remote, Protocol::Tcp(segment));
+        let message = Protocol::Tcp(segment);
+        if self.pair.remote.ip().is_loopback() {
+            send_loopback(self.pair.local, self.pair.remote, message);
+        } else {
+            world.send_message(self.pair.local, self.pair.remote, message);
+        }
     }
+}
+
+fn send_loopback(src: SocketAddr, dst: SocketAddr, message: Protocol) {
+    tokio::spawn(async move {
+        sleep(Duration::from_micros(1)).await;
+        World::current(|world| {
+            let _ = world
+                .current_host_mut()
+                .receive_from_network(Envelope { src, dst, message });
+        })
+    });
 }
 
 impl Debug for WriteHalf {

@@ -29,13 +29,13 @@ impl TcpListener {
     /// to this listener. The port allocated can be queried via the `local_addr`
     /// method.
     ///
-    /// Only `0.0.0.0` or `::` are currently supported.
+    /// Only `0.0.0.0`, `::`, or localhost are currently supported.
     pub async fn bind<A: ToSocketAddrs>(addr: A) -> Result<TcpListener> {
         World::current(|world| {
             let mut addr = addr.to_socket_addr(&world.dns);
             let host = world.current_host_mut();
 
-            if !addr.ip().is_unspecified() {
+            if !addr.ip().is_unspecified() && !addr.ip().is_loopback() {
                 panic!("{addr} is not supported");
             }
 
@@ -43,8 +43,6 @@ impl TcpListener {
                 panic!("ip version mismatch: {:?} host: {:?}", addr, host.addr)
             }
 
-            // Unspecified -> host's IP
-            addr.set_ip(host.addr);
             if addr.port() == 0 {
                 addr.set_port(host.assign_ephemeral_port());
             }
@@ -75,7 +73,15 @@ impl TcpListener {
                     return None;
                 }
 
-                let pair = SocketPair::new(self.local_addr, origin);
+                let mut my_addr = self.local_addr;
+                if origin.ip().is_loopback() {
+                    my_addr.set_ip(origin.ip());
+                }
+                if my_addr.ip().is_unspecified() {
+                    my_addr.set_ip(host.addr);
+                }
+
+                let pair = SocketPair::new(my_addr, origin);
                 let rx = host.tcp.new_stream(pair);
 
                 Some((TcpStream::new(pair, rx), origin))

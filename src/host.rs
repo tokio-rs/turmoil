@@ -126,10 +126,15 @@ pub fn elapsed() -> Duration {
 /// Simulated UDP host software.
 pub(crate) struct Udp {
     /// Bound udp sockets
-    binds: IndexMap<SocketAddr, mpsc::Sender<(Datagram, SocketAddr)>>,
+    binds: IndexMap<u16, UdpBind>,
 
     /// UdpSocket channel capacity
     capacity: usize,
+}
+
+struct UdpBind {
+    bind_addr: SocketAddr,
+    queue: mpsc::Sender<(Datagram, SocketAddr)>,
 }
 
 impl Udp {
@@ -142,17 +147,21 @@ impl Udp {
     }
 
     fn is_port_assigned(&self, port: u16) -> bool {
-        self.binds.keys().any(|a| a.port() == port)
+        self.binds.keys().any(|p| *p == port)
     }
 
     pub(crate) fn bind(&mut self, addr: SocketAddr) -> io::Result<UdpSocket> {
         let (tx, rx) = mpsc::channel(self.capacity);
+        let bind = UdpBind {
+            bind_addr: addr,
+            queue: tx,
+        };
 
-        match self.binds.entry(addr) {
+        match self.binds.entry(addr.port()) {
             indexmap::map::Entry::Occupied(_) => {
                 return Err(io::Error::new(io::ErrorKind::AddrInUse, addr.to_string()));
             }
-            indexmap::map::Entry::Vacant(entry) => entry.insert(tx),
+            indexmap::map::Entry::Vacant(entry) => entry.insert(bind),
         };
 
         tracing::info!(target: TRACING_TARGET, ?addr, protocol = %"UDP", "Bind");
@@ -161,8 +170,12 @@ impl Udp {
     }
 
     fn receive_from_network(&mut self, src: SocketAddr, dst: SocketAddr, datagram: Datagram) {
-        if let Some(s) = self.binds.get_mut(&dst) {
-            if let Err(err) = s.try_send((datagram, src)) {
+        if let Some(bind) = self.binds.get_mut(&dst.port()) {
+            if !matches(bind.bind_addr, dst) {
+                tracing::trace!(target: TRACING_TARGET, ?dst, ?src, protocol = %Protocol::Udp(datagram), "Dropped (Addr not bound)");
+                return;
+            }
+            if let Err(err) = bind.queue.try_send((datagram, src)) {
                 // drop any packets that exceed the capacity
                 // TODO: ideally we should drop the oldest packets instead of new ones, but this would
                 //       require a different channel implementation.
@@ -179,7 +192,7 @@ impl Udp {
     }
 
     pub(crate) fn unbind(&mut self, addr: SocketAddr) {
-        let exists = self.binds.remove(&addr);
+        let exists = self.binds.remove(&addr.port());
 
         assert!(exists.is_some(), "unknown bind {addr}");
 
@@ -189,7 +202,7 @@ impl Udp {
 
 pub(crate) struct Tcp {
     /// Bound server sockets
-    binds: IndexMap<SocketAddr, ServerSocket>,
+    binds: IndexMap<u16, ServerSocket>,
 
     /// TcpListener channel capacity
     server_socket_capacity: usize,
@@ -202,6 +215,8 @@ pub(crate) struct Tcp {
 }
 
 struct ServerSocket {
+    bind_addr: SocketAddr,
+
     /// Notify the TcpListener when SYNs are delivered
     notify: Arc<Notify>,
 
@@ -293,18 +308,18 @@ impl Tcp {
     }
 
     fn is_port_assigned(&self, port: u16) -> bool {
-        self.binds.keys().any(|a| a.port() == port)
-            || self.sockets.keys().any(|a| a.local.port() == port)
+        self.binds.keys().any(|p| *p == port) || self.sockets.keys().any(|a| a.local.port() == port)
     }
 
     pub(crate) fn bind(&mut self, addr: SocketAddr) -> io::Result<TcpListener> {
         let notify = Arc::new(Notify::new());
         let sock = ServerSocket {
+            bind_addr: addr,
             notify: notify.clone(),
             deque: VecDeque::new(),
         };
 
-        match self.binds.entry(addr) {
+        match self.binds.entry(addr.port()) {
             indexmap::map::Entry::Occupied(_) => {
                 return Err(io::Error::new(io::ErrorKind::AddrInUse, addr.to_string()));
             }
@@ -327,7 +342,7 @@ impl Tcp {
     }
 
     pub(crate) fn accept(&mut self, addr: SocketAddr) -> Option<(Syn, SocketAddr)> {
-        self.binds[&addr].deque.pop_front()
+        self.binds[&addr.port()].deque.pop_front()
     }
 
     // Ideally, we could "write through" the tcp software, but this is necessary
@@ -347,13 +362,15 @@ impl Tcp {
             Segment::Syn(syn) => {
                 // If bound, queue the syn; else we drop the syn triggering
                 // connection refused on the client.
-                if let Some(b) = self.binds.get_mut(&dst) {
+                if let Some(b) = self.binds.get_mut(&dst.port()) {
                     if b.deque.len() == self.server_socket_capacity {
                         todo!("{} server socket buffer full", dst);
                     }
 
-                    b.deque.push_back((syn, src));
-                    b.notify.notify_one();
+                    if matches(b.bind_addr, dst) {
+                        b.deque.push_back((syn, src));
+                        b.notify.notify_one();
+                    }
                 }
             }
             Segment::Data(seq, data) => match self.sockets.get_mut(&SocketPair::new(dst, src)) {
@@ -387,12 +404,21 @@ impl Tcp {
     }
 
     pub(crate) fn unbind(&mut self, addr: SocketAddr) {
-        let exists = self.binds.remove(&addr);
+        let exists = self.binds.remove(&addr.port());
 
         assert!(exists.is_some(), "unknown bind {addr}");
 
         tracing::info!(target: TRACING_TARGET, ?addr, protocol = %"TCP", "Unbind");
     }
+}
+
+/// Returns whether the given bind addr can accept a packet routed to the given dst
+pub fn matches(bind: SocketAddr, dst: SocketAddr) -> bool {
+    if bind.ip().is_unspecified() && bind.port() == dst.port() {
+        return true;
+    }
+
+    bind == dst
 }
 
 #[cfg(test)]
