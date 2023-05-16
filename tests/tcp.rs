@@ -731,15 +731,16 @@ fn bind_ipv6_version_missmatch() {
 #[test]
 fn ipv6_connectivity() -> Result {
     let mut sim = Builder::new().ip_version(IpVersion::V6).build();
-    sim.client("client", async move {
-        let stream = TcpStream::connect("server:80").await.unwrap();
-        let _ = stream;
-        Ok(())
-    });
     sim.client("server", async move {
         let list = TcpListener::bind(("::", 80)).await.unwrap();
         let _stream = list.accept().await.unwrap();
         Ok(())
     });
+    sim.client("client", async move {
+        let stream = TcpStream::connect("server:80").await.unwrap();
+        let _ = stream;
+        Ok(())
+    });
+
     sim.run()
 }

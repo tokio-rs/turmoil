@@ -397,17 +397,18 @@ fn bind_ipv6_version_missmatch() {
 #[test]
 fn ipv6_connectivity() -> Result {
     let mut sim = Builder::new().ip_version(IpVersion::V6).build();
-    sim.client("client", async move {
-        let sock = UdpSocket::bind(":::0").await.unwrap();
-        sock.send_to(&[1], "server:80").await.unwrap();
-        let _ = sock;
-        Ok(())
-    });
     sim.client("server", async move {
         let sock = UdpSocket::bind(":::80").await.unwrap();
         let mut buf = [0; 512];
         let _stream = sock.recv_from(&mut buf).await.unwrap();
         Ok(())
     });
+    sim.client("client", async move {
+        let sock = UdpSocket::bind(":::0").await.unwrap();
+        sock.send_to(&[1], "server:80").await.unwrap();
+        let _ = sock;
+        Ok(())
+    });
+
     sim.run()
 }
