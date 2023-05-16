@@ -300,9 +300,10 @@ fn send_loopback(src: SocketAddr, dst: SocketAddr, message: Protocol) {
     tokio::spawn(async move {
         sleep(Duration::from_micros(1)).await;
         World::current(|world| {
-            let _ = world
+            world
                 .current_host_mut()
-                .receive_from_network(Envelope { src, dst, message });
+                .receive_from_network(Envelope { src, dst, message })
+                .expect("UDP does not get feedback on delivery errors");
         })
     });
 }

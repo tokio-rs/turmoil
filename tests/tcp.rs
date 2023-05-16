@@ -1,5 +1,10 @@
 use std::{
+<<<<<<< HEAD
     assert_eq, assert_ne, io,
+=======
+    assert_eq, assert_ne,
+    io::{self},
+>>>>>>> c7e07f2 (Add support for loopback)
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     rc::Rc,
     time::Duration,
@@ -881,5 +886,37 @@ fn localhost_ping_pong() -> Result {
 
         Ok(())
     });
+    sim.run()
+}
+
+#[test]
+fn remote_dropped() -> Result {
+    let mut sim = Builder::new().build();
+
+    sim.client("client", async move {
+        let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 1234)).await?;
+        let _: JoinHandle<io::Result<()>> = tokio::spawn(async move {
+            loop {
+                let (_, _) = listener.accept().await?;
+            }
+        });
+
+        let mut socket = TcpStream::connect((Ipv4Addr::LOCALHOST, 1234)).await?;
+
+        let mut buf = [0; 8];
+        assert!(matches!(socket.read(&mut buf).await, Ok(0)));
+
+        loop {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+
+            if let Err(e) = socket.write_u8(1).await {
+                assert_eq!(io::ErrorKind::BrokenPipe, e.kind());
+                break;
+            }
+        }
+
+        Ok(())
+    });
+
     sim.run()
 }
