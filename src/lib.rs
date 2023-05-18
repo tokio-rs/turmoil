@@ -129,7 +129,10 @@ const TRACING_TARGET: &str = "turmoil";
 pub(crate) fn for_pairs(a: &Vec<IpAddr>, b: &Vec<IpAddr>, mut f: impl FnMut(IpAddr, IpAddr)) {
     for first in a {
         for second in b {
-            f(*first, *second)
+            // skip for the host
+            if first != second {
+                f(*first, *second)
+            }
         }
     }
 }

@@ -687,4 +687,37 @@ mod test {
 
         Ok(())
     }
+
+    #[test]
+    #[cfg(feature = "regex")]
+    fn hold_all() -> Result {
+        let mut sim = Builder::new().build();
+
+        sim.host("host", || async {
+            let l = TcpListener::bind("0.0.0.0:1234").await?;
+
+            loop {
+                _ = l.accept().await?;
+            }
+        });
+
+        sim.client("test", async {
+            hold(regex::Regex::new(r".*")?, regex::Regex::new(r".*")?);
+
+            assert!(tokio::time::timeout(
+                Duration::from_millis(100),
+                TcpStream::connect("host:1234")
+            )
+            .await
+            .is_err());
+
+            crate::release(regex::Regex::new(r".*")?, regex::Regex::new(r".*")?);
+
+            assert!(TcpStream::connect("host:1234").await.is_ok());
+
+            Ok(())
+        });
+
+        sim.run()
+    }
 }
