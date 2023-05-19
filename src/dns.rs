@@ -66,8 +66,7 @@ impl ToIpAddr for String {
 
 impl<'a> ToIpAddr for &'a str {
     fn to_ip_addr(&self, dns: &mut Dns) -> IpAddr {
-        let ipaddr: Result<IpAddr, _> = self.parse();
-        if let Ok(ipaddr) = ipaddr {
+        if let Ok(ipaddr) = self.parse() {
             return ipaddr;
         }
 
@@ -243,18 +242,17 @@ mod tests {
 
     #[test]
     fn raw_value_parsing() {
+        // lookups of raw ip addrs should be consistent
+        // between to_ip_addr() and to_socket_addr()
+        // for &str and IpAddr
         let mut dns = Dns::new(IpVersionAddrIter::default());
         let addr = dns.lookup(Ipv4Addr::new(192, 168, 2, 2));
         assert_eq!(addr, Ipv4Addr::new(192, 168, 2, 2));
 
-        // This should be consistent
         let addr = dns.lookup("192.168.3.3");
         assert_eq!(addr, Ipv4Addr::new(192, 168, 3, 3));
 
-        // with this
         let addr = "192.168.3.3:0".to_socket_addr(&dns);
         assert_eq!(addr.ip(), Ipv4Addr::new(192, 168, 3, 3));
-
-        // but was not before
     }
 }
