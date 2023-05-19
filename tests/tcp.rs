@@ -8,7 +8,7 @@ use std::{
 use std::future;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    sync::Notify,
+    sync::{oneshot, Notify},
     time::timeout,
 };
 use turmoil::{
@@ -739,6 +739,30 @@ fn ipv6_connectivity() -> Result {
     sim.client("client", async move {
         let stream = TcpStream::connect("server:80").await.unwrap();
         let _ = stream;
+        Ok(())
+    });
+
+    sim.run()
+}
+
+#[test]
+fn bind_addr_in_use() -> Result {
+    let mut sim = Builder::new().build();
+
+    let (release, wait) = oneshot::channel();
+    sim.client("server", async move {
+        let listener = TcpListener::bind(("0.0.0.0", 80)).await?;
+        let result = TcpListener::bind(("0.0.0.0", 80)).await;
+        assert_error_kind(result, io::ErrorKind::AddrInUse);
+
+        release.send(()).expect("Receiver closed");
+        listener.accept().await?;
+
+        Ok(())
+    });
+    sim.client("client", async move {
+        wait.await.expect("Sender dropped");
+        TcpStream::connect("server:80").await?;
         Ok(())
     });
 

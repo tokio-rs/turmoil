@@ -1,11 +1,12 @@
 use std::{
+    io::{self, ErrorKind},
     matches,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     rc::Rc,
     sync::{atomic::AtomicUsize, atomic::Ordering},
     time::Duration,
 };
-use tokio::time::timeout;
+use tokio::{sync::oneshot, time::timeout};
 use turmoil::{
     lookup,
     net::{self, UdpSocket},
@@ -13,6 +14,10 @@ use turmoil::{
 };
 
 const PORT: u16 = 1738;
+
+fn assert_error_kind<T>(res: io::Result<T>, kind: io::ErrorKind) {
+    assert_eq!(res.err().map(|e| e.kind()), Some(kind));
+}
 
 async fn bind() -> std::result::Result<net::UdpSocket, std::io::Error> {
     bind_to_v4(PORT).await
@@ -407,6 +412,31 @@ fn ipv6_connectivity() -> Result {
         let sock = UdpSocket::bind(":::0").await.unwrap();
         sock.send_to(&[1], "server:80").await.unwrap();
         let _ = sock;
+        Ok(())
+    });
+
+    sim.run()
+}
+
+#[test]
+fn bind_addr_in_use() -> Result {
+    let mut sim = Builder::new().build();
+
+    let (release, wait) = oneshot::channel();
+    sim.client("server", async move {
+        let listener = UdpSocket::bind(("0.0.0.0", 80)).await?;
+        let result = UdpSocket::bind(("0.0.0.0", 80)).await;
+        assert_error_kind(result, ErrorKind::AddrInUse);
+
+        release.send(()).expect("Receiver closed");
+        listener.recv_from(&mut [0]).await?;
+
+        Ok(())
+    });
+    sim.client("client", async move {
+        wait.await.expect("Sender dropped");
+        let socket = UdpSocket::bind(("0.0.0.0", 0)).await?;
+        socket.send_to(&[0], ("server", 80)).await?;
         Ok(())
     });
 

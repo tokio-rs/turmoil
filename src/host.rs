@@ -28,7 +28,6 @@ pub(crate) struct Host {
     /// L4 Transmission Control Protocol (TCP).
     pub(crate) tcp: Tcp,
 
-
     /// Ports 49152..=65535 for client connections.
     /// https://www.rfc-editor.org/rfc/rfc6335#section-6
     next_ephemeral_port: u16,
@@ -149,9 +148,12 @@ impl Udp {
     pub(crate) fn bind(&mut self, addr: SocketAddr) -> io::Result<UdpSocket> {
         let (tx, rx) = mpsc::channel(self.capacity);
 
-        if self.binds.insert(addr, tx).is_some() {
-            return Err(io::Error::new(io::ErrorKind::AddrInUse, addr.to_string()));
-        }
+        match self.binds.entry(addr) {
+            indexmap::map::Entry::Occupied(_) => {
+                return Err(io::Error::new(io::ErrorKind::AddrInUse, addr.to_string()));
+            }
+            indexmap::map::Entry::Vacant(entry) => entry.insert(tx),
+        };
 
         tracing::info!(target: TRACING_TARGET, ?addr, protocol = %"UDP", "Bind");
 
@@ -302,9 +304,12 @@ impl Tcp {
             deque: VecDeque::new(),
         };
 
-        if self.binds.insert(addr, sock).is_some() {
-            return Err(io::Error::new(io::ErrorKind::AddrInUse, addr.to_string()));
-        }
+        match self.binds.entry(addr) {
+            indexmap::map::Entry::Occupied(_) => {
+                return Err(io::Error::new(io::ErrorKind::AddrInUse, addr.to_string()));
+            }
+            indexmap::map::Entry::Vacant(entry) => entry.insert(sock),
+        };
 
         tracing::info!(target: TRACING_TARGET, ?addr, protocol = %"TCP", "Bind");
 
