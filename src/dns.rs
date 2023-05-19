@@ -1,7 +1,7 @@
 use indexmap::IndexMap;
 #[cfg(feature = "regex")]
 use regex::Regex;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
 use crate::ip::IpVersionAddrIter;
 
@@ -66,6 +66,10 @@ impl ToIpAddr for String {
 
 impl<'a> ToIpAddr for &'a str {
     fn to_ip_addr(&self, dns: &mut Dns) -> IpAddr {
+        if let Ok(ipaddr) = self.parse() {
+            return ipaddr;
+        }
+
         *dns.names
             .entry(self.to_string())
             .or_insert_with(|| dns.addrs.next())
@@ -75,6 +79,18 @@ impl<'a> ToIpAddr for &'a str {
 impl ToIpAddr for IpAddr {
     fn to_ip_addr(&self, _: &mut Dns) -> IpAddr {
         *self
+    }
+}
+
+impl ToIpAddr for Ipv4Addr {
+    fn to_ip_addr(&self, _: &mut Dns) -> IpAddr {
+        IpAddr::V4(*self)
+    }
+}
+
+impl ToIpAddr for Ipv6Addr {
+    fn to_ip_addr(&self, _: &mut Dns) -> IpAddr {
+        IpAddr::V6(*self)
     }
 }
 
@@ -123,6 +139,18 @@ impl<'a> ToSocketAddrs for (&'a str, u16) {
 impl ToSocketAddrs for SocketAddr {
     fn to_socket_addr(&self, _: &Dns) -> SocketAddr {
         *self
+    }
+}
+
+impl ToSocketAddrs for SocketAddrV4 {
+    fn to_socket_addr(&self, _: &Dns) -> SocketAddr {
+        SocketAddr::V4(*self)
+    }
+}
+
+impl ToSocketAddrs for SocketAddrV6 {
+    fn to_socket_addr(&self, _: &Dns) -> SocketAddr {
+        SocketAddr::V6(*self)
     }
 }
 
@@ -193,6 +221,7 @@ mod sealed {
 #[cfg(test)]
 mod tests {
     use crate::{dns::Dns, ip::IpVersionAddrIter, ToSocketAddrs};
+    use std::net::Ipv4Addr;
 
     #[test]
     fn parse_str() {
@@ -209,5 +238,21 @@ mod tests {
         );
         assert_eq!(ipv4_port.to_socket_addr(&dns), ipv4_port.parse().unwrap());
         assert_eq!(ipv6_port.to_socket_addr(&dns), ipv6_port.parse().unwrap());
+    }
+
+    #[test]
+    fn raw_value_parsing() {
+        // lookups of raw ip addrs should be consistent
+        // between to_ip_addr() and to_socket_addr()
+        // for &str and IpAddr
+        let mut dns = Dns::new(IpVersionAddrIter::default());
+        let addr = dns.lookup(Ipv4Addr::new(192, 168, 2, 2));
+        assert_eq!(addr, Ipv4Addr::new(192, 168, 2, 2));
+
+        let addr = dns.lookup("192.168.3.3");
+        assert_eq!(addr, Ipv4Addr::new(192, 168, 3, 3));
+
+        let addr = "192.168.3.3:0".to_socket_addr(&dns);
+        assert_eq!(addr.ip(), Ipv4Addr::new(192, 168, 3, 3));
     }
 }
