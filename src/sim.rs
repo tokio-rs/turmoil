@@ -70,7 +70,7 @@ impl<'a> Sim<'a> {
             let world = RefCell::get_mut(&mut self.world);
 
             // Register host state with the world
-            world.register(addr);
+            world.register(addr, &self.config);
         }
 
         let rt = World::enter(&self.world, || Rt::client(client));
@@ -95,7 +95,7 @@ impl<'a> Sim<'a> {
             let world = RefCell::get_mut(&mut self.world);
 
             // Register host state with the world
-            world.register(addr);
+            world.register(addr, &self.config);
         }
 
         let rt = World::enter(&self.world, || Rt::host(host));

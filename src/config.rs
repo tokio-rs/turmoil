@@ -11,6 +11,12 @@ pub(crate) struct Config {
 
     /// When the simulation starts
     pub(crate) epoch: SystemTime,
+
+    /// Max size of the tcp receive buffer
+    pub(crate) tcp_capacity: usize,
+
+    /// Max size of the udp receive buffer
+    pub(crate) udp_capacity: usize,
 }
 
 /// Configures link behavior.
@@ -52,6 +58,8 @@ impl Default for Config {
             duration: Duration::from_secs(10),
             tick: Duration::from_millis(1),
             epoch: SystemTime::now(),
+            tcp_capacity: 64,
+            udp_capacity: 64,
         }
     }
 }

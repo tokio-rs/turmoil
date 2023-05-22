@@ -910,3 +910,33 @@ fn remote_dropped() -> Result {
 
     sim.run()
 }
+
+#[test]
+#[should_panic(expected = "192.168.0.1:80 server socket buffer full")]
+fn socket_capacity() {
+    let mut sim = Builder::new()
+        .min_message_latency(Duration::from_millis(1))
+        .max_message_latency(Duration::from_millis(1))
+        .tcp_capacity(1)
+        .build();
+
+    sim.host("server", || async {
+        let l = TcpListener::bind(("0.0.0.0", 80)).await?;
+
+        loop {
+            _ = l.accept().await?;
+        }
+    });
+
+    sim.client("client1", async move {
+        _ = TcpStream::connect("server:80").await?;
+        Ok(())
+    });
+
+    sim.client("client2", async move {
+        _ = TcpStream::connect("server:80").await?;
+        Ok(())
+    });
+
+    _ = sim.run();
+}

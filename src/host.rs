@@ -40,11 +40,11 @@ pub(crate) struct Host {
 }
 
 impl Host {
-    pub(crate) fn new(addr: IpAddr) -> Host {
+    pub(crate) fn new(addr: IpAddr, tcp_capacity: usize, udp_capacity: usize) -> Host {
         Host {
             addr,
-            udp: Udp::new(),
-            tcp: Tcp::new(),
+            udp: Udp::new(udp_capacity),
+            tcp: Tcp::new(tcp_capacity),
             next_ephemeral_port: 49152,
             elapsed: Duration::ZERO,
             now: None,
@@ -138,11 +138,10 @@ struct UdpBind {
 }
 
 impl Udp {
-    fn new() -> Self {
+    fn new(capacity: usize) -> Self {
         Self {
             binds: IndexMap::new(),
-            // TODO: Make capacity configurable
-            capacity: 64,
+            capacity,
         }
     }
 
@@ -288,7 +287,7 @@ impl StreamSocket {
             let segment = self.buf.remove(&self.recv_seq).unwrap();
             self.sender.try_send(segment).map_err(|e| match e {
                 Closed(_) => Protocol::Tcp(Segment::Rst),
-                _ => todo!("{} socket buffer full", self.local_addr),
+                _ => panic!("{} socket buffer full", self.local_addr),
             })?;
         }
 
@@ -297,13 +296,12 @@ impl StreamSocket {
 }
 
 impl Tcp {
-    fn new() -> Self {
+    fn new(capacity: usize) -> Self {
         Self {
             binds: IndexMap::new(),
             sockets: IndexMap::new(),
-            // TODO: Make capacity configurable
-            server_socket_capacity: 64,
-            socket_capacity: 64,
+            server_socket_capacity: capacity,
+            socket_capacity: capacity,
         }
     }
 
@@ -364,7 +362,7 @@ impl Tcp {
                 // connection refused on the client.
                 if let Some(b) = self.binds.get_mut(&dst.port()) {
                     if b.deque.len() == self.server_socket_capacity {
-                        todo!("{} server socket buffer full", dst);
+                        panic!("{} server socket buffer full", dst);
                     }
 
                     if matches(b.bind_addr, dst) {
@@ -427,7 +425,7 @@ mod test {
 
     #[test]
     fn recycle_ports() -> Result {
-        let mut host = Host::new(std::net::Ipv4Addr::UNSPECIFIED.into());
+        let mut host = Host::new(std::net::Ipv4Addr::UNSPECIFIED.into(), 1, 1);
 
         host.udp.bind((host.addr, 65534).into())?;
         host.udp.bind((host.addr, 65535).into())?;

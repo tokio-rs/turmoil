@@ -1,3 +1,4 @@
+use crate::config::Config;
 use crate::envelope::Protocol;
 use crate::ip::IpVersionAddrIter;
 use crate::{config, Dns, Host, ToIpAddr, ToIpAddrs, Topology, TRACING_TARGET};
@@ -98,7 +99,7 @@ impl World {
     }
 
     /// Register a new host with the simulation.
-    pub(crate) fn register(&mut self, addr: IpAddr) {
+    pub(crate) fn register(&mut self, addr: IpAddr, config: &Config) {
         assert!(
             !self.hosts.contains_key(&addr),
             "already registered host for the given ip address"
@@ -112,7 +113,10 @@ impl World {
         }
 
         // Initialize host state
-        self.hosts.insert(addr, Host::new(addr));
+        self.hosts.insert(
+            addr,
+            Host::new(addr, config.tcp_capacity, config.udp_capacity),
+        );
     }
 
     /// Send `message` from `src` to `dst`. Delivery is asynchronous and not

@@ -559,3 +559,38 @@ fn localhost_ping_pong() -> Result {
     });
     sim.run()
 }
+
+#[test]
+fn socket_capacity() -> Result {
+    let mut sim = Builder::new()
+        .min_message_latency(Duration::from_millis(1))
+        .max_message_latency(Duration::from_millis(1))
+        .udp_capacity(1)
+        .build();
+
+    let (tx, rx) = oneshot::channel();
+
+    sim.client("server", async move {
+        let s = bind().await?;
+
+        _ = rx.await;
+        recv_ping(&s).await?;
+        assert!(timeout(Duration::from_secs(1), recv_ping(&s))
+            .await
+            .is_err());
+
+        Ok(())
+    });
+
+    sim.client("client", async move {
+        let s = bind().await?;
+
+        send_ping(&s).await?;
+        send_ping(&s).await?; // dropped
+        _ = tx.send(());
+
+        Ok(())
+    });
+
+    sim.run()
+}

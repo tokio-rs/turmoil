@@ -91,6 +91,16 @@ impl Builder {
         self
     }
 
+    pub fn tcp_capacity(&mut self, value: usize) -> &mut Self {
+        self.config.tcp_capacity = value;
+        self
+    }
+
+    pub fn udp_capacity(&mut self, value: usize) -> &mut Self {
+        self.config.udp_capacity = value;
+        self
+    }
+
     pub fn build<'a>(&self) -> Sim<'a> {
         self.build_with_rng(Box::new(rand::rngs::SmallRng::from_entropy()))
     }
