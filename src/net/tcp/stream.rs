@@ -282,12 +282,10 @@ fn send_loopback(src: SocketAddr, dst: SocketAddr, message: Protocol) {
     tokio::spawn(async move {
         sleep(Duration::from_micros(1)).await;
         World::current(|world| {
-            let result =
-                world
-                    .current_host_mut()
-                    .receive_from_network(Envelope { src, dst, message });
-            if let Err(rst) = result {
-                let _ = world.current_host_mut().receive_from_network(Envelope {
+            if let Err(rst) = world
+                .current_host_mut()
+                .receive_from_network(Envelope { src, dst, message }) {
+                _ = world.current_host_mut().receive_from_network(Envelope {
                     src: dst,
                     dst: src,
                     message: rst,
