@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use tokio::{sync::oneshot, task::JoinHandle, time::timeout};
+use tokio::{sync::oneshot, time::timeout};
 use turmoil::{
     lookup,
     net::{self, UdpSocket},
@@ -454,17 +454,15 @@ fn run_localhost_test(
     sim.client("client", async move {
         let socket = UdpSocket::bind(bind_addr).await?;
 
-        let _: JoinHandle<io::Result<()>> = tokio::spawn(async move {
+        tokio::spawn(async move {
             let mut buf = [0; 5];
-            let (_, peer) = socket.recv_from(&mut buf).await?;
+            let (_, peer) = socket.recv_from(&mut buf).await.unwrap();
 
             assert_eq!(expected, buf);
             assert_eq!(peer.ip(), connect_addr.ip());
-            assert_eq!(socket.local_addr()?.ip(), bind_addr.ip());
+            assert_eq!(socket.local_addr().unwrap().ip(), bind_addr.ip());
 
-            socket.send_to(&expected, peer).await?;
-
-            Ok(())
+            socket.send_to(&expected, peer).await.unwrap();
         });
 
         let mut buf = [0; 5];
@@ -541,13 +539,12 @@ fn localhost_ping_pong() -> Result {
         let server = SocketAddr::from((Ipv4Addr::LOCALHOST, 1234));
         let socket = UdpSocket::bind(server).await?;
 
-        let _: JoinHandle<io::Result<()>> = tokio::spawn(async move {
+        tokio::spawn(async move {
             let mut buffer = [0; 16];
-            let (_, peer) = socket.recv_from(&mut buffer).await?;
+            let (_, peer) = socket.recv_from(&mut buffer).await.unwrap();
 
             let buffer = turmoil::elapsed().as_nanos().to_be_bytes();
-            socket.send_to(&buffer, peer).await?;
-            Ok(())
+            socket.send_to(&buffer, peer).await.unwrap();
         });
 
         let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await?;
