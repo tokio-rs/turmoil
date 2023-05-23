@@ -1,6 +1,6 @@
 use std::{
-    io,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    assert_eq, assert_ne, io,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     rc::Rc,
     time::Duration,
 };
@@ -763,6 +763,148 @@ fn bind_addr_in_use() -> Result {
     sim.client("client", async move {
         wait.await.expect("Sender dropped");
         TcpStream::connect("server:80").await?;
+        Ok(())
+    });
+
+    sim.run()
+}
+
+fn run_localhost_test(
+    ip_version: IpVersion,
+    bind_addr: SocketAddr,
+    connect_addr: SocketAddr,
+) -> Result {
+    let mut sim = Builder::new().ip_version(ip_version).build();
+    let expected = [0, 1, 7, 3, 8];
+    sim.client("client", async move {
+        let listener = TcpListener::bind(bind_addr).await?;
+
+        tokio::spawn(async move {
+            let (mut socket, socket_addr) = listener.accept().await.unwrap();
+            socket.write_all(&expected).await.unwrap();
+
+            assert_eq!(socket_addr.ip(), connect_addr.ip());
+            assert_eq!(socket.local_addr().unwrap().ip(), connect_addr.ip());
+            assert_eq!(socket.peer_addr().unwrap().ip(), connect_addr.ip());
+        });
+
+        let mut socket = TcpStream::connect(connect_addr).await?;
+        let mut actual = [0; 5];
+        socket.read_exact(&mut actual).await?;
+
+        assert_eq!(expected, actual);
+        assert_eq!(socket.local_addr()?.ip(), connect_addr.ip());
+        assert_eq!(socket.peer_addr()?.ip(), connect_addr.ip());
+
+        Ok(())
+    });
+    sim.run()
+}
+
+#[test]
+fn loopback_to_wildcard_v4() -> Result {
+    let bind_addr = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 1234);
+    let connect_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 1234));
+    run_localhost_test(IpVersion::V4, bind_addr, connect_addr)
+}
+
+#[test]
+fn loopback_to_localhost_v4() -> Result {
+    let bind_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1234);
+    let connect_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 1234));
+    run_localhost_test(IpVersion::V4, bind_addr, connect_addr)
+}
+
+#[test]
+fn loopback_to_wildcard_v6() -> Result {
+    let bind_addr = SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), 1234);
+    let connect_addr = SocketAddr::from((Ipv6Addr::LOCALHOST, 1234));
+    run_localhost_test(IpVersion::V6, bind_addr, connect_addr)
+}
+
+#[test]
+fn loopback_to_localhost_v6() -> Result {
+    let bind_addr = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 1234);
+    let connect_addr = SocketAddr::from((Ipv6Addr::LOCALHOST, 1234));
+    run_localhost_test(IpVersion::V6, bind_addr, connect_addr)
+}
+
+#[test]
+fn remote_to_localhost_refused() -> Result {
+    let mut sim = Builder::new().build();
+
+    let (stop, wait) = oneshot::channel();
+    sim.client("server", async move {
+        let bind_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1234);
+        let _listener = TcpListener::bind(bind_addr).await?;
+        wait.await.unwrap();
+        Ok(())
+    });
+
+    sim.client("client", async move {
+        let result = TcpStream::connect(("server", 1234)).await;
+        assert_error_kind(result, io::ErrorKind::ConnectionRefused);
+        stop.send(()).unwrap();
+        Ok(())
+    });
+
+    sim.run()
+}
+
+/// Since localhost is special cased to not route through the topology, this
+/// test validates that the world still steps forward even if a client ping
+/// pongs back and forth over localhost.
+#[test]
+fn localhost_ping_pong() -> Result {
+    let mut sim = Builder::new().build();
+    sim.client("client", async move {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 1234)).await?;
+
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+
+            let payload = turmoil::elapsed().as_nanos();
+            socket.write_u128(payload).await.unwrap();
+            let response = socket.read_u128().await.unwrap();
+            assert_ne!(payload, response);
+        });
+
+        let mut socket = TcpStream::connect((Ipv4Addr::LOCALHOST, 1234)).await?;
+        let response = socket.read_u128().await?;
+        let now = turmoil::elapsed().as_nanos();
+        assert_ne!(response, now);
+
+        Ok(())
+    });
+    sim.run()
+}
+
+#[test]
+fn remote_dropped() -> Result {
+    let mut sim = Builder::new().build();
+
+    sim.client("client", async move {
+        let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 1234)).await?;
+        tokio::spawn(async move {
+            loop {
+                let (_, _) = listener.accept().await.unwrap();
+            }
+        });
+
+        let mut socket = TcpStream::connect((Ipv4Addr::LOCALHOST, 1234)).await?;
+
+        let mut buf = [0; 8];
+        assert!(matches!(socket.read(&mut buf).await, Ok(0)));
+
+        loop {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+
+            if let Err(e) = socket.write_u8(1).await {
+                assert_eq!(io::ErrorKind::BrokenPipe, e.kind());
+                break;
+            }
+        }
+
         Ok(())
     });
 

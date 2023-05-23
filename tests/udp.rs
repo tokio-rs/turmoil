@@ -6,6 +6,7 @@ use std::{
     sync::{atomic::AtomicUsize, atomic::Ordering},
     time::Duration,
 };
+
 use tokio::{sync::oneshot, time::timeout};
 use turmoil::{
     lookup,
@@ -440,5 +441,121 @@ fn bind_addr_in_use() -> Result {
         Ok(())
     });
 
+    sim.run()
+}
+
+fn run_localhost_test(
+    ip_version: IpVersion,
+    bind_addr: SocketAddr,
+    connect_addr: SocketAddr,
+) -> Result {
+    let mut sim = Builder::new().ip_version(ip_version).build();
+    let expected = [0, 1, 7, 3, 8];
+    sim.client("client", async move {
+        let socket = UdpSocket::bind(bind_addr).await?;
+
+        tokio::spawn(async move {
+            let mut buf = [0; 5];
+            let (_, peer) = socket.recv_from(&mut buf).await.unwrap();
+
+            assert_eq!(expected, buf);
+            assert_eq!(peer.ip(), connect_addr.ip());
+            assert_eq!(socket.local_addr().unwrap().ip(), bind_addr.ip());
+
+            socket.send_to(&expected, peer).await.unwrap();
+        });
+
+        let mut buf = [0; 5];
+        let bind_addr = SocketAddr::new(bind_addr.ip(), 0);
+        let socket = UdpSocket::bind(bind_addr).await?;
+        socket.send_to(&expected, connect_addr).await?;
+        let (_, peer) = socket.recv_from(&mut buf).await?;
+
+        assert_eq!(expected, buf);
+        assert_eq!(peer.ip(), connect_addr.ip());
+
+        Ok(())
+    });
+    sim.run()
+}
+
+#[test]
+fn loopback_to_wildcard_v4() -> Result {
+    let bind_addr = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 1234);
+    let connect_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 1234));
+    run_localhost_test(IpVersion::V4, bind_addr, connect_addr)
+}
+
+#[test]
+fn loopback_to_localhost_v4() -> Result {
+    let bind_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1234);
+    let connect_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 1234));
+    run_localhost_test(IpVersion::V4, bind_addr, connect_addr)
+}
+
+#[test]
+fn loopback_to_wildcard_v6() -> Result {
+    let bind_addr = SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), 1234);
+    let connect_addr = SocketAddr::from((Ipv6Addr::LOCALHOST, 1234));
+    run_localhost_test(IpVersion::V6, bind_addr, connect_addr)
+}
+
+#[test]
+fn loopback_to_localhost_v6() -> Result {
+    let bind_addr = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 1234);
+    let connect_addr = SocketAddr::from((Ipv6Addr::LOCALHOST, 1234));
+    run_localhost_test(IpVersion::V6, bind_addr, connect_addr)
+}
+
+#[test]
+fn remote_to_localhost_dropped() -> Result {
+    let mut sim = Builder::new().build();
+
+    sim.client("server", async move {
+        let bind_addr = UdpSocket::bind((Ipv4Addr::LOCALHOST, 1234)).await?;
+        let mut buf = [0; 4];
+
+        let result = timeout(Duration::from_secs(1), bind_addr.recv_from(&mut buf)).await;
+        assert!(result.is_err());
+        Ok(())
+    });
+
+    sim.client("client", async move {
+        let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 1234)).await?;
+        socket.send_to(&[0], ("server", 1234)).await?;
+        Ok(())
+    });
+
+    sim.run()
+}
+
+/// Since localhost is special cased to not route through the topology, this
+/// test validates that the world still steps forward even if a client ping
+/// pongs back and forth over localhost.
+#[test]
+fn localhost_ping_pong() -> Result {
+    let mut sim = Builder::new().build();
+    sim.client("client", async move {
+        let server = SocketAddr::from((Ipv4Addr::LOCALHOST, 1234));
+        let socket = UdpSocket::bind(server).await?;
+
+        tokio::spawn(async move {
+            let mut buffer = [0; 16];
+            let (_, peer) = socket.recv_from(&mut buffer).await.unwrap();
+
+            let buffer = turmoil::elapsed().as_nanos().to_be_bytes();
+            socket.send_to(&buffer, peer).await.unwrap();
+        });
+
+        let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+        let start = turmoil::elapsed().as_nanos();
+        socket.send_to(&start.to_be_bytes(), server).await?;
+
+        let mut buffer = [0; 16];
+        socket.recv_from(&mut buffer).await?;
+        assert_ne!(start, u128::from_be_bytes(buffer));
+
+        Ok(())
+    });
     sim.run()
 }

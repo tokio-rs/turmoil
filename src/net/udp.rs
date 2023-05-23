@@ -1,8 +1,11 @@
 use bytes::Bytes;
-use tokio::sync::{mpsc, Mutex};
+use tokio::{
+    sync::{mpsc, Mutex},
+    time::sleep,
+};
 
 use crate::{
-    envelope::{Datagram, Protocol},
+    envelope::{Datagram, Envelope, Protocol},
     ToSocketAddrs, World, TRACING_TARGET,
 };
 
@@ -10,6 +13,7 @@ use std::{
     cmp,
     io::{self, Result},
     net::SocketAddr,
+    time::Duration,
 };
 
 /// A simulated UDP socket.
@@ -97,13 +101,13 @@ impl UdpSocket {
     /// to this listener. The port allocated can be queried via the `local_addr`
     /// method.
     ///
-    /// Only `0.0.0.0` or `::` are currently supported.
+    /// Only `0.0.0.0`, `::`, or localhost are currently supported.
     pub async fn bind<A: ToSocketAddrs>(addr: A) -> Result<UdpSocket> {
         World::current(|world| {
             let mut addr = addr.to_socket_addr(&world.dns);
             let host = world.current_host_mut();
 
-            if !addr.ip().is_unspecified() {
+            if !addr.ip().is_unspecified() && !addr.ip().is_loopback() {
                 panic!("{addr} is not supported");
             }
 
@@ -111,8 +115,6 @@ impl UdpSocket {
                 panic!("ip version mismatch: {:?} host: {:?}", addr, host.addr)
             }
 
-            // Unspecified -> host's IP
-            addr.set_ip(host.addr);
             if addr.port() == 0 {
                 addr.set_port(host.assign_ephemeral_port());
             }
@@ -143,13 +145,7 @@ impl UdpSocket {
     pub async fn send_to<A: ToSocketAddrs>(&self, buf: &[u8], target: A) -> Result<usize> {
         World::current(|world| {
             let dst = target.to_socket_addr(&world.dns);
-
-            world.send_message(
-                self.local_addr,
-                dst,
-                Protocol::Udp(Datagram(Bytes::copy_from_slice(buf))),
-            );
-
+            self.send(world, dst, Datagram(Bytes::copy_from_slice(buf)));
             Ok(buf.len())
         })
     }
@@ -171,13 +167,7 @@ impl UdpSocket {
     pub fn try_send_to<A: ToSocketAddrs>(&self, buf: &[u8], target: A) -> Result<usize> {
         World::current(|world| {
             let dst = target.to_socket_addr(&world.dns);
-
-            world.send_message(
-                self.local_addr,
-                dst,
-                Protocol::Udp(Datagram(Bytes::copy_from_slice(buf))),
-            );
-
+            self.send(world, dst, Datagram(Bytes::copy_from_slice(buf)));
             Ok(buf.len())
         })
     }
@@ -286,6 +276,36 @@ impl UdpSocket {
     pub fn local_addr(&self) -> Result<SocketAddr> {
         Ok(self.local_addr)
     }
+
+    fn send(&self, world: &mut World, dst: SocketAddr, packet: Datagram) {
+        let msg = Protocol::Udp(packet);
+
+        let mut src = self.local_addr;
+        if dst.ip().is_loopback() {
+            src.set_ip(dst.ip());
+        }
+        if src.ip().is_unspecified() {
+            src.set_ip(world.current_host_mut().addr);
+        }
+
+        if dst.ip().is_loopback() {
+            send_loopback(src, dst, msg);
+        } else {
+            world.send_message(src, dst, msg);
+        }
+    }
+}
+
+fn send_loopback(src: SocketAddr, dst: SocketAddr, message: Protocol) {
+    tokio::spawn(async move {
+        sleep(Duration::from_micros(1)).await;
+        World::current(|world| {
+            world
+                .current_host_mut()
+                .receive_from_network(Envelope { src, dst, message })
+                .expect("UDP does not get feedback on delivery errors");
+        })
+    });
 }
 
 impl Drop for UdpSocket {
