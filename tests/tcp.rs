@@ -9,7 +9,6 @@ use std::future;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     sync::{oneshot, Notify},
-    task::JoinHandle,
     time::timeout,
 };
 use turmoil::{
@@ -780,15 +779,13 @@ fn run_localhost_test(
     sim.client("client", async move {
         let listener = TcpListener::bind(bind_addr).await?;
 
-        let _: JoinHandle<io::Result<()>> = tokio::spawn(async move {
-            let (mut socket, socket_addr) = listener.accept().await?;
+        tokio::spawn(async move {
+            let (mut socket, socket_addr) = listener.accept().await.unwrap();
             socket.write_all(&expected).await.unwrap();
 
             assert_eq!(socket_addr.ip(), connect_addr.ip());
-            assert_eq!(socket.local_addr()?.ip(), connect_addr.ip());
-            assert_eq!(socket.peer_addr()?.ip(), connect_addr.ip());
-
-            Ok(())
+            assert_eq!(socket.local_addr().unwrap().ip(), connect_addr.ip());
+            assert_eq!(socket.peer_addr().unwrap().ip(), connect_addr.ip());
         });
 
         let mut socket = TcpStream::connect(connect_addr).await?;
@@ -863,15 +860,13 @@ fn localhost_ping_pong() -> Result {
     sim.client("client", async move {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 1234)).await?;
 
-        let _: JoinHandle<io::Result<()>> = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await?;
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
 
             let payload = turmoil::elapsed().as_nanos();
             socket.write_u128(payload).await.unwrap();
-            let response = socket.read_u128().await?;
+            let response = socket.read_u128().await.unwrap();
             assert_ne!(payload, response);
-
-            Ok(())
         });
 
         let mut socket = TcpStream::connect((Ipv4Addr::LOCALHOST, 1234)).await?;
@@ -890,9 +885,9 @@ fn remote_dropped() -> Result {
 
     sim.client("client", async move {
         let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 1234)).await?;
-        let _: JoinHandle<io::Result<()>> = tokio::spawn(async move {
+        tokio::spawn(async move {
             loop {
-                let (_, _) = listener.accept().await?;
+                let (_, _) = listener.accept().await.unwrap();
             }
         });
 
