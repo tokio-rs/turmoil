@@ -1,10 +1,5 @@
 use std::{
-<<<<<<< HEAD
     assert_eq, assert_ne, io,
-=======
-    assert_eq, assert_ne,
-    io::{self},
->>>>>>> c7e07f2 (Add support for loopback)
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     rc::Rc,
     time::Duration,
