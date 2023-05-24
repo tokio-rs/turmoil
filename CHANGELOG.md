@@ -1,3 +1,24 @@
+# 0.5.4 (May 32, 2023)
+
+### Added
+
+- Support ephemeral port assignments on bind ([#110])
+- Add support for Ipv6 network/binds ([#113])
+- Add support for loopback ([#118]) 
+
+### Fixed
+
+- Filter out equal IpAddrs for regex matching ([#116]) 
+- Remove inconsistent address resolution ([#114])
+- Fix bug in binding an in use port ([#117]) 
+
+[#110]: https://github.com/tokio-rs/turmoil/pull/110
+[#113]: https://github.com/tokio-rs/turmoil/pull/113
+[#114]: https://github.com/tokio-rs/turmoil/pull/114
+[#116]: https://github.com/tokio-rs/turmoil/pull/116
+[#117]: https://github.com/tokio-rs/turmoil/pull/117
+[#118]: https://github.com/tokio-rs/turmoil/pull/118
+
 # 0.5.3 (Mar 22, 2023)
 
 ### Added
