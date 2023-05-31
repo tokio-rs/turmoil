@@ -49,12 +49,12 @@ impl Dns {
         addrs.to_ip_addrs(self)
     }
 
-    pub(crate) fn reverse(&self, addr: IpAddr) -> &str {
+    pub(crate) fn reverse(&self, addr: IpAddr) -> String {
         self.names
             .iter()
             .find(|(_, a)| **a == addr)
-            .map(|(name, _)| name)
-            .expect("no hostname found for ip address")
+            .map(|(name, _)| name.to_string())
+            .unwrap_or_else(|| addr.to_string())
     }
 }
 
