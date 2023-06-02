@@ -2,7 +2,7 @@ use std::net::Ipv4Addr;
 use turmoil::*;
 
 // This test is not in src/dns.rs since it initalizes a tracing subscriber
-// which will presist, and effect other tests in the same file.
+// which will persist, and effect other tests in the same file.
 #[test]
 fn tracing_subscriber_does_not_crash_direct_binds() -> Result {
     tracing_subscriber::fmt().init();
