@@ -159,8 +159,16 @@ impl<'a> Sim<'a> {
         let world = self.world.borrow();
 
         (
-            world.dns.reverse(pair.0).to_owned(),
-            world.dns.reverse(pair.1).to_owned(),
+            world
+                .dns
+                .reverse(pair.0)
+                .expect("no hostname found for ip address")
+                .to_owned(),
+            world
+                .dns
+                .reverse(pair.1)
+                .expect("no hostname found for ip address")
+                .to_owned(),
         )
     }
 
