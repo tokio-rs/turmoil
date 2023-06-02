@@ -158,7 +158,18 @@ impl<'a> Sim<'a> {
     pub fn reverse_lookup_pair(&self, pair: (IpAddr, IpAddr)) -> (String, String) {
         let world = self.world.borrow();
 
-        (world.dns.reverse(pair.0), world.dns.reverse(pair.1))
+        (
+            world
+                .dns
+                .reverse(pair.0)
+                .expect("no hostname found for ip address")
+                .to_owned(),
+            world
+                .dns
+                .reverse(pair.1)
+                .expect("no hostname found for ip address")
+                .to_owned(),
+        )
     }
 
     /// Lookup IP addresses for resolved hosts.
