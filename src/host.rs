@@ -275,7 +275,7 @@ impl StreamSocket {
     // Buffer and re-order received segments by `seq` as the network may deliver
     // them out of order.
     fn buffer(&mut self, seq: u64, segment: SequencedSegment) -> Result<(), Protocol> {
-        use mpsc::error::TrySendError::Closed;
+        use mpsc::error::TrySendError::*;
 
         let exists = self.buf.insert(seq, segment);
 
@@ -287,7 +287,7 @@ impl StreamSocket {
             let segment = self.buf.remove(&self.recv_seq).unwrap();
             self.sender.try_send(segment).map_err(|e| match e {
                 Closed(_) => Protocol::Tcp(Segment::Rst),
-                _ => panic!("{} socket buffer full", self.local_addr),
+                Full(_) => panic!("{} socket buffer full", self.local_addr),
             })?;
         }
 
