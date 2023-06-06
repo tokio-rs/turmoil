@@ -1,3 +1,16 @@
+# 0.5.5 (June 6, 2023)
+
+### Added
+
+- Make socket buffer capacity configurable ([#121])
+
+### Fixed
+
+- Fix reverse dns lookups on static binds ([#120])
+
+[#120]: https://github.com/tokio-rs/turmoil/pull/120
+[#121]: https://github.com/tokio-rs/turmoil/pull/121
+
 # 0.5.4 (May 23, 2023)
 
 ### Added
