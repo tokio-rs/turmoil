@@ -30,7 +30,7 @@ pub(crate) struct Host {
     pub(crate) tcp: Tcp,
 
     /// A span indicating the current scope (clone of corresponding span in Rt)
-    span: Span,
+    pub(crate) span: Span,
 
     /// Ports 49152..=65535 for client connections.
     /// https://www.rfc-editor.org/rfc/rfc6335#section-6

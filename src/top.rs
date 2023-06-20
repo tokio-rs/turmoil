@@ -383,6 +383,8 @@ impl Link {
         rand: &mut dyn RngCore,
         host: &mut Host,
     ) {
+        let _guard = host.span.clone().entered();
+
         let deliverable = self
             .deliverable
             .entry(host.addr)
