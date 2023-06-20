@@ -7,6 +7,7 @@ use tokio::runtime::Runtime;
 use tokio::task::JoinHandle;
 use tokio::task::LocalSet;
 use tokio::time::{sleep, Duration, Instant};
+use tracing::Span;
 
 // To support re-creation, we need to store a factory of the future that
 // represents the software. This is somewhat annoying in that it requires
@@ -41,13 +42,16 @@ pub(crate) struct Rt<'a> {
     /// Local task set used for running !Send tasks.
     local: LocalSet,
 
+    /// A tracing span representing the current context for a tracing subscriber.
+    span: Span,
+
     /// Optional handle to a host's software. When software finishes, the handle is
     /// consumed to check for error, which is propagated up to fail the simulation.
     handle: Option<JoinHandle<Result>>,
 }
 
 impl<'a> Rt<'a> {
-    pub(crate) fn client<F>(client: F) -> Self
+    pub(crate) fn client<F>(span: Span, client: F) -> Self
     where
         F: Future<Output = Result> + 'static,
     {
@@ -59,11 +63,12 @@ impl<'a> Rt<'a> {
             kind: Kind::Client,
             tokio,
             local,
+            span,
             handle: Some(handle),
         }
     }
 
-    pub(crate) fn host<F, Fut>(software: F) -> Self
+    pub(crate) fn host<F, Fut>(span: Span, software: F) -> Self
     where
         F: Fn() -> Fut + 'a,
         Fut: Future<Output = Result> + 'static,
@@ -77,6 +82,7 @@ impl<'a> Rt<'a> {
             kind: Kind::Host { software },
             tokio,
             local,
+            span,
             handle: Some(handle),
         }
     }
@@ -88,6 +94,7 @@ impl<'a> Rt<'a> {
             kind: Kind::NoSoftware,
             tokio,
             local,
+            span: Span::current(),
             handle: None,
         }
     }
@@ -132,31 +139,33 @@ impl<'a> Rt<'a> {
     // that caused failure. Subsequent calls do not return the error as it is
     // expected to fail the simulation.
     pub(crate) fn tick(&mut self, duration: Duration) -> Result<bool> {
-        self.tokio.block_on(async {
-            self.local
-                .run_until(async {
-                    sleep(duration).await;
-                })
-                .await
-        });
+        self.span.in_scope(|| {
+            self.tokio.block_on(async {
+                self.local
+                    .run_until(async {
+                        sleep(duration).await;
+                    })
+                    .await
+            });
 
-        // pull for software completion
-        match &self.handle {
-            Some(handle) if handle.is_finished() => {
-                // Consume handle to extract task result
-                if let Some(h) = self.handle.take() {
-                    match self.tokio.block_on(h) {
-                        // If the host was crashed the JoinError is cancelled, which
-                        // needs to be handled to not fail the simulation.
-                        Err(je) if je.is_cancelled() => {}
-                        res => res??,
-                    }
-                };
-                Ok(true)
+            // pull for software completion
+            match &self.handle {
+                Some(handle) if handle.is_finished() => {
+                    // Consume handle to extract task result
+                    if let Some(h) = self.handle.take() {
+                        match self.tokio.block_on(h) {
+                            // If the host was crashed the JoinError is cancelled, which
+                            // needs to be handled to not fail the simulation.
+                            Err(je) if je.is_cancelled() => {}
+                            res => res??,
+                        }
+                    };
+                    Ok(true)
+                }
+                Some(_) => Ok(false),
+                None => Ok(true),
             }
-            Some(_) => Ok(false),
-            None => Ok(true),
-        }
+        })
     }
 
     pub(crate) fn crash(&mut self) {

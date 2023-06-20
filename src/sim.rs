@@ -7,6 +7,7 @@ use std::net::IpAddr;
 use std::ops::DerefMut;
 use std::time::UNIX_EPOCH;
 use tokio::time::Duration;
+use tracing::Level;
 
 /// A handle for interacting with the simulation.
 pub struct Sim<'a> {
@@ -65,15 +66,23 @@ impl<'a> Sim<'a> {
         F: Future<Output = Result> + 'static,
     {
         let addr = self.lookup(addr);
+        let name = self
+            .world
+            .borrow_mut()
+            .dns
+            .reverse(addr)
+            .map(str::to_string)
+            .unwrap_or_else(|| addr.to_string());
+        let span = tracing::span!(Level::INFO, "node", name);
 
         {
             let world = RefCell::get_mut(&mut self.world);
 
             // Register host state with the world
-            world.register(addr, &self.config);
+            world.register(addr, span.clone(), &self.config);
         }
 
-        let rt = World::enter(&self.world, || Rt::client(client));
+        let rt = World::enter(&self.world, || Rt::client(span, client));
 
         self.rts.insert(addr, rt);
     }
@@ -90,15 +99,23 @@ impl<'a> Sim<'a> {
         Fut: Future<Output = Result> + 'static,
     {
         let addr = self.lookup(addr);
+        let name = self
+            .world
+            .borrow_mut()
+            .dns
+            .reverse(addr)
+            .map(str::to_string)
+            .unwrap_or_else(|| addr.to_string());
+        let span = tracing::span!(Level::INFO, "node", name);
 
         {
             let world = RefCell::get_mut(&mut self.world);
 
             // Register host state with the world
-            world.register(addr, &self.config);
+            world.register(addr, span.clone(), &self.config);
         }
 
-        let rt = World::enter(&self.world, || Rt::host(host));
+        let rt = World::enter(&self.world, || Rt::host(span, host));
 
         self.rts.insert(addr, rt);
     }

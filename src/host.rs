@@ -12,6 +12,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Notify};
 use tokio::time::{Duration, Instant};
+use tracing::Span;
 
 /// A host in the simulated network.
 ///
@@ -28,6 +29,9 @@ pub(crate) struct Host {
     /// L4 Transmission Control Protocol (TCP).
     pub(crate) tcp: Tcp,
 
+    /// A span indicating the current scope (clone of corresponding span in Rt)
+    span: Span,
+
     /// Ports 49152..=65535 for client connections.
     /// https://www.rfc-editor.org/rfc/rfc6335#section-6
     next_ephemeral_port: u16,
@@ -40,12 +44,13 @@ pub(crate) struct Host {
 }
 
 impl Host {
-    pub(crate) fn new(addr: IpAddr, tcp_capacity: usize, udp_capacity: usize) -> Host {
+    pub(crate) fn new(addr: IpAddr, span: Span, tcp_capacity: usize, udp_capacity: usize) -> Host {
         Host {
             addr,
             udp: Udp::new(udp_capacity),
             tcp: Tcp::new(tcp_capacity),
             next_ephemeral_port: 49152,
+            span,
             elapsed: Duration::ZERO,
             now: None,
         }
@@ -97,17 +102,19 @@ impl Host {
     // key problem is that the Host doesn't actually send messages, rather the
     // World is borrowed, and it sends.
     pub(crate) fn receive_from_network(&mut self, envelope: Envelope) -> Result<(), Protocol> {
-        let Envelope { src, dst, message } = envelope;
+        self.span.in_scope(|| {
+            let Envelope { src, dst, message } = envelope;
 
-        tracing::trace!(target: TRACING_TARGET, ?dst, ?src, protocol = %message, "Delivered");
+            tracing::trace!(target: TRACING_TARGET, ?dst, ?src, protocol = %message, "Delivered");
 
-        match message {
-            Protocol::Tcp(segment) => self.tcp.receive_from_network(src, dst, segment),
-            Protocol::Udp(datagram) => {
-                self.udp.receive_from_network(src, dst, datagram);
-                Ok(())
+            match message {
+                Protocol::Tcp(segment) => self.tcp.receive_from_network(src, dst, segment),
+                Protocol::Udp(datagram) => {
+                    self.udp.receive_from_network(src, dst, datagram);
+                    Ok(())
+                }
             }
-        }
+        })
     }
 
     pub(crate) fn tick(&mut self, duration: Duration) {
@@ -425,7 +432,12 @@ mod test {
 
     #[test]
     fn recycle_ports() -> Result {
-        let mut host = Host::new(std::net::Ipv4Addr::UNSPECIFIED.into(), 1, 1);
+        let mut host = Host::new(
+            std::net::Ipv4Addr::UNSPECIFIED.into(),
+            tracing::span!(tracing::Level::INFO, "node"),
+            1,
+            1,
+        );
 
         host.udp.bind((host.addr, 65534).into())?;
         host.udp.bind((host.addr, 65535).into())?;
