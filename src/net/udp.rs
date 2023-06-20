@@ -205,7 +205,7 @@ impl UdpSocket {
             .try_recv_from(buf)
             .expect("queue should be ready after readable yields");
 
-        tracing::trace!(target: TRACING_TARGET, dst = ?self.local_addr, src = ?origin, protocol = %datagram, "Recv");
+        tracing::trace!(target: TRACING_TARGET, src = ?origin, dst = ?self.local_addr, protocol = %datagram, "Recv");
 
         Ok((limit, origin))
     }
@@ -231,7 +231,7 @@ impl UdpSocket {
             io::Error::new(io::ErrorKind::WouldBlock, "socket receive queue is empty")
         })?;
 
-        tracing::trace!(target: TRACING_TARGET, dst = ?self.local_addr, src = ?origin, protocol = %datagram, "Recv");
+        tracing::trace!(target: TRACING_TARGET, src = ?origin, dst = ?self.local_addr, protocol = %datagram, "Recv");
 
         Ok((limit, origin))
     }

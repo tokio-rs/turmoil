@@ -87,7 +87,7 @@ impl TcpStream {
             io::Error::new(io::ErrorKind::ConnectionRefused, pair.remote.to_string())
         })?;
 
-        tracing::trace!(target: TRACING_TARGET, dst = ?pair.local, src = ?pair.remote, protocol = %"TCP SYN-ACK", "Recv");
+        tracing::trace!(target: TRACING_TARGET, src = ?pair.remote, dst = ?pair.local, protocol = %"TCP SYN-ACK", "Recv");
 
         Ok(TcpStream::new(pair, rx))
     }
@@ -158,7 +158,7 @@ impl ReadHalf {
 
         match ready!(self.rx.recv.poll_recv(cx)) {
             Some(seg) => {
-                tracing::trace!(target: TRACING_TARGET, dst = ?self.pair.local, src = ?self.pair.remote, protocol = %seg, "Recv");
+                tracing::trace!(target: TRACING_TARGET, src = ?self.pair.remote, dst = ?self.pair.local, protocol = %seg, "Recv");
 
                 match seg {
                     SequencedSegment::Data(bytes) => {
@@ -282,9 +282,11 @@ fn send_loopback(src: SocketAddr, dst: SocketAddr, message: Protocol) {
     tokio::spawn(async move {
         sleep(Duration::from_micros(1)).await;
         World::current(|world| {
-            if let Err(rst) = world
-                .current_host_mut()
-                .receive_from_network(Envelope { src, dst, message }) {
+            if let Err(rst) =
+                world
+                    .current_host_mut()
+                    .receive_from_network(Envelope { src, dst, message })
+            {
                 _ = world.current_host_mut().receive_from_network(Envelope {
                     src: dst,
                     dst: src,
