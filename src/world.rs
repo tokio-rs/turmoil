@@ -9,7 +9,6 @@ use scoped_tls::scoped_thread_local;
 use std::cell::RefCell;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
-use tracing::Span;
 
 /// Tracks all the state for the simulated world.
 pub(crate) struct World {
@@ -100,7 +99,7 @@ impl World {
     }
 
     /// Register a new host with the simulation.
-    pub(crate) fn register(&mut self, addr: IpAddr, span: Span, config: &Config) {
+    pub(crate) fn register(&mut self, addr: IpAddr, config: &Config) {
         assert!(
             !self.hosts.contains_key(&addr),
             "already registered host for the given ip address"
@@ -116,7 +115,7 @@ impl World {
         // Initialize host state
         self.hosts.insert(
             addr,
-            Host::new(addr, span, config.tcp_capacity, config.udp_capacity),
+            Host::new(addr, config.tcp_capacity, config.udp_capacity),
         );
     }
 

@@ -297,7 +297,7 @@ impl Link {
         dst: SocketAddr,
         message: Protocol,
     ) {
-        tracing::trace!(target: TRACING_TARGET, ?src, ?dst, protocol = %message, "Send");
+        tracing::trace!(target: TRACING_TARGET, ?src, ?dst, protocol = %message, "Send (2)");
 
         self.rand_partition_or_repair(global_config, rand);
         self.enqueue(global_config, rand, src, dst, message);
@@ -383,8 +383,6 @@ impl Link {
         rand: &mut dyn RngCore,
         host: &mut Host,
     ) {
-        let _guard = host.span.clone().entered();
-
         let deliverable = self
             .deliverable
             .entry(host.addr)

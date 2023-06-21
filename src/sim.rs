@@ -5,6 +5,7 @@ use std::cell::RefCell;
 use std::future::Future;
 use std::net::IpAddr;
 use std::ops::DerefMut;
+use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 use tokio::time::Duration;
 use tracing::Level;
@@ -66,23 +67,23 @@ impl<'a> Sim<'a> {
         F: Future<Output = Result> + 'static,
     {
         let addr = self.lookup(addr);
-        let name = self
+        let nodename: Arc<str> = self
             .world
             .borrow_mut()
             .dns
             .reverse(addr)
             .map(str::to_string)
-            .unwrap_or_else(|| addr.to_string());
-        let span = tracing::span!(Level::INFO, "node", name);
+            .unwrap_or_else(|| addr.to_string())
+            .into();
 
         {
             let world = RefCell::get_mut(&mut self.world);
 
             // Register host state with the world
-            world.register(addr, span.clone(), &self.config);
+            world.register(addr, &self.config);
         }
 
-        let rt = World::enter(&self.world, || Rt::client(span, client));
+        let rt = World::enter(&self.world, || Rt::client(nodename, client));
 
         self.rts.insert(addr, rt);
     }
@@ -99,23 +100,23 @@ impl<'a> Sim<'a> {
         Fut: Future<Output = Result> + 'static,
     {
         let addr = self.lookup(addr);
-        let name = self
+        let nodename: Arc<str> = self
             .world
             .borrow_mut()
             .dns
             .reverse(addr)
             .map(str::to_string)
-            .unwrap_or_else(|| addr.to_string());
-        let span = tracing::span!(Level::INFO, "node", name);
+            .unwrap_or_else(|| addr.to_string())
+            .into();
 
         {
             let world = RefCell::get_mut(&mut self.world);
 
             // Register host state with the world
-            world.register(addr, span.clone(), &self.config);
+            world.register(addr, &self.config);
         }
 
-        let rt = World::enter(&self.world, || Rt::host(span, host));
+        let rt = World::enter(&self.world, || Rt::host(nodename, host));
 
         self.rts.insert(addr, rt);
     }
@@ -305,6 +306,8 @@ impl<'a> Sim<'a> {
             .iter_mut()
             .filter(|(_, rt)| rt.is_software_running())
         {
+            let _span_guard = tracing::span!(Level::INFO, "node", name = &*rt.nodename).entered();
+
             {
                 let mut world = self.world.borrow_mut();
                 // We need to move deliverable messages off the network and
