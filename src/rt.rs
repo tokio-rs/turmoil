@@ -42,7 +42,7 @@ pub(crate) struct Rt<'a> {
     /// Local task set used for running !Send tasks.
     local: LocalSet,
 
-    /// A tracing span representing the current context for a tracing subscriber.
+    /// A user readable name to identify the node.
     pub(crate) nodename: Arc<str>,
 
     /// Optional handle to a host's software. When software finishes, the handle is
