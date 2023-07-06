@@ -99,13 +99,13 @@ impl World {
     }
 
     /// Register a new host with the simulation.
-    pub(crate) fn register(&mut self, addr: IpAddr, config: &Config) {
+    pub(crate) fn register(&mut self, addr: IpAddr, nodename: &str, config: &Config) {
         assert!(
             !self.hosts.contains_key(&addr),
             "already registered host for the given ip address"
         );
 
-        tracing::info!(target: TRACING_TARGET, hostname = ?self.dns.reverse(addr), ?addr, "New");
+        tracing::info!(target: TRACING_TARGET, nodename, ?addr, "New");
 
         // Register links between the new host and all existing hosts
         for existing in self.hosts.keys() {
