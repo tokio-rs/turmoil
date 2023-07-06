@@ -27,8 +27,8 @@ pub struct Ipv6Network {
 impl IpNetwork {
     pub(crate) fn iter(&self) -> IpNetworkIter {
         match self {
-            IpNetwork::V4(v4) => IpNetworkIter::V4(v4.clone(), 1),
-            IpNetwork::V6(v6) => IpNetworkIter::V6(v6.clone(), 1),
+            IpNetwork::V4(v4) => IpNetworkIter::V4(*v4, 1),
+            IpNetwork::V6(v6) => IpNetworkIter::V6(*v6, 1),
         }
     }
 
