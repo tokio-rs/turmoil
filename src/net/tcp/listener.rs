@@ -62,7 +62,7 @@ impl TcpListener {
                 let host = world.current_host_mut();
                 let (syn, origin) = host.tcp.accept(self.local_addr)?;
 
-                tracing::trace!(target: TRACING_TARGET, dst = ?origin, src = ?self.local_addr, protocol = %"TCP SYN", "Recv");
+                tracing::trace!(target: TRACING_TARGET, src = ?origin, dst = ?self.local_addr, protocol = %"TCP SYN", "Recv");
 
                 // Send SYN-ACK -> origin. If Ok we proceed (acts as the ACK),
                 // else we return early to avoid host mutations.

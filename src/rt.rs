@@ -1,4 +1,5 @@
 use std::mem;
+use std::sync::Arc;
 
 use super::Result;
 use futures::Future;
@@ -41,13 +42,16 @@ pub(crate) struct Rt<'a> {
     /// Local task set used for running !Send tasks.
     local: LocalSet,
 
+    /// A user readable name to identify the node.
+    pub(crate) nodename: Arc<str>,
+
     /// Optional handle to a host's software. When software finishes, the handle is
     /// consumed to check for error, which is propagated up to fail the simulation.
     handle: Option<JoinHandle<Result>>,
 }
 
 impl<'a> Rt<'a> {
-    pub(crate) fn client<F>(client: F) -> Self
+    pub(crate) fn client<F>(nodename: Arc<str>, client: F) -> Self
     where
         F: Future<Output = Result> + 'static,
     {
@@ -59,11 +63,12 @@ impl<'a> Rt<'a> {
             kind: Kind::Client,
             tokio,
             local,
+            nodename,
             handle: Some(handle),
         }
     }
 
-    pub(crate) fn host<F, Fut>(software: F) -> Self
+    pub(crate) fn host<F, Fut>(nodename: Arc<str>, software: F) -> Self
     where
         F: Fn() -> Fut + 'a,
         Fut: Future<Output = Result> + 'static,
@@ -77,6 +82,7 @@ impl<'a> Rt<'a> {
             kind: Kind::Host { software },
             tokio,
             local,
+            nodename,
             handle: Some(handle),
         }
     }
@@ -88,6 +94,7 @@ impl<'a> Rt<'a> {
             kind: Kind::NoSoftware,
             tokio,
             local,
+            nodename: String::new().into(),
             handle: None,
         }
     }

@@ -99,7 +99,7 @@ impl Host {
     pub(crate) fn receive_from_network(&mut self, envelope: Envelope) -> Result<(), Protocol> {
         let Envelope { src, dst, message } = envelope;
 
-        tracing::trace!(target: TRACING_TARGET, ?dst, ?src, protocol = %message, "Delivered");
+        tracing::trace!(target: TRACING_TARGET, ?src, ?dst, protocol = %message, "Delivered");
 
         match message {
             Protocol::Tcp(segment) => self.tcp.receive_from_network(src, dst, segment),
@@ -171,7 +171,7 @@ impl Udp {
     fn receive_from_network(&mut self, src: SocketAddr, dst: SocketAddr, datagram: Datagram) {
         if let Some(bind) = self.binds.get_mut(&dst.port()) {
             if !matches(bind.bind_addr, dst) {
-                tracing::trace!(target: TRACING_TARGET, ?dst, ?src, protocol = %Protocol::Udp(datagram), "Dropped (Addr not bound)");
+                tracing::trace!(target: TRACING_TARGET, ?src, ?dst, protocol = %Protocol::Udp(datagram), "Dropped (Addr not bound)");
                 return;
             }
             if let Err(err) = bind.queue.try_send((datagram, src)) {
@@ -180,10 +180,10 @@ impl Udp {
                 //       require a different channel implementation.
                 match err {
                     mpsc::error::TrySendError::Full((datagram, _)) => {
-                        tracing::trace!(target: TRACING_TARGET, ?dst, ?src, protocol = %Protocol::Udp(datagram), "Dropped (Full buffer)");
+                        tracing::trace!(target: TRACING_TARGET, ?src, ?dst, protocol = %Protocol::Udp(datagram), "Dropped (Full buffer)");
                     }
                     mpsc::error::TrySendError::Closed((datagram, _)) => {
-                        tracing::trace!(target: TRACING_TARGET, ?dst, ?src, protocol = %Protocol::Udp(datagram), "Dropped (Receiver closed)");
+                        tracing::trace!(target: TRACING_TARGET, ?src, ?dst, protocol = %Protocol::Udp(datagram), "Dropped (Receiver closed)");
                     }
                 }
             }
