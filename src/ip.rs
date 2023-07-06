@@ -4,7 +4,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 ///
 /// The default value is an Ipv4 subnet with addresses
 /// in the range `192.168.0.0/16`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IpNetwork {
     /// An Ipv4 capable network, with a given subnet address range.
     V4(Ipv4Network),
@@ -12,13 +12,13 @@ pub enum IpNetwork {
     V6(Ipv6Network),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Ipv4Network {
     prefix: Ipv4Addr,
     mask: Ipv4Addr,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Ipv6Network {
     prefix: Ipv6Addr,
     mask: Ipv6Addr,
@@ -29,6 +29,14 @@ impl IpNetwork {
         match self {
             IpNetwork::V4(v4) => IpNetworkIter::V4(v4.clone(), 1),
             IpNetwork::V6(v6) => IpNetworkIter::V6(v6.clone(), 1),
+        }
+    }
+
+    pub fn contains(&self, addr: IpAddr) -> bool {
+        match (self, addr) {
+            (Self::V4(net), IpAddr::V4(addr)) => net.contains(addr),
+            (Self::V6(net), IpAddr::V6(addr)) => net.contains(addr),
+            _ => false,
         }
     }
 }
@@ -51,6 +59,10 @@ impl Ipv4Network {
         let prefix = Ipv4Addr::from(u32::from(prefix) & u32::from(mask));
         Ipv4Network { prefix, mask }
     }
+
+    pub fn contains(&self, addr: Ipv4Addr) -> bool {
+        u32::from(self.prefix) == u32::from(addr) & u32::from(self.mask)
+    }
 }
 
 impl Ipv6Network {
@@ -70,6 +82,10 @@ impl Ipv6Network {
         let mask = Ipv6Addr::from(!(u128::MAX >> prefixlen));
         let prefix = Ipv6Addr::from(u128::from(prefix) & u128::from(mask));
         Ipv6Network { prefix, mask }
+    }
+
+    pub fn contains(&self, addr: Ipv6Addr) -> bool {
+        u128::from(self.prefix) == u128::from(addr) & u128::from(self.mask)
     }
 }
 
@@ -233,5 +249,30 @@ mod tests {
         });
 
         sim.run()
+    }
+
+    #[test]
+    #[should_panic = "node address is not contained within the available subnet"]
+    fn subnet_denies_invalid_addr_v4() {
+        let mut sim = Builder::new()
+            .ip_network(Ipv4Network::new(Ipv4Addr::new(1, 2, 3, 4), 16))
+            .build();
+
+        sim.client("30.0.0.0", async move { Ok(()) });
+        unreachable!()
+    }
+
+    #[test]
+    #[should_panic = "node address is not contained within the available subnet"]
+    fn subnet_denies_invalid_addr_v6() {
+        let mut sim = Builder::new()
+            .ip_network(Ipv6Network::new(
+                Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, 0),
+                64,
+            ))
+            .build();
+
+        sim.client("fc00:0001::bc", async move { Ok(()) });
+        unreachable!()
     }
 }

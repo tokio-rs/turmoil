@@ -106,7 +106,7 @@ impl Builder {
     }
 
     pub fn build_with_rng<'a>(&self, rng: Box<dyn RngCore>) -> Sim<'a> {
-        let world = World::new(self.link.clone(), rng, self.ip_network.iter());
+        let world = World::new(self.link.clone(), rng, self.ip_network);
         Sim::new(self.config.clone(), world)
     }
 }
