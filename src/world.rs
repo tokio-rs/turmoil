@@ -1,6 +1,6 @@
 use crate::config::Config;
 use crate::envelope::Protocol;
-use crate::{config, Dns, Host, IpNetwork, ToIpAddr, ToIpAddrs, Topology, TRACING_TARGET};
+use crate::{config, Dns, Host, IpSubnet, ToIpAddr, ToIpAddrs, Topology, TRACING_TARGET};
 
 use indexmap::IndexMap;
 use rand::RngCore;
@@ -12,7 +12,7 @@ use std::time::Duration;
 /// Tracks all the state for the simulated world.
 pub(crate) struct World {
     /// Defines the available address range of the simulation.
-    pub(crate) ip_net: IpNetwork,
+    pub(crate) subnet: IpSubnet,
 
     /// Tracks all individual hosts
     pub(crate) hosts: IndexMap<IpAddr, Host>,
@@ -35,9 +35,9 @@ scoped_thread_local!(static CURRENT: RefCell<World>);
 
 impl World {
     /// Initialize a new world.
-    pub(crate) fn new(link: config::Link, rng: Box<dyn RngCore>, ip_net: IpNetwork) -> World {
+    pub(crate) fn new(link: config::Link, rng: Box<dyn RngCore>, ip_net: IpSubnet) -> World {
         World {
-            ip_net,
+            subnet: ip_net,
             hosts: IndexMap::new(),
             topology: Topology::new(link),
             dns: Dns::new(ip_net.iter()),
@@ -104,7 +104,7 @@ impl World {
             "already registered host for the given ip address"
         );
         assert!(
-            self.ip_net.contains(addr),
+            self.subnet.contains(addr),
             "node address is not contained within the available subnet"
         );
 

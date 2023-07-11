@@ -3,7 +3,7 @@ use indexmap::IndexMap;
 use regex::Regex;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
-use crate::ip::IpNetworkIter;
+use crate::ip::IpSubnetIter;
 
 /// Each new host has an IP in the subnet defined by the
 /// ip version of the simulation.
@@ -11,7 +11,7 @@ use crate::ip::IpNetworkIter;
 /// Ipv4 simulations use the subnet 192.168.0.0/16.
 /// Ipv6 simulations use the link local subnet fe80:::/64
 pub struct Dns {
-    addrs: IpNetworkIter,
+    addrs: IpSubnetIter,
     names: IndexMap<String, IpAddr>,
 }
 
@@ -34,7 +34,7 @@ pub trait ToSocketAddrs: sealed::Sealed {
 }
 
 impl Dns {
-    pub(crate) fn new(addrs: IpNetworkIter) -> Dns {
+    pub(crate) fn new(addrs: IpSubnetIter) -> Dns {
         Dns {
             addrs,
             names: IndexMap::new(),
@@ -219,12 +219,12 @@ mod sealed {
 
 #[cfg(test)]
 mod tests {
-    use crate::{dns::Dns, ip::IpNetwork, ToSocketAddrs};
+    use crate::{dns::Dns, ip::IpSubnet, ToSocketAddrs};
     use std::net::Ipv4Addr;
 
     #[test]
     fn parse_str() {
-        let mut dns = Dns::new(IpNetwork::default().iter());
+        let mut dns = Dns::new(IpSubnet::default().iter());
         let generated_addr = dns.lookup("foo");
 
         let hostname_port = "foo:5000".to_socket_addr(&dns);
@@ -244,7 +244,7 @@ mod tests {
         // lookups of raw ip addrs should be consistent
         // between to_ip_addr() and to_socket_addr()
         // for &str and IpAddr
-        let mut dns = Dns::new(IpNetwork::default().iter());
+        let mut dns = Dns::new(IpSubnet::default().iter());
         let addr = dns.lookup(Ipv4Addr::new(192, 168, 2, 2));
         assert_eq!(addr, Ipv4Addr::new(192, 168, 2, 2));
 

@@ -1,34 +1,37 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-/// The address layout of the underlying network.
+/// A subnet defining the available addresses in the
+/// underlying network.
 ///
 /// The default value is an Ipv4 subnet with addresses
 /// in the range `192.168.0.0/16`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IpNetwork {
-    /// An Ipv4 capable network, with a given subnet address range.
-    V4(Ipv4Network),
-    /// An Ipv6 capable network, with a given subnet address range.
-    V6(Ipv6Network),
+pub enum IpSubnet {
+    /// An Ipv4 capable subnet, with a given address range.
+    V4(Ipv4Subnet),
+    /// An Ipv6 capable subnet, with a given address range.
+    V6(Ipv6Subnet),
 }
 
+/// An Ipv4 subnet, defining a range of availale Ipv4 addresses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Ipv4Network {
+pub struct Ipv4Subnet {
     prefix: Ipv4Addr,
     mask: Ipv4Addr,
 }
 
+/// An Ipv6 subnet, defining a range of availale Ipv6 addresses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Ipv6Network {
+pub struct Ipv6Subnet {
     prefix: Ipv6Addr,
     mask: Ipv6Addr,
 }
 
-impl IpNetwork {
-    pub(crate) fn iter(&self) -> IpNetworkIter {
+impl IpSubnet {
+    pub(crate) fn iter(&self) -> IpSubnetIter {
         match self {
-            IpNetwork::V4(v4) => IpNetworkIter::V4(*v4, 1),
-            IpNetwork::V6(v6) => IpNetworkIter::V6(*v6, 1),
+            IpSubnet::V4(v4) => IpSubnetIter::V4(*v4, 1),
+            IpSubnet::V6(v6) => IpSubnetIter::V6(*v6, 1),
         }
     }
 
@@ -41,7 +44,7 @@ impl IpNetwork {
     }
 }
 
-impl Ipv4Network {
+impl Ipv4Subnet {
     /// A new instance of `Ipv4Network`.
     ///
     /// The provided prefix is truncated according to the
@@ -50,14 +53,14 @@ impl Ipv4Network {
     /// # Panics
     ///
     /// This function panic if the prefixlen exceeds 32.
-    pub fn new(prefix: Ipv4Addr, prefixlen: usize) -> Ipv4Network {
+    pub fn new(prefix: Ipv4Addr, prefixlen: usize) -> Ipv4Subnet {
         assert!(
             prefixlen <= 32,
             "prefix lengths greater than 32 are not possible in Ipv4 networks"
         );
         let mask = Ipv4Addr::from(!(u32::MAX >> prefixlen));
         let prefix = Ipv4Addr::from(u32::from(prefix) & u32::from(mask));
-        Ipv4Network { prefix, mask }
+        Ipv4Subnet { prefix, mask }
     }
 
     pub fn contains(&self, addr: Ipv4Addr) -> bool {
@@ -65,7 +68,7 @@ impl Ipv4Network {
     }
 }
 
-impl Ipv6Network {
+impl Ipv6Subnet {
     /// A new instance of `Ipv6Network`.
     ///
     /// The provided prefix is truncated according to the
@@ -74,14 +77,14 @@ impl Ipv6Network {
     /// # Panics
     ///
     /// This function panic if the prefixlen exceeds 128.
-    pub fn new(prefix: Ipv6Addr, prefixlen: usize) -> Ipv6Network {
+    pub fn new(prefix: Ipv6Addr, prefixlen: usize) -> Ipv6Subnet {
         assert!(
             prefixlen <= 128,
             "prefix lengths greater than 128 are not possible in Ipv6 networks"
         );
         let mask = Ipv6Addr::from(!(u128::MAX >> prefixlen));
         let prefix = Ipv6Addr::from(u128::from(prefix) & u128::from(mask));
-        Ipv6Network { prefix, mask }
+        Ipv6Subnet { prefix, mask }
     }
 
     pub fn contains(&self, addr: Ipv6Addr) -> bool {
@@ -89,45 +92,45 @@ impl Ipv6Network {
     }
 }
 
-impl Default for IpNetwork {
+impl Default for IpSubnet {
     fn default() -> Self {
-        IpNetwork::V4(Ipv4Network::default())
+        IpSubnet::V4(Ipv4Subnet::default())
     }
 }
 
-impl Default for Ipv4Network {
+impl Default for Ipv4Subnet {
     fn default() -> Self {
-        Ipv4Network::new(Ipv4Addr::new(192, 168, 0, 0), 16)
+        Ipv4Subnet::new(Ipv4Addr::new(192, 168, 0, 0), 16)
     }
 }
 
-impl Default for Ipv6Network {
+impl Default for Ipv6Subnet {
     fn default() -> Self {
-        Ipv6Network::new(
+        Ipv6Subnet::new(
             Ipv6Addr::from(0xfe80_0000_0000_0000_0000_0000_0000_0000),
             64,
         )
     }
 }
 
-impl From<Ipv4Network> for IpNetwork {
-    fn from(value: Ipv4Network) -> Self {
-        IpNetwork::V4(value)
+impl From<Ipv4Subnet> for IpSubnet {
+    fn from(value: Ipv4Subnet) -> Self {
+        IpSubnet::V4(value)
     }
 }
 
-impl From<Ipv6Network> for IpNetwork {
-    fn from(value: Ipv6Network) -> Self {
-        IpNetwork::V6(value)
+impl From<Ipv6Subnet> for IpSubnet {
+    fn from(value: Ipv6Subnet) -> Self {
+        IpSubnet::V6(value)
     }
 }
 
-pub(crate) enum IpNetworkIter {
-    V4(Ipv4Network, u32),
-    V6(Ipv6Network, u128),
+pub(crate) enum IpSubnetIter {
+    V4(Ipv4Subnet, u32),
+    V6(Ipv6Subnet, u128),
 }
 
-impl IpNetworkIter {
+impl IpSubnetIter {
     pub(crate) fn next(&mut self) -> IpAddr {
         match self {
             Self::V4(net, next) => {
@@ -150,8 +153,8 @@ impl IpNetworkIter {
 
 #[cfg(test)]
 mod tests {
-    use super::Ipv6Network;
-    use crate::{lookup, Builder, Ipv4Network, Result};
+    use super::Ipv6Subnet;
+    use crate::{lookup, Builder, Ipv4Subnet, Result};
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     #[test]
@@ -178,7 +181,7 @@ mod tests {
 
     #[test]
     fn default_ipv6() -> Result {
-        let mut sim = Builder::new().ip_network(Ipv6Network::default()).build();
+        let mut sim = Builder::new().ip_network(Ipv6Subnet::default()).build();
         sim.client("client", async move {
             assert_eq!(
                 lookup("client"),
@@ -207,7 +210,7 @@ mod tests {
     #[test]
     fn custom_ipv4() -> Result {
         let mut sim = Builder::new()
-            .ip_network(Ipv4Network::new(Ipv4Addr::new(10, 1, 3, 0), 24))
+            .ip_network(Ipv4Subnet::new(Ipv4Addr::new(10, 1, 3, 0), 24))
             .build();
 
         sim.client("a", async move {
@@ -229,7 +232,7 @@ mod tests {
     #[test]
     fn custom_ipv6() -> Result {
         let mut sim = Builder::new()
-            .ip_network(Ipv6Network::new(
+            .ip_network(Ipv6Subnet::new(
                 Ipv6Addr::new(0x2001, 0, 0, 0, 0, 0, 0, 0),
                 64,
             ))
@@ -255,7 +258,7 @@ mod tests {
     #[should_panic = "node address is not contained within the available subnet"]
     fn subnet_denies_invalid_addr_v4() {
         let mut sim = Builder::new()
-            .ip_network(Ipv4Network::new(Ipv4Addr::new(1, 2, 3, 4), 16))
+            .ip_network(Ipv4Subnet::new(Ipv4Addr::new(1, 2, 3, 4), 16))
             .build();
 
         sim.client("30.0.0.0", async move { Ok(()) });
@@ -266,7 +269,7 @@ mod tests {
     #[should_panic = "node address is not contained within the available subnet"]
     fn subnet_denies_invalid_addr_v6() {
         let mut sim = Builder::new()
-            .ip_network(Ipv6Network::new(
+            .ip_network(Ipv6Subnet::new(
                 Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, 0),
                 64,
             ))
