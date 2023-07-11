@@ -181,7 +181,7 @@ mod tests {
 
     #[test]
     fn default_ipv6() -> Result {
-        let mut sim = Builder::new().ip_network(Ipv6Subnet::default()).build();
+        let mut sim = Builder::new().ip_subnet(Ipv6Subnet::default()).build();
         sim.client("client", async move {
             assert_eq!(
                 lookup("client"),
@@ -210,7 +210,7 @@ mod tests {
     #[test]
     fn custom_ipv4() -> Result {
         let mut sim = Builder::new()
-            .ip_network(Ipv4Subnet::new(Ipv4Addr::new(10, 1, 3, 0), 24))
+            .ip_subnet(Ipv4Subnet::new(Ipv4Addr::new(10, 1, 3, 0), 24))
             .build();
 
         sim.client("a", async move {
@@ -232,7 +232,7 @@ mod tests {
     #[test]
     fn custom_ipv6() -> Result {
         let mut sim = Builder::new()
-            .ip_network(Ipv6Subnet::new(
+            .ip_subnet(Ipv6Subnet::new(
                 Ipv6Addr::new(0x2001, 0, 0, 0, 0, 0, 0, 0),
                 64,
             ))
@@ -258,7 +258,7 @@ mod tests {
     #[should_panic = "node address is not contained within the available subnet"]
     fn subnet_denies_invalid_addr_v4() {
         let mut sim = Builder::new()
-            .ip_network(Ipv4Subnet::new(Ipv4Addr::new(1, 2, 3, 4), 16))
+            .ip_subnet(Ipv4Subnet::new(Ipv4Addr::new(1, 2, 3, 4), 16))
             .build();
 
         sim.client("30.0.0.0", async move { Ok(()) });
@@ -269,7 +269,7 @@ mod tests {
     #[should_panic = "node address is not contained within the available subnet"]
     fn subnet_denies_invalid_addr_v6() {
         let mut sim = Builder::new()
-            .ip_network(Ipv6Subnet::new(
+            .ip_subnet(Ipv6Subnet::new(
                 Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, 0),
                 64,
             ))

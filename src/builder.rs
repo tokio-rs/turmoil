@@ -52,7 +52,7 @@ impl Builder {
     }
 
     /// Which kind of network should be simulated.
-    pub fn ip_network(&mut self, value: impl Into<IpSubnet>) -> &mut Self {
+    pub fn ip_subnet(&mut self, value: impl Into<IpSubnet>) -> &mut Self {
         self.subnet = value.into();
         self
     }

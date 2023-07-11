@@ -686,7 +686,7 @@ fn split() -> Result {
 
 #[test]
 fn bind_ipv4_socket() -> Result {
-    let mut sim = Builder::new().ip_network(Ipv4Subnet::default()).build();
+    let mut sim = Builder::new().ip_subnet(Ipv4Subnet::default()).build();
     sim.client("client", async move {
         let sock = bind_to_v4(0).await?;
         assert!(sock.local_addr().unwrap().is_ipv4());
@@ -697,7 +697,7 @@ fn bind_ipv4_socket() -> Result {
 
 #[test]
 fn bind_ipv6_socket() -> Result {
-    let mut sim = Builder::new().ip_network(Ipv6Subnet::default()).build();
+    let mut sim = Builder::new().ip_subnet(Ipv6Subnet::default()).build();
     sim.client("client", async move {
         let sock = bind_to_v6(0).await?;
         assert!(sock.local_addr().unwrap().is_ipv6());
@@ -709,7 +709,7 @@ fn bind_ipv6_socket() -> Result {
 #[test]
 #[should_panic]
 fn bind_ipv4_version_missmatch() {
-    let mut sim = Builder::new().ip_network(Ipv6Subnet::default()).build();
+    let mut sim = Builder::new().ip_subnet(Ipv6Subnet::default()).build();
     sim.client("client", async move {
         let _sock = bind_to_v4(0).await?;
         Ok(())
@@ -720,7 +720,7 @@ fn bind_ipv4_version_missmatch() {
 #[test]
 #[should_panic]
 fn bind_ipv6_version_missmatch() {
-    let mut sim = Builder::new().ip_network(Ipv4Subnet::default()).build();
+    let mut sim = Builder::new().ip_subnet(Ipv4Subnet::default()).build();
     sim.client("client", async move {
         let _sock = bind_to_v6(0).await?;
         Ok(())
@@ -730,7 +730,7 @@ fn bind_ipv6_version_missmatch() {
 
 #[test]
 fn ipv6_connectivity() -> Result {
-    let mut sim = Builder::new().ip_network(Ipv6Subnet::default()).build();
+    let mut sim = Builder::new().ip_subnet(Ipv6Subnet::default()).build();
     sim.client("server", async move {
         let list = TcpListener::bind(("::", 80)).await.unwrap();
         let _stream = list.accept().await.unwrap();
@@ -774,7 +774,7 @@ fn run_localhost_test(
     bind_addr: SocketAddr,
     connect_addr: SocketAddr,
 ) -> Result {
-    let mut sim = Builder::new().ip_network(ip_version).build();
+    let mut sim = Builder::new().ip_subnet(ip_version).build();
     let expected = [0, 1, 7, 3, 8];
     sim.client("client", async move {
         let listener = TcpListener::bind(bind_addr).await?;
