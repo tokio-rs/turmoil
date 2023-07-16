@@ -29,6 +29,7 @@ impl Builder {
             link: config::Link {
                 latency: Some(config::Latency::default()),
                 message_loss: Some(config::MessageLoss::default()),
+                message_duplication: Some(config::MessageDupliaction::default()),
             },
         }
     }

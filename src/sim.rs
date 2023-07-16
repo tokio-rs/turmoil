@@ -258,6 +258,25 @@ impl<'a> Sim<'a> {
         });
     }
 
+    pub fn set_message_duplication_rate(&mut self, value: f64) {
+        self.world.borrow_mut().topology.set_duplication_rate(value);
+    }
+
+    pub fn set_link_message_duplication_rate(
+        &mut self,
+        a: impl ToIpAddrs,
+        b: impl ToIpAddrs,
+        value: f64,
+    ) {
+        let mut world = self.world.borrow_mut();
+        let a = world.lookup_many(a);
+        let b = world.lookup_many(b);
+
+        for_pairs(&a, &b, |a, b| {
+            world.topology.set_link_duplication_rate(a, b, value);
+        });
+    }
+
     /// Access a [`LinksIter`] to introspect inflight messages between hosts.
     pub fn links(&self, f: impl FnOnce(LinksIter)) {
         let top = &mut self.world.borrow_mut().topology;

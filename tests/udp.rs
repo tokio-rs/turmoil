@@ -297,6 +297,45 @@ fn bounce() -> Result {
 }
 
 #[test]
+fn duplicate() {
+    let mut sim = Builder::new().build();
+    sim.set_message_duplication_rate(1.0);
+
+    let msgs_to_send = 10;
+
+    sim.client("server", async move {
+        let sock = bind_to_v4(123).await.unwrap();
+
+        let mut total = 0;
+        loop {
+            let _ = recv_ping(&sock).await.unwrap();
+            total += 1;
+            if total == msgs_to_send * 2 {
+                break;
+            }
+        }
+        // Sim is configured to duplicate all messages.
+        assert_eq!(total, msgs_to_send * 2);
+
+        Ok(())
+    });
+
+    sim.client("client", async move {
+        let sock = bind_to_v4(456).await.unwrap();
+
+        let server = (lookup("server"), 123);
+
+        for _ in 0..msgs_to_send {
+            let _ = sock.send_to(b"ping", server).await.unwrap();
+        }
+
+        Ok(())
+    });
+
+    sim.run().unwrap();
+}
+
+#[test]
 fn bulk_transfer() -> Result {
     // set the latency to a well-known value
     let latency = Duration::from_millis(1);

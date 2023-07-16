@@ -207,6 +207,16 @@ impl Topology {
             .fail_rate = value;
     }
 
+    pub(crate) fn set_duplication_rate(&mut self, value: f64) {
+        self.config.message_duplication_mut().duplication_rate = value;
+    }
+
+    pub(crate) fn set_link_duplication_rate(&mut self, a: IpAddr, b: IpAddr, value: f64) {
+        self.links[&Pair::new(a, b)]
+            .message_duplication(self.config.message_duplication())
+            .duplication_rate = value;
+    }
+
     // Send a `message` from `src` to `dst`. This method returns immediately,
     // and message delivery happens at a later time (or never, if the link is
     // broken).
@@ -273,6 +283,7 @@ impl Sent {
     }
 }
 
+#[derive(Clone)]
 enum DeliveryStatus {
     DeliverAfter(Instant),
     Hold,
@@ -333,6 +344,21 @@ impl Link {
                 return;
             }
         };
+
+        match message {
+            // Duplicate UDP messages
+            Protocol::Udp(ref datagram)
+                if self.rand_duplication(global_config.message_duplication(), rand) =>
+            {
+                self.sent.push_back(Sent {
+                    src,
+                    dst,
+                    status: status.clone(),
+                    protocol: Protocol::Udp(datagram.clone()),
+                });
+            }
+            _ => {}
+        }
 
         let sent = Sent {
             src,
@@ -451,6 +477,16 @@ impl Link {
         repair_rate > 0.0 && rand.gen_bool(repair_rate)
     }
 
+    fn rand_duplication(
+        &self,
+        global: &config::MessageDupliaction,
+        rand: &mut dyn RngCore,
+    ) -> bool {
+        let config = self.config.message_duplication.as_ref().unwrap_or(global);
+        let repair_rate = config.duplication_rate;
+        repair_rate > 0.0 && rand.gen_bool(repair_rate)
+    }
+
     fn delay(&self, global: &config::Latency, rand: &mut dyn RngCore) -> Duration {
         let config = self.config.latency.as_ref().unwrap_or(global);
 
@@ -468,6 +504,15 @@ impl Link {
     fn message_loss(&mut self, global: &config::MessageLoss) -> &mut config::MessageLoss {
         self.config
             .message_loss
+            .get_or_insert_with(|| global.clone())
+    }
+
+    fn message_duplication(
+        &mut self,
+        global: &config::MessageDupliaction,
+    ) -> &mut config::MessageDupliaction {
+        self.config
+            .message_duplication
             .get_or_insert_with(|| global.clone())
     }
 }

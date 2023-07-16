@@ -27,6 +27,9 @@ pub(crate) struct Link {
 
     /// How often sending a message works vs. the message getting dropped
     pub(crate) message_loss: Option<MessageLoss>,
+
+    /// How often a sent message is duplicated. Only applies to UDP.
+    pub(crate) message_duplication: Option<MessageDupliaction>,
 }
 
 /// Configure latency behavior between two hosts.
@@ -50,6 +53,13 @@ pub(crate) struct MessageLoss {
 
     /// Probability of a failed link returning
     pub(crate) repair_rate: f64,
+}
+
+/// Configure how often messages are duplicated
+#[derive(Clone)]
+pub(crate) struct MessageDupliaction {
+    /// Probability of a link duplicating messages. Only applies to UDP.
+    pub(crate) duplication_rate: f64,
 }
 
 impl Default for Config {
@@ -80,6 +90,18 @@ impl Link {
     pub(crate) fn message_loss_mut(&mut self) -> &mut MessageLoss {
         self.message_loss.as_mut().expect("`MessageLoss` missing")
     }
+
+    pub(crate) fn message_duplication(&self) -> &MessageDupliaction {
+        self.message_duplication
+            .as_ref()
+            .expect("`MessageDupliaction` missing")
+    }
+
+    pub(crate) fn message_duplication_mut(&mut self) -> &mut MessageDupliaction {
+        self.message_duplication
+            .as_mut()
+            .expect("`MessageDupliaction` missing")
+    }
 }
 
 impl Default for Latency {
@@ -97,6 +119,14 @@ impl Default for MessageLoss {
         MessageLoss {
             fail_rate: 0.0,
             repair_rate: 1.0,
+        }
+    }
+}
+
+impl Default for MessageDupliaction {
+    fn default() -> MessageDupliaction {
+        MessageDupliaction {
+            duplication_rate: 0.0,
         }
     }
 }
