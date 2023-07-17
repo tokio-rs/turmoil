@@ -170,6 +170,24 @@ impl<'a> Sim<'a> {
         self.world.borrow_mut().lookup(addr)
     }
 
+    /// Hold messages between two hosts, or sets of hosts, until [`release`] is
+    /// called.
+    pub fn hold(&self, a: IpAddr, b: IpAddr) {
+        self.world.borrow_mut().hold(a, b);
+    }
+
+    /// Repair the connection between two hosts, or sets of hosts, resulting in
+    /// messages to be delivered.
+    pub fn repair(&self, a: IpAddr, b: IpAddr) {
+        self.world.borrow_mut().repair(a, b);
+    }
+
+    /// Partition two hosts, or sets of hosts, resulting in all messages sent
+    /// between them to be dropped.
+    pub fn partition(&self, a: IpAddr, b: IpAddr) {
+        self.world.borrow_mut().partition(a, b);
+    }
+
     /// Resolve host names for an [`IpAddr`] pair.
     ///
     /// Useful when interacting with network [links](#method.links).
@@ -469,6 +487,47 @@ mod test {
 
     #[test]
     fn elapsed_time() -> Result {
+        let tick = Duration::from_millis(5);
+        let mut sim = Builder::new().tick_duration(tick).build();
+
+        let duration = Duration::from_millis(500);
+
+        sim.client("c1", async move {
+            tokio::time::sleep(duration).await;
+            assert_eq!(duration, elapsed());
+
+            Ok(())
+        });
+
+        sim.client("c2", async move {
+            tokio::time::sleep(duration).await;
+            assert_eq!(duration, elapsed());
+
+            Ok(())
+        });
+
+        sim.run()?;
+
+        // sleep duration plus one tick to complete
+        assert_eq!(duration + tick, sim.elapsed());
+
+        let start = sim.elapsed();
+        sim.client("c3", async move {
+            assert_eq!(Duration::ZERO, elapsed());
+
+            Ok(())
+        });
+
+        sim.run()?;
+
+        // one tick to complete
+        assert_eq!(tick, sim.elapsed() - start);
+
+        Ok(())
+    }
+
+    #[test]
+    fn hold_peers() -> Result {
         let tick = Duration::from_millis(5);
         let mut sim = Builder::new().tick_duration(tick).build();
 
