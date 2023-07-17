@@ -580,12 +580,14 @@ mod test {
 
         sim.hold("server", "client");
 
+        // Verify that msg is not delivered.
         sim.step()?;
 
         sim.links(|l| {
             assert!(l.count() == 1);
         });
 
+        // Verify that msg is still not delivered.
         sim.step()?;
 
         sim.release("server", "client");
