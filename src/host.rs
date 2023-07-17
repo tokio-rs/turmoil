@@ -176,8 +176,6 @@ impl Udp {
             }
             if let Err(err) = bind.queue.try_send((datagram, src)) {
                 // drop any packets that exceed the capacity
-                // TODO: ideally we should drop the oldest packets instead of new ones, but this would
-                //       require a different channel implementation.
                 match err {
                     mpsc::error::TrySendError::Full((datagram, _)) => {
                         tracing::trace!(target: TRACING_TARGET, ?src, ?dst, protocol = %Protocol::Udp(datagram), "Dropped (Full buffer)");
