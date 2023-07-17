@@ -172,20 +172,45 @@ impl<'a> Sim<'a> {
 
     /// Hold messages between two hosts, or sets of hosts, until [`release`] is
     /// called.
-    pub fn hold(&self, a: IpAddr, b: IpAddr) {
-        self.world.borrow_mut().hold(a, b);
+    pub fn hold(&self, a: impl ToIpAddrs, b: impl ToIpAddrs) {
+        let mut world = self.world.borrow_mut();
+        let a_addrs = world.lookup_many(a);
+        let b_addrs = world.lookup_many(b);
+        for_pairs(&a_addrs, &b_addrs, |a, b| {
+            world.hold(a, b);
+        });
     }
 
     /// Repair the connection between two hosts, or sets of hosts, resulting in
     /// messages to be delivered.
-    pub fn repair(&self, a: IpAddr, b: IpAddr) {
-        self.world.borrow_mut().repair(a, b);
+    pub fn repair(&self, a: impl ToIpAddrs, b: impl ToIpAddrs) {
+        let mut world = self.world.borrow_mut();
+        let a_addrs = world.lookup_many(a);
+        let b_addrs = world.lookup_many(b);
+        for_pairs(&a_addrs, &b_addrs, |a, b| {
+            world.repair(a, b);
+        });
+    }
+
+    /// The opposite of [`hold`]. All held messages are immediately delivered.
+    pub fn release(&self, a: impl ToIpAddrs, b: impl ToIpAddrs) {
+        let mut world = self.world.borrow_mut();
+        let a_addrs = world.lookup_many(a);
+        let b_addrs = world.lookup_many(b);
+        for_pairs(&a_addrs, &b_addrs, |a, b| {
+            world.release(a, b);
+        });
     }
 
     /// Partition two hosts, or sets of hosts, resulting in all messages sent
     /// between them to be dropped.
-    pub fn partition(&self, a: IpAddr, b: IpAddr) {
-        self.world.borrow_mut().partition(a, b);
+    pub fn partition(&self, a: impl ToIpAddrs, b: impl ToIpAddrs) {
+        let mut world = self.world.borrow_mut();
+        let a_addrs = world.lookup_many(a);
+        let b_addrs = world.lookup_many(b);
+        for_pairs(&a_addrs, &b_addrs, |a, b| {
+            world.partition(a, b);
+        });
     }
 
     /// Resolve host names for an [`IpAddr`] pair.
@@ -527,42 +552,74 @@ mod test {
     }
 
     #[test]
-    fn hold_peers() -> Result {
-        let tick = Duration::from_millis(5);
-        let mut sim = Builder::new().tick_duration(tick).build();
+    fn hold_release_peers() -> Result {
+        let global = Duration::from_millis(2);
 
-        let duration = Duration::from_millis(500);
+        let mut sim = Builder::new()
+            .min_message_latency(global)
+            .max_message_latency(global)
+            .build();
 
-        sim.client("c1", async move {
-            tokio::time::sleep(duration).await;
-            assert_eq!(duration, elapsed());
+        sim.host("server", || async {
+            let listener = TcpListener::bind((IpAddr::V4(Ipv4Addr::UNSPECIFIED), 1234)).await?;
+
+            while let Ok((mut s, _)) = listener.accept().await {
+                assert!(s.write_u8(42).await.is_ok());
+            }
+
+            Ok(())
+        });
+
+        sim.client("client", async move {
+            let mut s = TcpStream::connect("server:1234").await?;
+
+            s.read_u8().await?;
 
             Ok(())
         });
 
-        sim.client("c2", async move {
-            tokio::time::sleep(duration).await;
-            assert_eq!(duration, elapsed());
+        sim.hold("server", "client");
 
-            Ok(())
+        sim.step()?;
+
+        sim.links(|l| {
+            assert!(l.count() == 1);
         });
+
+        sim.step()?;
+
+        sim.release("server", "client");
 
         sim.run()?;
 
-        // sleep duration plus one tick to complete
-        assert_eq!(duration + tick, sim.elapsed());
+        Ok(())
+    }
 
-        let start = sim.elapsed();
-        sim.client("c3", async move {
-            assert_eq!(Duration::ZERO, elapsed());
+    #[test]
+    fn partition_peers() -> Result {
+        let global = Duration::from_millis(2);
+
+        let mut sim = Builder::new()
+            .min_message_latency(global)
+            .max_message_latency(global)
+            .build();
+
+        sim.host("server", || async {
+            let _listener = TcpListener::bind((IpAddr::V4(Ipv4Addr::UNSPECIFIED), 1234)).await?;
 
             Ok(())
         });
 
-        sim.run()?;
+        sim.client("client", async move {
+            // Peers are partitioned. TCP setup should fail.
+            let _ = TcpStream::connect("server:1234").await.unwrap_err();
 
-        // one tick to complete
-        assert_eq!(tick, sim.elapsed() - start);
+            Ok(())
+        });
+
+        sim.partition("server", "client");
+
+        sim.run()?;
 
         Ok(())
     }
