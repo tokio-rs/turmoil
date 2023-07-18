@@ -156,28 +156,14 @@ pub fn lookup_many(addr: impl ToIpAddrs) -> Vec<IpAddr> {
 ///
 /// Must be called from within a Turmoil simulation.
 pub fn hold(a: impl ToIpAddrs, b: impl ToIpAddrs) {
-    World::current(|world| {
-        let a = world.lookup_many(a);
-        let b = world.lookup_many(b);
-
-        for_pairs(&a, &b, |a, b| {
-            world.hold(a, b);
-        });
-    })
+    World::current(|world| world.hold_many(a, b))
 }
 
 /// The opposite of [`hold`]. All held messages are immediately delivered.
 ///
 /// Must be called from within a Turmoil simulation.
 pub fn release(a: impl ToIpAddrs, b: impl ToIpAddrs) {
-    World::current(|world| {
-        let a = world.lookup_many(a);
-        let b = world.lookup_many(b);
-
-        for_pairs(&a, &b, |a, b| {
-            world.release(a, b);
-        });
-    })
+    World::current(|world| world.release_many(a, b))
 }
 
 /// Partition two hosts, or sets of hosts, resulting in all messages sent
@@ -185,14 +171,7 @@ pub fn release(a: impl ToIpAddrs, b: impl ToIpAddrs) {
 ///
 /// Must be called from within a Turmoil simulation.
 pub fn partition(a: impl ToIpAddrs, b: impl ToIpAddrs) {
-    World::current(|world| {
-        let a = world.lookup_many(a);
-        let b = world.lookup_many(b);
-
-        for_pairs(&a, &b, |a, b| {
-            world.partition(a, b);
-        });
-    })
+    World::current(|world| world.partition_many(a, b))
 }
 
 /// Repair the connection between two hosts, or sets of hosts, resulting in
@@ -200,12 +179,5 @@ pub fn partition(a: impl ToIpAddrs, b: impl ToIpAddrs) {
 ///
 /// Must be called from within a Turmoil simulation.
 pub fn repair(a: impl ToIpAddrs, b: impl ToIpAddrs) {
-    World::current(|world| {
-        let a = world.lookup_many(a);
-        let b = world.lookup_many(b);
-
-        for_pairs(&a, &b, |a, b| {
-            world.repair(a, b);
-        });
-    })
+    World::current(|world| world.repair_many(a, b))
 }

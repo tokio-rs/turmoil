@@ -174,43 +174,27 @@ impl<'a> Sim<'a> {
     /// called.
     pub fn hold(&self, a: impl ToIpAddrs, b: impl ToIpAddrs) {
         let mut world = self.world.borrow_mut();
-        let a_addrs = world.lookup_many(a);
-        let b_addrs = world.lookup_many(b);
-        for_pairs(&a_addrs, &b_addrs, |a, b| {
-            world.hold(a, b);
-        });
+        world.hold_many(a, b);
     }
 
     /// Repair the connection between two hosts, or sets of hosts, resulting in
     /// messages to be delivered.
     pub fn repair(&self, a: impl ToIpAddrs, b: impl ToIpAddrs) {
         let mut world = self.world.borrow_mut();
-        let a_addrs = world.lookup_many(a);
-        let b_addrs = world.lookup_many(b);
-        for_pairs(&a_addrs, &b_addrs, |a, b| {
-            world.repair(a, b);
-        });
+        world.repair_many(a, b);
     }
 
     /// The opposite of [`hold`]. All held messages are immediately delivered.
     pub fn release(&self, a: impl ToIpAddrs, b: impl ToIpAddrs) {
         let mut world = self.world.borrow_mut();
-        let a_addrs = world.lookup_many(a);
-        let b_addrs = world.lookup_many(b);
-        for_pairs(&a_addrs, &b_addrs, |a, b| {
-            world.release(a, b);
-        });
+        world.release_many(a, b);
     }
 
     /// Partition two hosts, or sets of hosts, resulting in all messages sent
     /// between them to be dropped.
     pub fn partition(&self, a: impl ToIpAddrs, b: impl ToIpAddrs) {
         let mut world = self.world.borrow_mut();
-        let a_addrs = world.lookup_many(a);
-        let b_addrs = world.lookup_many(b);
-        for_pairs(&a_addrs, &b_addrs, |a, b| {
-            world.partition(a, b);
-        });
+        world.partition_many(a, b);
     }
 
     /// Resolve host names for an [`IpAddr`] pair.
