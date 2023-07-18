@@ -594,3 +594,24 @@ fn socket_capacity() -> Result {
 
     sim.run()
 }
+
+#[test]
+fn socket_to_nonexistent_node() -> Result {
+    let mut sim = Builder::new().build();
+    sim.client("client", async move {
+        assert_eq!(lookup("client"), Ipv4Addr::new(192, 168, 0, 1));
+        let sock = UdpSocket::bind("0.0.0.0:0").await?;
+        let send = sock.send_to(b"Hello world!", "192.168.0.2:80").await;
+        assert!(
+            send.is_err(),
+            "Send operation should have failed, since node does not exist"
+        );
+
+        let err = send.unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::ConnectionRefused);
+        assert_eq!(err.to_string(), "host unreachable");
+
+        Ok(())
+    });
+    sim.run()
+}

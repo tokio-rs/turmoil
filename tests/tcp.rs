@@ -1,5 +1,6 @@
 use std::{
-    assert_eq, assert_ne, io,
+    assert_eq, assert_ne,
+    io::{self, ErrorKind},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     rc::Rc,
     time::Duration,
@@ -12,6 +13,7 @@ use tokio::{
     time::timeout,
 };
 use turmoil::{
+    lookup,
     net::{TcpListener, TcpStream},
     Builder, IpVersion, Result,
 };
@@ -939,4 +941,24 @@ fn socket_capacity() {
     });
 
     _ = sim.run();
+}
+
+#[test]
+fn socket_to_nonexistent_node() -> Result {
+    let mut sim = Builder::new().build();
+    sim.client("client", async move {
+        assert_eq!(lookup("client"), Ipv4Addr::new(192, 168, 0, 1));
+        let sock = TcpStream::connect("192.168.0.2:80").await;
+        assert!(
+            sock.is_err(),
+            "Send operation should have failed, since node does not exist"
+        );
+
+        let err = sock.unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::ConnectionRefused);
+        assert_eq!(err.to_string(), "host unreachable");
+
+        Ok(())
+    });
+    sim.run()
 }

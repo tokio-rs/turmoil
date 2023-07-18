@@ -7,6 +7,7 @@ use indexmap::IndexMap;
 use rand::RngCore;
 use scoped_tls::scoped_thread_local;
 use std::cell::RefCell;
+use std::io::Result;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
@@ -121,9 +122,14 @@ impl World {
 
     /// Send `message` from `src` to `dst`. Delivery is asynchronous and not
     /// guaranteed.
-    pub(crate) fn send_message(&mut self, src: SocketAddr, dst: SocketAddr, message: Protocol) {
+    pub(crate) fn send_message(
+        &mut self,
+        src: SocketAddr,
+        dst: SocketAddr,
+        message: Protocol,
+    ) -> Result<()> {
         self.topology
-            .enqueue_message(&mut self.rng, src, dst, message);
+            .enqueue_message(&mut self.rng, src, dst, message)
     }
 
     /// Tick the host at `addr` by `duration`.

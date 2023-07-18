@@ -7,6 +7,7 @@ use indexmap::IndexMap;
 use rand::{Rng, RngCore};
 use rand_distr::{Distribution, Exp};
 use std::collections::VecDeque;
+use std::io::{Error, ErrorKind, Result};
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 use tokio::time::Instant;
@@ -216,9 +217,13 @@ impl Topology {
         src: SocketAddr,
         dst: SocketAddr,
         message: Protocol,
-    ) {
-        let link = &mut self.links[&Pair::new(src.ip(), dst.ip())];
-        link.enqueue_message(&self.config, rand, src, dst, message);
+    ) -> Result<()> {
+        if let Some(link) = self.links.get_mut(&Pair::new(src.ip(), dst.ip())) {
+            link.enqueue_message(&self.config, rand, src, dst, message);
+            Ok(())
+        } else {
+            Err(Error::new(ErrorKind::ConnectionRefused, "host unreachable"))
+        }
     }
 
     // Move messages from any network links to the `dst` host.
