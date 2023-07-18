@@ -170,6 +170,33 @@ impl<'a> Sim<'a> {
         self.world.borrow_mut().lookup(addr)
     }
 
+    /// Hold messages between two hosts, or sets of hosts, until [`release`] is
+    /// called.
+    pub fn hold(&self, a: impl ToIpAddrs, b: impl ToIpAddrs) {
+        let mut world = self.world.borrow_mut();
+        world.hold_many(a, b);
+    }
+
+    /// Repair the connection between two hosts, or sets of hosts, resulting in
+    /// messages to be delivered.
+    pub fn repair(&self, a: impl ToIpAddrs, b: impl ToIpAddrs) {
+        let mut world = self.world.borrow_mut();
+        world.repair_many(a, b);
+    }
+
+    /// The opposite of [`hold`]. All held messages are immediately delivered.
+    pub fn release(&self, a: impl ToIpAddrs, b: impl ToIpAddrs) {
+        let mut world = self.world.borrow_mut();
+        world.release_many(a, b);
+    }
+
+    /// Partition two hosts, or sets of hosts, resulting in all messages sent
+    /// between them to be dropped.
+    pub fn partition(&self, a: impl ToIpAddrs, b: impl ToIpAddrs) {
+        let mut world = self.world.borrow_mut();
+        world.partition_many(a, b);
+    }
+
     /// Resolve host names for an [`IpAddr`] pair.
     ///
     /// Useful when interacting with network [links](#method.links).
@@ -504,6 +531,81 @@ mod test {
 
         // one tick to complete
         assert_eq!(tick, sim.elapsed() - start);
+
+        Ok(())
+    }
+
+    #[test]
+    fn hold_release_peers() -> Result {
+        let global = Duration::from_millis(2);
+
+        let mut sim = Builder::new()
+            .min_message_latency(global)
+            .max_message_latency(global)
+            .build();
+
+        sim.host("server", || async {
+            let listener = TcpListener::bind((IpAddr::V4(Ipv4Addr::UNSPECIFIED), 1234)).await?;
+
+            while let Ok((mut s, _)) = listener.accept().await {
+                assert!(s.write_u8(42).await.is_ok());
+            }
+
+            Ok(())
+        });
+
+        sim.client("client", async move {
+            let mut s = TcpStream::connect("server:1234").await?;
+
+            s.read_u8().await?;
+
+            Ok(())
+        });
+
+        sim.hold("server", "client");
+
+        // Verify that msg is not delivered.
+        sim.step()?;
+
+        sim.links(|l| {
+            assert!(l.count() == 1);
+        });
+
+        // Verify that msg is still not delivered.
+        sim.step()?;
+
+        sim.release("server", "client");
+
+        sim.run()?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn partition_peers() -> Result {
+        let global = Duration::from_millis(2);
+
+        let mut sim = Builder::new()
+            .min_message_latency(global)
+            .max_message_latency(global)
+            .build();
+
+        sim.host("server", || async {
+            let _listener = TcpListener::bind((IpAddr::V4(Ipv4Addr::UNSPECIFIED), 1234)).await?;
+
+            Ok(())
+        });
+
+        sim.client("client", async move {
+            // Peers are partitioned. TCP setup should fail.
+            let _ = TcpStream::connect("server:1234").await.unwrap_err();
+
+            Ok(())
+        });
+
+        sim.partition("server", "client");
+
+        sim.run()?;
 
         Ok(())
     }

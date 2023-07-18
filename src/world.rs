@@ -1,7 +1,7 @@
 use crate::config::Config;
 use crate::envelope::Protocol;
 use crate::ip::IpVersionAddrIter;
-use crate::{config, Dns, Host, ToIpAddr, ToIpAddrs, Topology, TRACING_TARGET};
+use crate::{config, for_pairs, Dns, Host, ToIpAddr, ToIpAddrs, Topology, TRACING_TARGET};
 
 use indexmap::IndexMap;
 use rand::RngCore;
@@ -86,16 +86,52 @@ impl World {
         self.topology.hold(a, b);
     }
 
+    pub(crate) fn hold_many(&mut self, a: impl ToIpAddrs, b: impl ToIpAddrs) {
+        let a = self.lookup_many(a);
+        let b = self.lookup_many(b);
+
+        for_pairs(&a, &b, |a, b| {
+            self.hold(a, b);
+        });
+    }
+
     pub(crate) fn release(&mut self, a: IpAddr, b: IpAddr) {
         self.topology.release(a, b);
+    }
+
+    pub(crate) fn release_many(&mut self, a: impl ToIpAddrs, b: impl ToIpAddrs) {
+        let a = self.lookup_many(a);
+        let b = self.lookup_many(b);
+
+        for_pairs(&a, &b, |a, b| {
+            self.release(a, b);
+        });
     }
 
     pub(crate) fn partition(&mut self, a: IpAddr, b: IpAddr) {
         self.topology.partition(a, b);
     }
 
+    pub(crate) fn partition_many(&mut self, a: impl ToIpAddrs, b: impl ToIpAddrs) {
+        let a = self.lookup_many(a);
+        let b = self.lookup_many(b);
+
+        for_pairs(&a, &b, |a, b| {
+            self.partition(a, b);
+        });
+    }
+
     pub(crate) fn repair(&mut self, a: IpAddr, b: IpAddr) {
         self.topology.repair(a, b);
+    }
+
+    pub(crate) fn repair_many(&mut self, a: impl ToIpAddrs, b: impl ToIpAddrs) {
+        let a = self.lookup_many(a);
+        let b = self.lookup_many(b);
+
+        for_pairs(&a, &b, |a, b| {
+            self.repair(a, b);
+        });
     }
 
     /// Register a new host with the simulation.
