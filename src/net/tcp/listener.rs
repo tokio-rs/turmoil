@@ -1,4 +1,8 @@
-use std::{io::Result, net::SocketAddr, sync::Arc};
+use std::{
+    io::{Error, ErrorKind, Result},
+    net::SocketAddr,
+    sync::Arc,
+};
 
 use tokio::sync::Notify;
 
@@ -36,11 +40,17 @@ impl TcpListener {
             let host = world.current_host_mut();
 
             if !addr.ip().is_unspecified() && !addr.ip().is_loopback() {
-                panic!("{addr} is not supported");
+                return Err(Error::new(
+                    ErrorKind::AddrNotAvailable,
+                    "invalid argument - addr not supported",
+                ));
             }
 
             if addr.is_ipv4() != host.addr.is_ipv4() {
-                panic!("ip version mismatch: {:?} host: {:?}", addr, host.addr)
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    "invalid argument - ip version missmatch",
+                ));
             }
 
             if addr.port() == 0 {

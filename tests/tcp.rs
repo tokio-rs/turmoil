@@ -709,25 +709,46 @@ fn bind_ipv6_socket() -> Result {
 }
 
 #[test]
-#[should_panic]
-fn bind_ipv4_version_missmatch() {
+fn bind_ipv4_version_missmatch() -> Result {
     let mut sim = Builder::new().ip_version(IpVersion::V6).build();
     sim.client("client", async move {
-        let _sock = bind_to_v4(0).await?;
+        let sock = bind_to_v4(0).await;
+        assert!(sock.is_err());
+
+        let Err(err) = sock else { unreachable!() };
+        assert_eq!(err.to_string(), "invalid argument - ip version missmatch");
+
         Ok(())
     });
-    sim.run().unwrap()
+    sim.run()
 }
 
 #[test]
-#[should_panic]
-fn bind_ipv6_version_missmatch() {
+fn bind_ipv6_version_missmatch() -> Result {
     let mut sim = Builder::new().ip_version(IpVersion::V4).build();
     sim.client("client", async move {
-        let _sock = bind_to_v6(0).await?;
+        let sock = bind_to_v6(0).await;
+        assert!(sock.is_err());
+
+        let Err(err) = sock else { unreachable!() };
+        assert_eq!(err.to_string(), "invalid argument - ip version missmatch");
         Ok(())
     });
-    sim.run().unwrap()
+    sim.run()
+}
+
+#[test]
+fn non_zero_bind() -> Result {
+    let mut sim = Builder::new().ip_version(IpVersion::V4).build();
+    sim.client("client", async move {
+        let sock = TcpListener::bind("1.1.1.1:1").await;
+        assert!(sock.is_err());
+
+        let Err(err) = sock else { unreachable!() };
+        assert_eq!(err.to_string(), "invalid argument - addr not supported");
+        Ok(())
+    });
+    sim.run()
 }
 
 #[test]
