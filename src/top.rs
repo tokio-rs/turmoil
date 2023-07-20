@@ -222,7 +222,10 @@ impl Topology {
             link.enqueue_message(&self.config, rand, src, dst, message);
             Ok(())
         } else {
-            Err(Error::new(ErrorKind::ConnectionRefused, "host unreachable"))
+            Err(Error::new(
+                ErrorKind::ConnectionRefused,
+                "Connection refused",
+            ))
         }
     }
 

@@ -42,15 +42,12 @@ impl TcpListener {
             if !addr.ip().is_unspecified() && !addr.ip().is_loopback() {
                 return Err(Error::new(
                     ErrorKind::AddrNotAvailable,
-                    "invalid argument - addr not supported",
+                    format!("{addr} is not supported"),
                 ));
             }
 
             if addr.is_ipv4() != host.addr.is_ipv4() {
-                return Err(Error::new(
-                    ErrorKind::InvalidInput,
-                    "invalid argument - ip version missmatch",
-                ));
+                panic!("ip version mismatch: {:?} host: {:?}", addr, host.addr)
             }
 
             if addr.port() == 0 {

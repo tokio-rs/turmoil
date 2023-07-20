@@ -379,31 +379,25 @@ fn bind_ipv6_socket() -> Result {
 }
 
 #[test]
-fn bind_ipv4_version_missmatch() -> Result {
+#[should_panic]
+fn bind_ipv4_version_missmatch() {
     let mut sim = Builder::new().ip_version(IpVersion::V6).build();
     sim.client("client", async move {
-        let sock = bind_to_v4(0).await;
-        assert!(sock.is_err());
-
-        let Err(err) = sock else { unreachable!() };
-        assert_eq!(err.to_string(), "invalid argument - ip version missmatch");
+        let _sock = bind_to_v4(0).await?;
         Ok(())
     });
-    sim.run()
+    sim.run().unwrap()
 }
 
 #[test]
-fn bind_ipv6_version_missmatch() -> Result {
+#[should_panic]
+fn bind_ipv6_version_missmatch() {
     let mut sim = Builder::new().ip_version(IpVersion::V4).build();
     sim.client("client", async move {
-        let sock = bind_to_v6(0).await;
-        assert!(sock.is_err());
-
-        let Err(err) = sock else { unreachable!() };
-        assert_eq!(err.to_string(), "invalid argument - ip version missmatch");
+        let _sock = bind_to_v6(0).await?;
         Ok(())
     });
-    sim.run()
+    sim.run().unwrap()
 }
 
 #[test]
@@ -411,10 +405,9 @@ fn non_zero_bind() -> Result {
     let mut sim = Builder::new().ip_version(IpVersion::V4).build();
     sim.client("client", async move {
         let sock = UdpSocket::bind("1.1.1.1:1").await;
-        assert!(sock.is_err());
 
-        let Err(err) = sock else { unreachable!() };
-        assert_eq!(err.to_string(), "invalid argument - addr not supported");
+        let Err(err) = sock else { panic!("socket creation should have failed") };
+        assert_eq!(err.to_string(), "1.1.1.1:1 is not supported");
         Ok(())
     });
     sim.run()
@@ -629,7 +622,7 @@ fn socket_to_nonexistent_node() -> Result {
 
         let err = send.unwrap_err();
         assert_eq!(err.kind(), ErrorKind::ConnectionRefused);
-        assert_eq!(err.to_string(), "host unreachable");
+        assert_eq!(err.to_string(), "Connection refused");
 
         Ok(())
     });
