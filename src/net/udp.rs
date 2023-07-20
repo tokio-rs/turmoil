@@ -11,7 +11,7 @@ use crate::{
 
 use std::{
     cmp,
-    io::{self, Result},
+    io::{self, Error, ErrorKind, Result},
     net::SocketAddr,
     time::Duration,
 };
@@ -108,7 +108,10 @@ impl UdpSocket {
             let host = world.current_host_mut();
 
             if !addr.ip().is_unspecified() && !addr.ip().is_loopback() {
-                panic!("{addr} is not supported");
+                return Err(Error::new(
+                    ErrorKind::AddrNotAvailable,
+                    format!("{addr} is not supported"),
+                ));
             }
 
             if addr.is_ipv4() != host.addr.is_ipv4() {
@@ -145,7 +148,7 @@ impl UdpSocket {
     pub async fn send_to<A: ToSocketAddrs>(&self, buf: &[u8], target: A) -> Result<usize> {
         World::current(|world| {
             let dst = target.to_socket_addr(&world.dns);
-            self.send(world, dst, Datagram(Bytes::copy_from_slice(buf)));
+            self.send(world, dst, Datagram(Bytes::copy_from_slice(buf)))?;
             Ok(buf.len())
         })
     }
@@ -167,7 +170,7 @@ impl UdpSocket {
     pub fn try_send_to<A: ToSocketAddrs>(&self, buf: &[u8], target: A) -> Result<usize> {
         World::current(|world| {
             let dst = target.to_socket_addr(&world.dns);
-            self.send(world, dst, Datagram(Bytes::copy_from_slice(buf)));
+            self.send(world, dst, Datagram(Bytes::copy_from_slice(buf)))?;
             Ok(buf.len())
         })
     }
@@ -277,7 +280,7 @@ impl UdpSocket {
         Ok(self.local_addr)
     }
 
-    fn send(&self, world: &mut World, dst: SocketAddr, packet: Datagram) {
+    fn send(&self, world: &mut World, dst: SocketAddr, packet: Datagram) -> Result<()> {
         let msg = Protocol::Udp(packet);
 
         let mut src = self.local_addr;
@@ -291,8 +294,10 @@ impl UdpSocket {
         if dst.ip().is_loopback() {
             send_loopback(src, dst, msg);
         } else {
-            world.send_message(src, dst, msg);
+            world.send_message(src, dst, msg)?;
         }
+
+        Ok(())
     }
 }
 

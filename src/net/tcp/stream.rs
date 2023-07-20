@@ -1,6 +1,6 @@
 use std::{
     fmt::Debug,
-    io::{self, Result},
+    io::{self, Error, Result},
     net::SocketAddr,
     pin::Pin,
     sync::Arc,
@@ -75,13 +75,13 @@ impl TcpStream {
 
             let syn = Protocol::Tcp(Segment::Syn(Syn { ack }));
             if !dst.ip().is_loopback() {
-                world.send_message(local_addr, dst, syn);
+                world.send_message(local_addr, dst, syn)?;
             } else {
                 send_loopback(local_addr, dst, syn);
             };
 
-            (pair, rx)
-        });
+            Ok::<_, Error>((pair, rx))
+        })?;
 
         syn_ack.await.map_err(|_| {
             io::Error::new(io::ErrorKind::ConnectionRefused, pair.remote.to_string())
@@ -230,7 +230,7 @@ impl WriteHalf {
             let len = bytes.len();
 
             let seq = self.seq(world)?;
-            self.send(world, Segment::Data(seq, bytes));
+            self.send(world, Segment::Data(seq, bytes))?;
 
             Ok(len)
         });
@@ -248,7 +248,7 @@ impl WriteHalf {
 
         let res = World::current(|world| {
             let seq = self.seq(world)?;
-            self.send(world, Segment::Fin(seq));
+            self.send(world, Segment::Fin(seq))?;
 
             self.is_shutdown = true;
 
@@ -268,13 +268,14 @@ impl WriteHalf {
             .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "Broken pipe"))
     }
 
-    fn send(&self, world: &mut World, segment: Segment) {
+    fn send(&self, world: &mut World, segment: Segment) -> Result<()> {
         let message = Protocol::Tcp(segment);
         if self.pair.remote.ip().is_loopback() {
             send_loopback(self.pair.local, self.pair.remote, message);
         } else {
-            world.send_message(self.pair.local, self.pair.remote, message);
+            world.send_message(self.pair.local, self.pair.remote, message)?;
         }
+        Ok(())
     }
 }
 
@@ -372,7 +373,7 @@ impl Drop for WriteHalf {
             let pair = *self.pair;
 
             if let Some(seq) = world.current_host_mut().tcp.assign_send_seq(pair) {
-                self.send(world, Segment::Fin(seq));
+                let _ = self.send(world, Segment::Fin(seq));
                 world.current_host_mut().tcp.close_stream_half(pair);
             }
         })

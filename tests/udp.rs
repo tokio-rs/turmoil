@@ -401,6 +401,19 @@ fn bind_ipv6_version_missmatch() {
 }
 
 #[test]
+fn non_zero_bind() -> Result {
+    let mut sim = Builder::new().ip_version(IpVersion::V4).build();
+    sim.client("client", async move {
+        let sock = UdpSocket::bind("1.1.1.1:1").await;
+
+        let Err(err) = sock else { panic!("socket creation should have failed") };
+        assert_eq!(err.to_string(), "1.1.1.1:1 is not supported");
+        Ok(())
+    });
+    sim.run()
+}
+
+#[test]
 fn ipv6_connectivity() -> Result {
     let mut sim = Builder::new().ip_version(IpVersion::V6).build();
     sim.client("server", async move {
@@ -592,5 +605,26 @@ fn socket_capacity() -> Result {
         Ok(())
     });
 
+    sim.run()
+}
+
+#[test]
+fn socket_to_nonexistent_node() -> Result {
+    let mut sim = Builder::new().build();
+    sim.client("client", async move {
+        assert_eq!(lookup("client"), Ipv4Addr::new(192, 168, 0, 1));
+        let sock = UdpSocket::bind("0.0.0.0:0").await?;
+        let send = sock.send_to(b"Hello world!", "192.168.0.2:80").await;
+        assert!(
+            send.is_err(),
+            "Send operation should have failed, since node does not exist"
+        );
+
+        let err = send.unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::ConnectionRefused);
+        assert_eq!(err.to_string(), "Connection refused");
+
+        Ok(())
+    });
     sim.run()
 }
