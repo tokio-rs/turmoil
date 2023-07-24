@@ -1,3 +1,15 @@
+# 0.5.6 (July 24, 2023)
+
+### Added
+
+- Return io::Error instead of panicking ([#130])
+- Add network manipulation capabilities to Sim ([#129])
+- Tracing improvments ([#124])
+
+[#124]: https://github.com/tokio-rs/turmoil/pull/124
+[#129]: https://github.com/tokio-rs/turmoil/pull/129
+[#130]: https://github.com/tokio-rs/turmoil/pull/130
+
 # 0.5.5 (June 6, 2023)
 
 ### Added
