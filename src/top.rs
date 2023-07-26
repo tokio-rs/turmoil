@@ -483,8 +483,8 @@ impl Link {
         rand: &mut dyn RngCore,
     ) -> bool {
         let config = self.config.message_duplication.as_ref().unwrap_or(global);
-        let repair_rate = config.duplication_rate;
-        repair_rate > 0.0 && rand.gen_bool(repair_rate)
+        let duplication_rate = config.duplication_rate;
+        duplication_rate > 0.0 && rand.gen_bool(duplication_rate)
     }
 
     fn delay(&self, global: &config::Latency, rand: &mut dyn RngCore) -> Duration {
