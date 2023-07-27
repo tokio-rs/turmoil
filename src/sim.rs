@@ -1,3 +1,4 @@
+use crate::node::NodeIdentifer;
 use crate::{for_pairs, Config, LinksIter, Result, Rt, ToIpAddr, ToIpAddrs, World, TRACING_TARGET};
 
 use indexmap::IndexMap;
@@ -5,7 +6,6 @@ use std::cell::RefCell;
 use std::future::Future;
 use std::net::IpAddr;
 use std::ops::DerefMut;
-use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 use tokio::time::Duration;
 use tracing::Level;
@@ -21,7 +21,7 @@ pub struct Sim<'a> {
     world: RefCell<World>,
 
     /// Per simulated host runtimes
-    rts: IndexMap<IpAddr, Rt<'a>>,
+    rts: IndexMap<NodeIdentifer, Rt<'a>>,
 
     /// Simulation duration since unix epoch. Set when the simulation is
     /// created.
@@ -67,25 +67,25 @@ impl<'a> Sim<'a> {
         F: Future<Output = Result> + 'static,
     {
         let addr = self.lookup(addr);
-        let nodename: Arc<str> = self
+        let node_name = self
             .world
             .borrow_mut()
             .dns
             .reverse(addr)
             .map(str::to_string)
-            .unwrap_or_else(|| addr.to_string())
-            .into();
+            .unwrap_or_else(|| addr.to_string());
+        let id = NodeIdentifer::new(&node_name);
 
         {
             let world = RefCell::get_mut(&mut self.world);
 
             // Register host state with the world
-            world.register(addr, &nodename, &self.config);
+            world.register(id.clone(), addr, &self.config);
         }
 
-        let rt = World::enter(&self.world, || Rt::client(nodename, client));
+        let rt = World::enter(&self.world, || Rt::client(id.clone(), client));
 
-        self.rts.insert(addr, rt);
+        self.rts.insert(id, rt);
     }
 
     /// Register a host with the simulation.
@@ -100,25 +100,25 @@ impl<'a> Sim<'a> {
         Fut: Future<Output = Result> + 'static,
     {
         let addr = self.lookup(addr);
-        let nodename: Arc<str> = self
+        let node_name = self
             .world
             .borrow_mut()
             .dns
             .reverse(addr)
             .map(str::to_string)
-            .unwrap_or_else(|| addr.to_string())
-            .into();
+            .unwrap_or_else(|| addr.to_string());
+        let id = NodeIdentifer::new(&node_name);
 
         {
             let world = RefCell::get_mut(&mut self.world);
 
             // Register host state with the world
-            world.register(addr, &nodename, &self.config);
+            world.register(id.clone(), addr, &self.config);
         }
 
-        let rt = World::enter(&self.world, || Rt::host(nodename, host));
+        let rt = World::enter(&self.world, || Rt::host(id.clone(), host));
 
-        self.rts.insert(addr, rt);
+        self.rts.insert(id, rt);
     }
 
     /// Crashes the resolved hosts. Nothing will be running on the matched hosts
@@ -143,24 +143,45 @@ impl<'a> Sim<'a> {
 
     /// Run `f` with the resolved hosts at `addrs` set on the world.
     fn run_with_hosts(&mut self, addrs: impl ToIpAddrs, mut f: impl FnMut(IpAddr, &mut Rt)) {
-        let hosts = self.world.borrow_mut().lookup_many(addrs);
-        for h in hosts {
-            let rt = self.rts.get_mut(&h).expect("missing host");
+        let hosts_addrs = self.world.borrow_mut().lookup_many(addrs);
+        let hosts = self.addrs_to_node_ids(hosts_addrs);
+        for (id, addr) in hosts {
+            let rt = self.rts.get_mut(&id).expect("missing host");
 
-            self.world.borrow_mut().current = Some(h);
+            self.world.borrow_mut().current = Some(id);
 
-            World::enter(&self.world, || f(h, rt));
+            World::enter(&self.world, || f(addr, rt));
         }
 
         self.world.borrow_mut().current = None;
     }
 
+    fn addrs_to_node_ids(&self, addrs: Vec<IpAddr>) -> Vec<(NodeIdentifer, IpAddr)> {
+        addrs
+            .into_iter()
+            .map(|addr| self.addr_to_node_id(addr))
+            .collect::<Vec<_>>()
+    }
+
+    fn addr_to_node_id(&self, addr: IpAddr) -> (NodeIdentifer, IpAddr) {
+        (
+            self.world
+                .borrow_mut()
+                .dns
+                .reverse(addr)
+                .map(NodeIdentifer::new)
+                .unwrap_or_else(|| NodeIdentifer::new(&addr.to_string())),
+            addr,
+        )
+    }
+
     /// Check whether a host has software running.
     pub fn is_host_running(&mut self, addr: impl ToIpAddr) -> bool {
         let host = self.world.borrow_mut().lookup(addr);
+        let (id, _) = self.addr_to_node_id(host);
 
         self.rts
-            .get(&host)
+            .get(&id)
             .expect("missing host")
             .is_software_running()
     }
@@ -328,12 +349,12 @@ impl<'a> Sim<'a> {
         // Tick each host runtimes with running software. If the software
         // completes, extract the result and return early if an error is
         // encountered.
-        for (&addr, rt) in self
+        for (id, rt) in self
             .rts
             .iter_mut()
             .filter(|(_, rt)| rt.is_software_running())
         {
-            let _span_guard = tracing::span!(Level::INFO, "node", name = &*rt.nodename).entered();
+            let _span_guard = tracing::span!(Level::INFO, "node", name = &*rt.id).entered();
 
             {
                 let mut world = self.world.borrow_mut();
@@ -345,10 +366,10 @@ impl<'a> Sim<'a> {
                     hosts,
                     ..
                 } = world.deref_mut();
-                topology.deliver_messages(rng, hosts.get_mut(&addr).expect("missing host"));
+                topology.deliver_messages(rng, hosts.get_mut(id).expect("missing host"));
 
                 // Set the current host (see method docs)
-                world.current = Some(addr);
+                world.current = Some(id.clone());
 
                 world.current_host_mut().now(rt.now());
             }
@@ -363,7 +384,7 @@ impl<'a> Sim<'a> {
             let mut world = self.world.borrow_mut();
             world.current = None;
 
-            world.tick(addr, tick);
+            world.tick(id.clone(), tick);
         }
 
         self.elapsed += tick;

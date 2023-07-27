@@ -1,6 +1,7 @@
 use crate::config::Config;
 use crate::envelope::Protocol;
 use crate::ip::IpVersionAddrIter;
+use crate::node::NodeIdentifer;
 use crate::{config, for_pairs, Dns, Host, ToIpAddr, ToIpAddrs, Topology, TRACING_TARGET};
 
 use indexmap::IndexMap;
@@ -14,7 +15,7 @@ use std::time::Duration;
 /// Tracks all the state for the simulated world.
 pub(crate) struct World {
     /// Tracks all individual hosts
-    pub(crate) hosts: IndexMap<IpAddr, Host>,
+    pub(crate) hosts: IndexMap<NodeIdentifer, Host>,
 
     /// Tracks how each host is connected to each other.
     pub(crate) topology: Topology,
@@ -23,7 +24,7 @@ pub(crate) struct World {
     pub(crate) dns: Dns,
 
     /// If set, this is the current host being executed.
-    pub(crate) current: Option<IpAddr>,
+    pub(crate) current: Option<NodeIdentifer>,
 
     /// Random number generator used for all decisions. To make execution
     /// determinstic, reuse the same seed.
@@ -71,8 +72,8 @@ impl World {
     }
 
     pub(crate) fn current_host_mut(&mut self) -> &mut Host {
-        let addr = self.current.expect("current host missing");
-        self.hosts.get_mut(&addr).expect("host missing")
+        let id = self.current.as_ref().expect("current host missing");
+        self.hosts.get_mut(id).expect("host missing")
     }
 
     pub(crate) fn lookup(&mut self, host: impl ToIpAddr) -> IpAddr {
@@ -136,22 +137,22 @@ impl World {
     }
 
     /// Register a new host with the simulation.
-    pub(crate) fn register(&mut self, addr: IpAddr, nodename: &str, config: &Config) {
+    pub(crate) fn register(&mut self, id: NodeIdentifer, addr: IpAddr, config: &Config) {
         assert!(
-            !self.hosts.contains_key(&addr),
-            "already registered host for the given ip address"
+            !self.hosts.contains_key(&id),
+            "already registered host for the given nodename"
         );
 
-        tracing::info!(target: TRACING_TARGET, nodename, ?addr, "New");
+        tracing::info!(target: TRACING_TARGET, nodename=&*id, ?addr, "New");
 
         // Register links between the new host and all existing hosts
-        for existing in self.hosts.keys() {
-            self.topology.register(*existing, addr);
+        for existing in self.hosts.values() {
+            self.topology.register(existing.addr, addr);
         }
 
         // Initialize host state
         self.hosts.insert(
-            addr,
+            id,
             Host::new(addr, config.tcp_capacity, config.udp_capacity),
         );
     }
@@ -169,9 +170,9 @@ impl World {
     }
 
     /// Tick the host at `addr` by `duration`.
-    pub(crate) fn tick(&mut self, addr: IpAddr, duration: Duration) {
+    pub(crate) fn tick(&mut self, id: NodeIdentifer, duration: Duration) {
         self.hosts
-            .get_mut(&addr)
+            .get_mut(&id)
             .expect("missing host")
             .tick(duration);
     }

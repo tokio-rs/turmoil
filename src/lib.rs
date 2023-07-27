@@ -109,6 +109,8 @@ pub use ip::IpVersion;
 
 pub mod net;
 
+mod node;
+
 mod rt;
 use rt::Rt;
 
