@@ -66,7 +66,7 @@ impl<'a> Sim<'a> {
     where
         F: Future<Output = Result> + 'static,
     {
-        let addr = self.lookup(addr);
+        let addr = self.dns_register(addr);
         let node_name = self
             .world
             .borrow_mut()
@@ -99,7 +99,7 @@ impl<'a> Sim<'a> {
         F: Fn() -> Fut + 'a,
         Fut: Future<Output = Result> + 'static,
     {
-        let addr = self.lookup(addr);
+        let addr = self.dns_register(addr);
         let node_name = self
             .world
             .borrow_mut()
@@ -184,6 +184,10 @@ impl<'a> Sim<'a> {
             .get(&id)
             .expect("missing host")
             .is_software_running()
+    }
+
+    fn dns_register(&self, addr: impl ToIpAddr) -> IpAddr {
+        self.world.borrow_mut().dns_register(addr)
     }
 
     /// Lookup an IP address by host name.

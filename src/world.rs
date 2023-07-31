@@ -76,6 +76,10 @@ impl World {
         self.hosts.get_mut(id).expect("host missing")
     }
 
+    pub(crate) fn dns_register(&mut self, addr: impl ToIpAddr) -> IpAddr {
+        self.dns.register(addr)
+    }
+
     pub(crate) fn lookup(&mut self, host: impl ToIpAddr) -> IpAddr {
         self.dns.lookup(host)
     }

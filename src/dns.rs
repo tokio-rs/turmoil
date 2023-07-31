@@ -3,7 +3,10 @@ use indexmap::IndexMap;
 use regex::Regex;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
-use crate::ip::{IpVersionAddrIter, ScopedIpAddr};
+use crate::{
+    ip::{IpVersionAddrIter, ScopedIpAddr},
+    IpSubnet, Ipv4Subnet, Ipv6Subnet,
+};
 
 /// Each new host has an IP in the subnet defined by the
 /// ip version of the simulation.
@@ -23,13 +26,16 @@ pub struct NodeInfo {
 /// Converts or resolves to an [`IpAddr`].
 pub trait ToIpAddr: sealed::Sealed {
     #[doc(hidden)]
-    fn to_ip_addr(&self, dns: &mut Dns) -> IpAddr;
+    fn to_ip_addr(&self, dns: &Dns) -> Option<IpAddr>;
+
+    #[doc(hidden)]
+    fn to_name(&self, dns: &Dns) -> String;
 }
 
 /// Converts or resolves to one or more [`IpAddr`] values.
 pub trait ToIpAddrs: sealed::Sealed {
     #[doc(hidden)]
-    fn to_ip_addrs(&self, dns: &mut Dns) -> Vec<IpAddr>;
+    fn to_ip_addrs(&self, dns: &Dns) -> Vec<IpAddr>;
 }
 
 /// A simulated version of `tokio::net::ToSocketAddrs`.
@@ -46,8 +52,39 @@ impl Dns {
         }
     }
 
+    pub(crate) fn register(&mut self, addr: impl ToIpAddr) -> IpAddr {
+        // Manual lookup
+        let scoped_addr = addr
+            .to_ip_addr(self)
+            .map(|addr| {
+                if addr.is_ipv4() {
+                    ScopedIpAddr {
+                        addr,
+                        subnet: IpSubnet::V4(Ipv4Subnet::default()),
+                    }
+                } else {
+                    ScopedIpAddr {
+                        addr,
+                        subnet: IpSubnet::V6(Ipv6Subnet::default()),
+                    }
+                }
+            })
+            .unwrap_or_else(|| self.addrs.next());
+
+        let name = addr.to_name(self);
+        let addr = scoped_addr.addr;
+
+        self.mapping.insert(
+            name,
+            NodeInfo {
+                addrs: vec![scoped_addr],
+            },
+        );
+        addr
+    }
+
     pub(crate) fn lookup(&mut self, addr: impl ToIpAddr) -> IpAddr {
-        addr.to_ip_addr(self)
+        addr.to_ip_addr(self).expect("failed to lookup ip addr")
     }
 
     pub(crate) fn lookup_many(&mut self, addrs: impl ToIpAddrs) -> Vec<IpAddr> {
@@ -63,44 +100,61 @@ impl Dns {
 }
 
 impl ToIpAddr for String {
-    fn to_ip_addr(&self, dns: &mut Dns) -> IpAddr {
+    fn to_ip_addr(&self, dns: &Dns) -> Option<IpAddr> {
         (&self[..]).to_ip_addr(dns)
+    }
+
+    fn to_name(&self, dns: &Dns) -> String {
+        (&self[..]).to_name(dns)
     }
 }
 
 impl<'a> ToIpAddr for &'a str {
-    fn to_ip_addr(&self, dns: &mut Dns) -> IpAddr {
+    fn to_ip_addr(&self, dns: &Dns) -> Option<IpAddr> {
         if let Ok(ipaddr) = self.parse() {
-            return ipaddr;
+            return Some(ipaddr);
         }
 
-        let info = dns
-            .mapping
-            .entry(self.to_string())
-            .or_insert_with(|| NodeInfo {
-                addrs: vec![dns.addrs.next()],
-            });
+        let info = dns.mapping.get(*self)?;
 
         // Quick hack, as long as multiple ips are not yet implemented
-        info.addrs[0].addr
+        Some(info.addrs[0].addr)
+    }
+
+    fn to_name(&self, _: &Dns) -> String {
+        self.to_string()
     }
 }
 
 impl ToIpAddr for IpAddr {
-    fn to_ip_addr(&self, _: &mut Dns) -> IpAddr {
-        *self
+    fn to_ip_addr(&self, _: &Dns) -> Option<IpAddr> {
+        Some(*self)
+    }
+
+    fn to_name(&self, dns: &Dns) -> String {
+        if let Some(name) = dns.reverse(*self) {
+            return name.to_string();
+        }
+
+        self.to_string()
     }
 }
 
 impl ToIpAddr for Ipv4Addr {
-    fn to_ip_addr(&self, _: &mut Dns) -> IpAddr {
-        IpAddr::V4(*self)
+    fn to_ip_addr(&self, _: &Dns) -> Option<IpAddr> {
+        Some(IpAddr::V4(*self))
+    }
+    fn to_name(&self, dns: &Dns) -> String {
+        IpAddr::V4(*self).to_name(dns)
     }
 }
 
 impl ToIpAddr for Ipv6Addr {
-    fn to_ip_addr(&self, _: &mut Dns) -> IpAddr {
-        IpAddr::V6(*self)
+    fn to_ip_addr(&self, _: &Dns) -> Option<IpAddr> {
+        Some(IpAddr::V6(*self))
+    }
+    fn to_name(&self, dns: &Dns) -> String {
+        IpAddr::V6(*self).to_name(dns)
     }
 }
 
@@ -108,14 +162,18 @@ impl<T> ToIpAddrs for T
 where
     T: ToIpAddr,
 {
-    fn to_ip_addrs(&self, dns: &mut Dns) -> Vec<IpAddr> {
-        vec![self.to_ip_addr(dns)]
+    fn to_ip_addrs(&self, dns: &Dns) -> Vec<IpAddr> {
+        if let Some(ipaddr) = self.to_ip_addr(dns) {
+            vec![ipaddr]
+        } else {
+            Vec::new()
+        }
     }
 }
 
 #[cfg(feature = "regex")]
 impl ToIpAddrs for Regex {
-    fn to_ip_addrs(&self, dns: &mut Dns) -> Vec<IpAddr> {
+    fn to_ip_addrs(&self, dns: &Dns) -> Vec<IpAddr> {
         #[allow(clippy::needless_collect)]
         let hosts = dns.names.keys().cloned().collect::<Vec<_>>();
         hosts
@@ -236,7 +294,7 @@ mod tests {
     #[test]
     fn parse_str() {
         let mut dns = Dns::new(IpVersionAddrIter::default());
-        let generated_addr = dns.lookup("foo");
+        let generated_addr = dns.register("foo");
 
         let hostname_port = "foo:5000".to_socket_addr(&dns);
         let ipv4_port = "127.0.0.1:5000";
