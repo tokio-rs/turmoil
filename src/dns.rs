@@ -3,7 +3,7 @@ use indexmap::IndexMap;
 use regex::Regex;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
-use crate::ip::IpVersionAddrIter;
+use crate::ip::{IpVersionAddrIter, ScopedIpAddr};
 
 /// Each new host has an IP in the subnet defined by the
 /// ip version of the simulation.
@@ -12,7 +12,12 @@ use crate::ip::IpVersionAddrIter;
 /// Ipv6 simulations use the link local subnet fe80:::/64
 pub struct Dns {
     addrs: IpVersionAddrIter,
-    names: IndexMap<String, IpAddr>,
+    mapping: IndexMap<String, NodeInfo>,
+}
+
+pub struct NodeInfo {
+    addrs: Vec<ScopedIpAddr>,
+    // id: NodeIdentifer
 }
 
 /// Converts or resolves to an [`IpAddr`].
@@ -37,7 +42,7 @@ impl Dns {
     pub(crate) fn new(addrs: IpVersionAddrIter) -> Dns {
         Dns {
             addrs,
-            names: IndexMap::new(),
+            mapping: IndexMap::new(),
         }
     }
 
@@ -50,9 +55,9 @@ impl Dns {
     }
 
     pub(crate) fn reverse(&self, addr: IpAddr) -> Option<&str> {
-        self.names
+        self.mapping
             .iter()
-            .find(|(_, a)| **a == addr)
+            .find(|(_, info)| info.addrs.iter().any(|scoped| scoped.addr == addr))
             .map(|(name, _)| name.as_str())
     }
 }
@@ -69,9 +74,15 @@ impl<'a> ToIpAddr for &'a str {
             return ipaddr;
         }
 
-        *dns.names
+        let info = dns
+            .mapping
             .entry(self.to_string())
-            .or_insert_with(|| dns.addrs.next())
+            .or_insert_with(|| NodeInfo {
+                addrs: vec![dns.addrs.next()],
+            });
+
+        // Quick hack, as long as multiple ips are not yet implemented
+        info.addrs[0].addr
     }
 }
 
@@ -128,8 +139,8 @@ impl<'a> ToSocketAddrs for (&'a str, u16) {
             return (ip, self.1).into();
         }
 
-        match dns.names.get(self.0) {
-            Some(ip) => (*ip, self.1).into(),
+        match dns.mapping.get(self.0) {
+            Some(info) => (info.addrs[0].addr, self.1).into(),
             None => panic!("no ip address found for a hostname: {}", self.0),
         }
     }

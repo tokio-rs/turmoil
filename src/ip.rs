@@ -5,6 +5,13 @@ use std::{
     str::FromStr,
 };
 
+/// An address withing a subnet.
+pub(crate) struct ScopedIpAddr {
+    pub(crate) addr: IpAddr,
+    #[allow(dead_code)]
+    pub(crate) subnet: IpSubnet,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IpSubnet {
     V4(Ipv4Subnet),
@@ -254,7 +261,7 @@ impl fmt::Display for Ipv6Subnet {
 
 impl Default for Ipv6Subnet {
     fn default() -> Self {
-        Ipv6Subnet::new(Ipv6Addr::new(0xfe, 0x80, 0, 0, 0, 0, 0, 0), 64)
+        Ipv6Subnet::new(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0), 64)
     }
 }
 
@@ -306,7 +313,7 @@ impl Default for IpVersionAddrIter {
 }
 
 impl IpVersionAddrIter {
-    pub(crate) fn next(&mut self) -> IpAddr {
+    pub(crate) fn next(&mut self) -> ScopedIpAddr {
         match self {
             Self::V4(next) => {
                 let host = *next;
@@ -315,7 +322,10 @@ impl IpVersionAddrIter {
                 let a = (host >> 8) as u8;
                 let b = (host & 0xFF) as u8;
 
-                IpAddr::V4(Ipv4Addr::new(192, 168, a, b))
+                ScopedIpAddr {
+                    addr: IpAddr::V4(Ipv4Addr::new(192, 168, a, b)),
+                    subnet: IpSubnet::V4(Ipv4Subnet::default()),
+                }
             }
             Self::V6(next) => {
                 let host = *next;
@@ -326,7 +336,10 @@ impl IpVersionAddrIter {
                 let c = ((host >> 16) & 0xffff) as u16;
                 let d = (host & 0xffff) as u16;
 
-                IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, a, b, c, d))
+                ScopedIpAddr {
+                    addr: IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, a, b, c, d)),
+                    subnet: IpSubnet::V6(Ipv6Subnet::default()),
+                }
             }
         }
     }
