@@ -67,14 +67,8 @@ impl<'a> Sim<'a> {
         F: Future<Output = Result> + 'static,
     {
         let addr = self.dns_register(addr);
-        let node_name = self
-            .world
-            .borrow_mut()
-            .dns
-            .reverse(addr)
-            .map(str::to_string)
-            .unwrap_or_else(|| addr.to_string());
-        let id = NodeIdentifer::new(&node_name);
+        let node_name = self.world.borrow_mut().dns.reverse(addr);
+        let id = NodeIdentifer::new(node_name);
 
         {
             let world = RefCell::get_mut(&mut self.world);
@@ -100,14 +94,8 @@ impl<'a> Sim<'a> {
         Fut: Future<Output = Result> + 'static,
     {
         let addr = self.dns_register(addr);
-        let node_name = self
-            .world
-            .borrow_mut()
-            .dns
-            .reverse(addr)
-            .map(str::to_string)
-            .unwrap_or_else(|| addr.to_string());
-        let id = NodeIdentifer::new(&node_name);
+        let node_name = self.world.borrow_mut().dns.reverse(addr);
+        let id = NodeIdentifer::new(node_name);
 
         {
             let world = RefCell::get_mut(&mut self.world);
@@ -165,12 +153,7 @@ impl<'a> Sim<'a> {
 
     fn addr_to_node_id(&self, addr: IpAddr) -> (NodeIdentifer, IpAddr) {
         (
-            self.world
-                .borrow_mut()
-                .dns
-                .reverse(addr)
-                .map(NodeIdentifer::new)
-                .unwrap_or_else(|| NodeIdentifer::new(&addr.to_string())),
+            NodeIdentifer::new(self.world.borrow_mut().dns.reverse(addr)),
             addr,
         )
     }
@@ -228,18 +211,7 @@ impl<'a> Sim<'a> {
     pub fn reverse_lookup_pair(&self, pair: (IpAddr, IpAddr)) -> (String, String) {
         let world = self.world.borrow();
 
-        (
-            world
-                .dns
-                .reverse(pair.0)
-                .expect("no hostname found for ip address")
-                .to_owned(),
-            world
-                .dns
-                .reverse(pair.1)
-                .expect("no hostname found for ip address")
-                .to_owned(),
-        )
+        (world.dns.reverse(pair.0), world.dns.reverse(pair.1))
     }
 
     /// Lookup IP addresses for resolved hosts.

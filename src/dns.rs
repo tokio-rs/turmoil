@@ -71,7 +71,7 @@ impl Dns {
             })
             .unwrap_or_else(|| self.addrs.next());
 
-        let name = addr.to_name(self);
+        let name = self.reverse(addr);
         let addr = scoped_addr.addr;
 
         self.mapping.insert(
@@ -91,11 +91,8 @@ impl Dns {
         addrs.to_ip_addrs(self)
     }
 
-    pub(crate) fn reverse(&self, addr: IpAddr) -> Option<&str> {
-        self.mapping
-            .iter()
-            .find(|(_, info)| info.addrs.iter().any(|scoped| scoped.addr == addr))
-            .map(|(name, _)| name.as_str())
+    pub(crate) fn reverse(&self, addr: impl ToIpAddr) -> String {
+        addr.to_name(self)
     }
 }
 
@@ -132,7 +129,11 @@ impl ToIpAddr for IpAddr {
     }
 
     fn to_name(&self, dns: &Dns) -> String {
-        if let Some(name) = dns.reverse(*self) {
+        if let Some((name, _)) = dns
+            .mapping
+            .iter()
+            .find(|(_, info)| info.addrs.iter().any(|scoped| scoped.addr == *self))
+        {
             return name.to_string();
         }
 
@@ -175,10 +176,11 @@ where
 impl ToIpAddrs for Regex {
     fn to_ip_addrs(&self, dns: &Dns) -> Vec<IpAddr> {
         #[allow(clippy::needless_collect)]
-        let hosts = dns.names.keys().cloned().collect::<Vec<_>>();
+        let hosts = dns.mapping.keys().cloned().collect::<Vec<_>>();
         hosts
             .into_iter()
             .filter_map(|h| self.is_match(&h).then(|| h.to_ip_addr(dns)))
+            .flatten()
             .collect::<Vec<_>>()
     }
 }

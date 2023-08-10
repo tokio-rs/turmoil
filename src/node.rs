@@ -6,7 +6,7 @@ pub(crate) struct NodeIdentifer {
 }
 
 impl NodeIdentifer {
-    pub(crate) fn new(node_name: &str) -> Self {
+    pub(crate) fn new(node_name: impl Into<Arc<str>>) -> Self {
         Self {
             node_name: node_name.into(),
         }
