@@ -4,11 +4,10 @@ use axum::routing::get;
 use axum::Router;
 use axum::{body::Body, http::Request};
 use hyper::server::accept::from_stream;
-use hyper::service::make_service_fn;
 use hyper::{Client, Server, Uri};
-use std::convert::Infallible;
 use std::net::{IpAddr, Ipv4Addr};
-use tracing::{info_span, Instrument, Span};
+use tower::make::Shared;
+use tracing::{info_span, Instrument};
 use turmoil::{net, Builder};
 
 fn main() {
@@ -30,21 +29,15 @@ fn main() {
     sim.host("server", move || {
         let router = router.clone();
         async move {
-            let listener = net::TcpListener::bind(addr).await?;
-
-            let accept = from_stream(async_stream::stream! {
+            Server::builder(from_stream(async_stream::stream! {
+                let listener = net::TcpListener::bind(addr).await?;
                 loop {
                     yield listener.accept().await.map(|(s, _)| s);
                 }
-            });
-
-            Server::builder(accept)
-                .serve(make_service_fn(move |_| {
-                    let router = router.clone();
-                    async move { Ok::<_, Infallible>(router) }.instrument(Span::current())
-                }))
-                .await
-                .unwrap();
+            }))
+            .serve(Shared::new(router))
+            .await
+            .unwrap();
 
             Ok(())
         }

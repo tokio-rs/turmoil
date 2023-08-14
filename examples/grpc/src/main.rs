@@ -1,13 +1,14 @@
 use hyper::server::accept::from_stream;
-use hyper::service::make_service_fn;
-use hyper::{Client, Server, Uri};
-use std::convert::Infallible;
+use hyper::Server;
 use std::net::{IpAddr, Ipv4Addr};
+use tonic::transport::Endpoint;
 use tonic::Status;
 use tonic::{Request, Response};
-use tracing::{info_span, Instrument, Span};
+use tower::make::Shared;
+use tracing::{info_span, Instrument};
 use turmoil::{net, Builder};
 
+#[allow(non_snake_case)]
 mod proto {
     tonic::include_proto!("helloworld");
 }
@@ -33,21 +34,15 @@ fn main() {
     sim.host("server", move || {
         let greeter = greeter.clone();
         async move {
-            let listener = net::TcpListener::bind(addr).await?;
-
-            let accept = from_stream(async_stream::stream! {
+            Server::builder(from_stream(async_stream::stream! {
+                let listener = net::TcpListener::bind(addr).await?;
                 loop {
                     yield listener.accept().await.map(|(s, _)| s);
                 }
-            });
-
-            Server::builder(accept)
-                .serve(make_service_fn(move |_| {
-                    let greeter = greeter.clone();
-                    async move { Ok::<_, Infallible>(greeter) }.instrument(Span::current())
-                }))
-                .await
-                .unwrap();
+            }))
+            .serve(Shared::new(greeter))
+            .await
+            .unwrap();
 
             Ok(())
         }
@@ -57,15 +52,12 @@ fn main() {
     sim.client(
         "client",
         async move {
-            let svc = Client::builder()
-                .http2_only(true)
-                .build(connector::connector());
-
-            let uri = Uri::from_static("http://server:9999");
-            let mut greeter_client = GreeterClient::with_origin(svc, uri);
+            let ch = Endpoint::new("http://server:9999")?
+                .connect_with_connector(connector::connector())
+                .await?;
+            let mut greeter_client = GreeterClient::new(ch);
 
             let request = Request::new(HelloRequest { name: "foo".into() });
-
             let res = greeter_client.say_hello(request).await?;
 
             tracing::info!("Got response: {:?}", res);
