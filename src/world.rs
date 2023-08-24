@@ -141,11 +141,15 @@ impl World {
     }
 
     /// Register a new host with the simulation.
-    pub(crate) fn register(&mut self, id: NodeIdentifer, addr: IpAddr, config: &Config) {
+    pub(crate) fn register(&mut self, id: NodeIdentifer, addrs: Vec<IpAddr>, config: &Config) {
         assert!(
             !self.hosts.contains_key(&id),
             "already registered host for the given nodename"
         );
+
+        // TODO: Fixed when multi IP support is done
+        assert_eq!(addrs.len(), 1);
+        let addr = addrs[0];
 
         tracing::info!(target: TRACING_TARGET, nodename=&*id, ?addr, "New");
 

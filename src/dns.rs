@@ -78,6 +78,31 @@ impl Dns {
         addr
     }
 
+    pub(crate) fn register2(&mut self, name: &str, mut addrs: Vec<IpAddr>) -> Vec<IpAddr> {
+        let scoped_addrs = if addrs.is_empty() {
+            let addr = self.addrs.next();
+            addrs = vec![addr.addr];
+            vec![self.addrs.next()]
+        } else {
+            addrs
+                .iter()
+                .map(|addr| ScopedIpAddr {
+                    subnet: IpSubnet::subnet_for(*addr),
+                    addr: *addr,
+                })
+                .collect()
+        };
+
+        self.mapping.insert(
+            name.to_string(),
+            NodeInfo {
+                addrs: scoped_addrs,
+            },
+        );
+
+        addrs
+    }
+
     pub(crate) fn lookup(&mut self, addr: impl ToIpAddr) -> IpAddr {
         addr.to_ip_addr(self).expect("failed to lookup ip addr")
     }

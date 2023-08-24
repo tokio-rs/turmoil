@@ -74,7 +74,7 @@ impl<'a> Sim<'a> {
             let world = RefCell::get_mut(&mut self.world);
 
             // Register host state with the world
-            world.register(id.clone(), addr, &self.config);
+            world.register(id.clone(), vec![addr], &self.config);
         }
 
         let rt = World::enter(&self.world, || Rt::client(id.clone(), client));
@@ -101,12 +101,17 @@ impl<'a> Sim<'a> {
             let world = RefCell::get_mut(&mut self.world);
 
             // Register host state with the world
-            world.register(id.clone(), addr, &self.config);
+            world.register(id.clone(), vec![addr], &self.config);
         }
 
         let rt = World::enter(&self.world, || Rt::host(id.clone(), host));
 
         self.rts.insert(id, rt);
+    }
+
+    /// Provides a builder for registering a new node with the simulation.
+    pub fn node(&mut self, name: impl AsRef<str>) -> NodeBuilder<'_, 'a> {
+        NodeBuilder::new(self, name.as_ref())
     }
 
     /// Crashes the resolved hosts. Nothing will be running on the matched hosts
@@ -376,13 +381,94 @@ impl<'a> Sim<'a> {
     }
 }
 
+/// A builder for simulation nodes.
+///
+/// This type can be used to assign custom behaviour to a
+/// simulation node.
+///
+/// Use `with_addr` to assign a static address to the node.
+#[must_use]
+pub struct NodeBuilder<'a, 'b> {
+    sim: &'a mut Sim<'b>,
+    name: String,
+    addrs: Vec<IpAddr>,
+}
+
+impl<'a, 'b> NodeBuilder<'a, 'b> {
+    fn new(sim: &'a mut Sim<'b>, name: &str) -> Self {
+        Self {
+            sim,
+            name: name.to_string(),
+            addrs: Vec::new(),
+        }
+    }
+
+    /// Assigns a static address to the node.
+    pub fn with_addr(mut self, addr: impl Into<IpAddr>) -> Self {
+        self.addrs.push(addr.into());
+        self
+    }
+
+    /// Builds the node as a client.
+    ///
+    /// A client will define how long the simulation runs. The simulation
+    /// ends after all clients have finished, aka. their futures are resolved.
+    pub fn build_client<Fut>(self, client: Fut)
+    where
+        Fut: Future<Output = Result> + 'static,
+    {
+        let Self { sim, name, addrs } = self;
+
+        let id = NodeIdentifer::new(name.clone());
+        let bound_addrs = if addrs.is_empty() {
+            vec![sim.dns_register(name)]
+        } else {
+            addrs
+        };
+
+        {
+            let mut world = sim.world.borrow_mut();
+            world.register(id.clone(), bound_addrs, &sim.config);
+        }
+
+        let rt = World::enter(&sim.world, || Rt::client(id.clone(), client));
+        sim.rts.insert(id, rt);
+    }
+
+    /// Builds the node as a host.
+    ///
+    /// Hosts do not constrain the simulation, they just run as long as the simulation
+    /// does. Hosts might still be running once the simulation finishes, so they cannot expect
+    /// clean shutdown semantics.
+    ///
+    /// Hostss can also be crashed and restarted. Therefore this function does not expect
+    /// a future, but rather a creation function for the hosts working future.
+    pub fn build_host<F, Fut>(self, software: F)
+    where
+        F: Fn() -> Fut + 'static,
+        Fut: Future<Output = Result> + 'static,
+    {
+        let Self { sim, name, addrs } = self;
+
+        let id = NodeIdentifer::new(name.clone());
+        let bound_addrs = sim.world.borrow_mut().dns.register2(&name, addrs);
+        {
+            let mut world = sim.world.borrow_mut();
+            world.register(id.clone(), bound_addrs, &sim.config);
+        }
+
+        let rt = World::enter(&sim.world, || Rt::host(id.clone(), software));
+        sim.rts.insert(id, rt);
+    }
+}
+
 #[cfg(test)]
 mod test {
     use std::{
         net::{IpAddr, Ipv4Addr},
         rc::Rc,
         sync::{
-            atomic::{AtomicU64, Ordering},
+            atomic::{AtomicBool, AtomicU64, Ordering},
             Arc,
         },
         time::Duration,
@@ -392,7 +478,7 @@ mod test {
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         sync::Semaphore,
-        time::Instant,
+        time::{sleep, Instant},
     };
 
     use crate::{
@@ -846,5 +932,23 @@ mod test {
         });
 
         sim.run()
+    }
+
+    #[test]
+    fn node_builder_api() -> Result {
+        let mut sim = Builder::new().build();
+        let flag = Arc::new(AtomicBool::new(false));
+        let flag_c = flag.clone();
+
+        sim.node("client-a").build_client(async move {
+            sleep(Duration::from_secs(3)).await;
+            flag.store(true, Ordering::SeqCst);
+            Ok(())
+        });
+        sim.node("host-b").build_host(|| future::pending());
+
+        sim.run()?;
+        assert!(flag_c.load(Ordering::SeqCst));
+        Ok(())
     }
 }

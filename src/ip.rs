@@ -19,6 +19,14 @@ pub enum IpSubnet {
 }
 
 impl IpSubnet {
+    pub(crate) fn subnet_for(addr: IpAddr) -> IpSubnet {
+        if addr.is_ipv4() {
+            IpSubnet::V4(Ipv4Subnet::new(Ipv4Addr::UNSPECIFIED, 0))
+        } else {
+            IpSubnet::V6(Ipv6Subnet::new(Ipv6Addr::UNSPECIFIED, 0))
+        }
+    }
+
     pub fn prefix(&self) -> IpAddr {
         match self {
             IpSubnet::V4(v4) => v4.prefix().into(),
