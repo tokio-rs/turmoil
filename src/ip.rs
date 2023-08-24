@@ -2,6 +2,7 @@ use std::{
     fmt,
     net::{AddrParseError, IpAddr, Ipv4Addr, Ipv6Addr},
     num::ParseIntError,
+    ops::Deref,
     str::FromStr,
 };
 
@@ -12,6 +13,56 @@ pub(crate) struct ScopedIpAddr {
     pub(crate) subnet: IpSubnet,
 }
 
+#[derive(Debug, Clone)]
+pub struct IpSubnets {
+    subnets: Vec<IpSubnet>,
+}
+
+impl IpSubnets {
+    pub fn add(&mut self, subnet: IpSubnet) {
+        assert!(
+            !self
+                .subnets
+                .iter()
+                .any(|net| net.intersects(subnet.clone())),
+            "Cannot add intersecting IP subnet"
+        );
+        self.subnets.push(subnet);
+    }
+}
+
+impl Deref for IpSubnets {
+    type Target = [IpSubnet];
+    fn deref(&self) -> &Self::Target {
+        &self.subnets
+    }
+}
+
+impl FromIterator<IpSubnet> for IpSubnets {
+    fn from_iter<T: IntoIterator<Item = IpSubnet>>(iter: T) -> Self {
+        let iter = iter.into_iter();
+        let mut subnets = Self {
+            subnets: Vec::new(),
+        };
+
+        for subnet in iter {
+            subnets.add(subnet);
+        }
+        subnets
+    }
+}
+
+impl Default for IpSubnets {
+    fn default() -> Self {
+        Self {
+            subnets: vec![
+                IpSubnet::V4(Ipv4Subnet::default()),
+                IpSubnet::V6(Ipv6Subnet::default()),
+            ],
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IpSubnet {
     V4(Ipv4Subnet),
@@ -19,14 +70,6 @@ pub enum IpSubnet {
 }
 
 impl IpSubnet {
-    pub(crate) fn subnet_for(addr: IpAddr) -> IpSubnet {
-        if addr.is_ipv4() {
-            IpSubnet::V4(Ipv4Subnet::new(Ipv4Addr::UNSPECIFIED, 0))
-        } else {
-            IpSubnet::V6(Ipv6Subnet::new(Ipv6Addr::UNSPECIFIED, 0))
-        }
-    }
-
     pub fn prefix(&self) -> IpAddr {
         match self {
             IpSubnet::V4(v4) => v4.prefix().into(),

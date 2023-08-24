@@ -405,7 +405,15 @@ impl<'a, 'b> NodeBuilder<'a, 'b> {
 
     /// Assigns a static address to the node.
     pub fn with_addr(mut self, addr: impl Into<IpAddr>) -> Self {
-        self.addrs.push(addr.into());
+        let addr = addr.into();
+        {
+            let world = self.sim.world.borrow();
+            assert!(
+                world.dns.subnets.iter().any(|subnet| subnet.contains(addr)),
+                "static address is not part of any defined subnet"
+            )
+        }
+        self.addrs.push(addr);
         self
     }
 
@@ -420,11 +428,7 @@ impl<'a, 'b> NodeBuilder<'a, 'b> {
         let Self { sim, name, addrs } = self;
 
         let id = NodeIdentifer::new(name.clone());
-        let bound_addrs = if addrs.is_empty() {
-            vec![sim.dns_register(name)]
-        } else {
-            addrs
-        };
+        let bound_addrs = sim.world.borrow_mut().dns.register2(&name, addrs);
 
         {
             let mut world = sim.world.borrow_mut();
@@ -950,5 +954,26 @@ mod test {
         sim.run()?;
         assert!(flag_c.load(Ordering::SeqCst));
         Ok(())
+    }
+
+    #[test]
+    fn valid_static_addrs() {
+        let mut sim = Builder::new().build();
+        sim.node("test")
+            .with_addr(Ipv4Addr::new(192, 168, 22, 33))
+            .build_client(async { Ok(()) });
+
+        assert_eq!(sim.lookup("test"), Ipv4Addr::new(192, 168, 22, 33));
+    }
+
+    #[test]
+    #[should_panic = "static address is not part of any defined subnet"]
+    fn invalid_static_addrs() {
+        let mut sim = Builder::new().build();
+        sim.node("test")
+            .with_addr(Ipv4Addr::new(193, 168, 22, 33))
+            .build_client(async { Ok(()) });
+
+        assert_eq!(sim.lookup("test"), Ipv4Addr::new(192, 168, 22, 33));
     }
 }

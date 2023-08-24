@@ -1,6 +1,6 @@
 use crate::config::Config;
 use crate::envelope::Protocol;
-use crate::ip::IpVersionAddrIter;
+use crate::ip::{IpSubnets, IpVersionAddrIter};
 use crate::node::NodeIdentifer;
 use crate::{config, for_pairs, Dns, Host, ToIpAddr, ToIpAddrs, Topology, TRACING_TARGET};
 
@@ -39,11 +39,12 @@ impl World {
         link: config::Link,
         rng: Box<dyn RngCore>,
         addrs: IpVersionAddrIter,
+        subnets: IpSubnets,
     ) -> World {
         World {
             hosts: IndexMap::new(),
             topology: Topology::new(link),
-            dns: Dns::new(addrs),
+            dns: Dns::new(addrs, subnets),
             current: None,
             rng,
         }
@@ -148,7 +149,7 @@ impl World {
         );
 
         // TODO: Fixed when multi IP support is done
-        assert_eq!(addrs.len(), 1);
+        // assert_eq!(addrs.len(), 1);
         let addr = addrs[0];
 
         tracing::info!(target: TRACING_TARGET, nodename=&*id, ?addr, "New");
@@ -161,7 +162,7 @@ impl World {
         // Initialize host state
         self.hosts.insert(
             id,
-            Host::new(addr, config.tcp_capacity, config.udp_capacity),
+            Host::new(addrs, config.tcp_capacity, config.udp_capacity),
         );
     }
 

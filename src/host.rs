@@ -22,6 +22,9 @@ pub(crate) struct Host {
     /// Host ip address.
     pub(crate) addr: IpAddr,
 
+    #[allow(unused)]
+    pub(crate) addrs: Vec<IpAddr>,
+
     /// L4 User Datagram Protocol (UDP).
     pub(crate) udp: Udp,
 
@@ -40,9 +43,10 @@ pub(crate) struct Host {
 }
 
 impl Host {
-    pub(crate) fn new(addr: IpAddr, tcp_capacity: usize, udp_capacity: usize) -> Host {
+    pub(crate) fn new(addrs: Vec<IpAddr>, tcp_capacity: usize, udp_capacity: usize) -> Host {
         Host {
-            addr,
+            addr: addrs[0],
+            addrs,
             udp: Udp::new(udp_capacity),
             tcp: Tcp::new(tcp_capacity),
             next_ephemeral_port: 49152,
@@ -420,10 +424,11 @@ pub fn matches(bind: SocketAddr, dst: SocketAddr) -> bool {
 #[cfg(test)]
 mod test {
     use crate::{Host, Result};
+    use std::net::Ipv4Addr;
 
     #[test]
     fn recycle_ports() -> Result {
-        let mut host = Host::new(std::net::Ipv4Addr::UNSPECIFIED.into(), 1, 1);
+        let mut host = Host::new(vec![Ipv4Addr::UNSPECIFIED.into()], 1, 1);
 
         host.udp.bind((host.addr, 65534).into())?;
         host.udp.bind((host.addr, 65535).into())?;

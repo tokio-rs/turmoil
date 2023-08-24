@@ -4,8 +4,8 @@ use regex::Regex;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
 use crate::{
-    ip::{IpVersionAddrIter, ScopedIpAddr},
-    IpSubnet, Ipv4Subnet, Ipv6Subnet,
+    ip::{IpSubnets, IpVersionAddrIter},
+    IpSubnet,
 };
 
 /// Each new host has an IP in the subnet defined by the
@@ -15,11 +15,13 @@ use crate::{
 /// Ipv6 simulations use the link local subnet fe80:::/64
 pub struct Dns {
     addrs: IpVersionAddrIter,
+    pub(crate) subnets: IpSubnets,
+    counters: Vec<u128>,
     mapping: IndexMap<String, NodeInfo>,
 }
 
 pub struct NodeInfo {
-    addrs: Vec<ScopedIpAddr>,
+    addrs: Vec<IpAddr>,
     // id: NodeIdentifer
 }
 
@@ -45,29 +47,23 @@ pub trait ToSocketAddrs: sealed::Sealed {
 }
 
 impl Dns {
-    pub(crate) fn new(addrs: IpVersionAddrIter) -> Dns {
+    pub(crate) fn new(addrs: IpVersionAddrIter, subnets: IpSubnets) -> Dns {
         Dns {
             addrs,
             mapping: IndexMap::new(),
+            counters: vec![0; subnets.len()],
+            subnets,
         }
     }
 
     pub(crate) fn register(&mut self, addr: impl ToIpAddr) -> IpAddr {
         // Manual lookup
         let scoped_addr = match addr.to_ip_addr(self) {
-            Some(addr) if addr.is_ipv4() => ScopedIpAddr {
-                addr,
-                subnet: IpSubnet::V4(Ipv4Subnet::default()),
-            },
-            Some(addr) /*if addr.is_ipv6() */=> ScopedIpAddr {
-                addr,
-                subnet: IpSubnet::V6(Ipv6Subnet::default()),
-            },
-            None => self.addrs.next(),
+            Some(addr) => addr,
+            None => self.addrs.next().addr,
         };
 
         let name = self.reverse(addr);
-        let addr = scoped_addr.addr;
 
         self.mapping.insert(
             name,
@@ -75,32 +71,42 @@ impl Dns {
                 addrs: vec![scoped_addr],
             },
         );
-        addr
+        scoped_addr
     }
 
-    pub(crate) fn register2(&mut self, name: &str, mut addrs: Vec<IpAddr>) -> Vec<IpAddr> {
-        let scoped_addrs = if addrs.is_empty() {
-            let addr = self.addrs.next();
-            addrs = vec![addr.addr];
-            vec![self.addrs.next()]
-        } else {
-            addrs
+    pub(crate) fn register2(&mut self, name: &str, static_addrs: Vec<IpAddr>) -> Vec<IpAddr> {
+        // Assign addresses according to subnets
+        let n = self.subnets.len();
+
+        let mut bound_addrs = vec![IpAddr::V4(Ipv4Addr::UNSPECIFIED); n];
+        for (i, item) in bound_addrs.iter_mut().enumerate() {
+            // Search for IP in subnet i
+            if let Some(static_addr) = static_addrs
                 .iter()
-                .map(|addr| ScopedIpAddr {
-                    subnet: IpSubnet::subnet_for(*addr),
-                    addr: *addr,
-                })
-                .collect()
-        };
+                .find(|addr| self.subnets[i].contains(**addr))
+            {
+                *item = *static_addr;
+            } else {
+                let raw = self.counters[i];
+                self.counters[i] = self.counters[i].wrapping_add(1);
+
+                *item = if matches!(self.subnets[i], IpSubnet::V4(_)) {
+                    IpAddr::V4(Ipv4Addr::from(raw as u32))
+                } else {
+                    IpAddr::V6(Ipv6Addr::from(raw))
+                }
+            }
+        }
+
+        println!("{name}:{bound_addrs:?}");
 
         self.mapping.insert(
             name.to_string(),
             NodeInfo {
-                addrs: scoped_addrs,
+                addrs: bound_addrs.clone(),
             },
         );
-
-        addrs
+        bound_addrs
     }
 
     pub(crate) fn lookup(&mut self, addr: impl ToIpAddr) -> IpAddr {
@@ -132,10 +138,12 @@ impl<'a> ToIpAddr for &'a str {
             return Some(ipaddr);
         }
 
+        println!("req mapping for {}", *self);
+
         let info = dns.mapping.get(*self)?;
 
         // Quick hack, as long as multiple ips are not yet implemented
-        Some(info.addrs[0].addr)
+        Some(info.addrs[0])
     }
 
     fn to_name(&self, _: &Dns) -> String {
@@ -152,7 +160,7 @@ impl ToIpAddr for IpAddr {
         if let Some((name, _)) = dns
             .mapping
             .iter()
-            .find(|(_, info)| info.addrs.iter().any(|scoped| scoped.addr == *self))
+            .find(|(_, info)| info.addrs.iter().any(|scoped| scoped == self))
         {
             return name.to_string();
         }
@@ -220,7 +228,7 @@ impl<'a> ToSocketAddrs for (&'a str, u16) {
         }
 
         match dns.mapping.get(self.0) {
-            Some(info) => (info.addrs[0].addr, self.1).into(),
+            Some(info) => (info.addrs[0], self.1).into(),
             None => panic!("no ip address found for a hostname: {}", self.0),
         }
     }
@@ -310,12 +318,16 @@ mod sealed {
 
 #[cfg(test)]
 mod tests {
-    use crate::{dns::Dns, ip::IpVersionAddrIter, ToSocketAddrs};
+    use crate::{
+        dns::Dns,
+        ip::{IpSubnets, IpVersionAddrIter},
+        ToSocketAddrs,
+    };
     use std::net::Ipv4Addr;
 
     #[test]
     fn parse_str() {
-        let mut dns = Dns::new(IpVersionAddrIter::default());
+        let mut dns = Dns::new(IpVersionAddrIter::default(), IpSubnets::default());
         let generated_addr = dns.register("foo");
 
         let hostname_port = "foo:5000".to_socket_addr(&dns);
@@ -335,7 +347,7 @@ mod tests {
         // lookups of raw ip addrs should be consistent
         // between to_ip_addr() and to_socket_addr()
         // for &str and IpAddr
-        let mut dns = Dns::new(IpVersionAddrIter::default());
+        let mut dns = Dns::new(IpVersionAddrIter::default(), IpSubnets::default());
         let addr = dns.lookup(Ipv4Addr::new(192, 168, 2, 2));
         assert_eq!(addr, Ipv4Addr::new(192, 168, 2, 2));
 
