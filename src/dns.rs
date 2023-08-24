@@ -30,8 +30,10 @@ pub trait ToIpAddr: sealed::Sealed {
     #[doc(hidden)]
     fn to_ip_addr(&self, dns: &Dns) -> Option<IpAddr>;
 
+    // Used to support deprecated APIs, use this function to derive a
+    // node name from any T: ToIpAddr
     #[doc(hidden)]
-    fn to_name(&self, dns: &Dns) -> String;
+    fn to_name(&self) -> String;
 }
 
 /// Converts or resolves to one or more [`IpAddr`] values.
@@ -56,25 +58,25 @@ impl Dns {
         }
     }
 
-    pub(crate) fn register(&mut self, addr: impl ToIpAddr) -> IpAddr {
+    pub(crate) fn register_legacy(&mut self, addr: impl ToIpAddr) -> (String, IpAddr) {
         // Manual lookup
         let scoped_addr = match addr.to_ip_addr(self) {
             Some(addr) => addr,
             None => self.addrs.next().addr,
         };
 
-        let name = self.reverse(addr);
+        let name = addr.to_name();
 
         self.mapping.insert(
-            name,
+            name.clone(),
             NodeInfo {
                 addrs: vec![scoped_addr],
             },
         );
-        scoped_addr
+        (name, scoped_addr)
     }
 
-    pub(crate) fn register2(&mut self, name: &str, static_addrs: Vec<IpAddr>) -> Vec<IpAddr> {
+    pub(crate) fn register(&mut self, name: &str, static_addrs: Vec<IpAddr>) -> Vec<IpAddr> {
         // Assign addresses according to subnets
         let n = self.subnets.len();
 
@@ -98,8 +100,6 @@ impl Dns {
             }
         }
 
-        println!("{name}:{bound_addrs:?}");
-
         self.mapping.insert(
             name.to_string(),
             NodeInfo {
@@ -117,8 +117,13 @@ impl Dns {
         addrs.to_ip_addrs(self)
     }
 
-    pub(crate) fn reverse(&self, addr: impl ToIpAddr) -> String {
-        addr.to_name(self)
+    pub(crate) fn reverse(&self, addr: IpAddr) -> String {
+        self.mapping
+            .iter()
+            .find(|(_, info)| info.addrs.contains(&addr))
+            .expect("Could not found reverse mapping")
+            .0
+            .clone()
     }
 }
 
@@ -127,8 +132,8 @@ impl ToIpAddr for String {
         (&self[..]).to_ip_addr(dns)
     }
 
-    fn to_name(&self, dns: &Dns) -> String {
-        (&self[..]).to_name(dns)
+    fn to_name(&self) -> String {
+        self.clone()
     }
 }
 
@@ -138,15 +143,13 @@ impl<'a> ToIpAddr for &'a str {
             return Some(ipaddr);
         }
 
-        println!("req mapping for {}", *self);
-
         let info = dns.mapping.get(*self)?;
 
         // Quick hack, as long as multiple ips are not yet implemented
         Some(info.addrs[0])
     }
 
-    fn to_name(&self, _: &Dns) -> String {
+    fn to_name(&self) -> String {
         self.to_string()
     }
 }
@@ -156,15 +159,7 @@ impl ToIpAddr for IpAddr {
         Some(*self)
     }
 
-    fn to_name(&self, dns: &Dns) -> String {
-        if let Some((name, _)) = dns
-            .mapping
-            .iter()
-            .find(|(_, info)| info.addrs.iter().any(|scoped| scoped == self))
-        {
-            return name.to_string();
-        }
-
+    fn to_name(&self) -> String {
         self.to_string()
     }
 }
@@ -173,8 +168,8 @@ impl ToIpAddr for Ipv4Addr {
     fn to_ip_addr(&self, _: &Dns) -> Option<IpAddr> {
         Some(IpAddr::V4(*self))
     }
-    fn to_name(&self, dns: &Dns) -> String {
-        IpAddr::V4(*self).to_name(dns)
+    fn to_name(&self) -> String {
+        self.to_string()
     }
 }
 
@@ -182,8 +177,8 @@ impl ToIpAddr for Ipv6Addr {
     fn to_ip_addr(&self, _: &Dns) -> Option<IpAddr> {
         Some(IpAddr::V6(*self))
     }
-    fn to_name(&self, dns: &Dns) -> String {
-        IpAddr::V6(*self).to_name(dns)
+    fn to_name(&self) -> String {
+        self.to_string()
     }
 }
 
@@ -328,7 +323,7 @@ mod tests {
     #[test]
     fn parse_str() {
         let mut dns = Dns::new(IpVersionAddrIter::default(), IpSubnets::default());
-        let generated_addr = dns.register("foo");
+        let (_, generated_addr) = dns.register_legacy("foo");
 
         let hostname_port = "foo:5000".to_socket_addr(&dns);
         let ipv4_port = "127.0.0.1:5000";

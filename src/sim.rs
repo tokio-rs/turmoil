@@ -66,8 +66,7 @@ impl<'a> Sim<'a> {
     where
         F: Future<Output = Result> + 'static,
     {
-        let addr = self.dns_register(addr);
-        let node_name = self.world.borrow_mut().dns.reverse(addr);
+        let (node_name, addr) = self.world.borrow_mut().dns.register_legacy(addr);
         let id = NodeIdentifer::new(node_name);
 
         {
@@ -93,8 +92,7 @@ impl<'a> Sim<'a> {
         F: Fn() -> Fut + 'a,
         Fut: Future<Output = Result> + 'static,
     {
-        let addr = self.dns_register(addr);
-        let node_name = self.world.borrow_mut().dns.reverse(addr);
+        let (node_name, addr) = self.world.borrow_mut().dns.register_legacy(addr);
         let id = NodeIdentifer::new(node_name);
 
         {
@@ -172,10 +170,6 @@ impl<'a> Sim<'a> {
             .get(&id)
             .expect("missing host")
             .is_software_running()
-    }
-
-    fn dns_register(&self, addr: impl ToIpAddr) -> IpAddr {
-        self.world.borrow_mut().dns_register(addr)
     }
 
     /// Lookup an IP address by host name.
@@ -428,7 +422,7 @@ impl<'a, 'b> NodeBuilder<'a, 'b> {
         let Self { sim, name, addrs } = self;
 
         let id = NodeIdentifer::new(name.clone());
-        let bound_addrs = sim.world.borrow_mut().dns.register2(&name, addrs);
+        let bound_addrs = sim.world.borrow_mut().dns.register(&name, addrs);
 
         {
             let mut world = sim.world.borrow_mut();
@@ -455,7 +449,7 @@ impl<'a, 'b> NodeBuilder<'a, 'b> {
         let Self { sim, name, addrs } = self;
 
         let id = NodeIdentifer::new(name.clone());
-        let bound_addrs = sim.world.borrow_mut().dns.register2(&name, addrs);
+        let bound_addrs = sim.world.borrow_mut().dns.register(&name, addrs);
         {
             let mut world = sim.world.borrow_mut();
             world.register(id.clone(), bound_addrs, &sim.config);
