@@ -347,8 +347,52 @@ impl IpVersionAddrIter {
 
 #[cfg(test)]
 mod tests {
-    use crate::{lookup, Builder, IpVersion, Result};
+    use crate::{lookup, Builder, IpVersion, Ipv4Subnet, Ipv6Subnet, Result};
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn ip_subnet_v4() {
+        let subnet = Ipv4Subnet::new(Ipv4Addr::new(192, 168, 0, 0), 16);
+        assert_eq!(subnet.prefix(), Ipv4Addr::new(192, 168, 0, 0));
+
+        assert!(subnet.contains(Ipv4Addr::new(192, 168, 2, 24)));
+        assert!(subnet.contains(Ipv4Addr::new(192, 168, 0, 0)));
+        assert!(subnet.contains(Ipv4Addr::new(192, 168, 255, 255)));
+
+        assert!(!subnet.contains(Ipv4Addr::new(192, 169, 2, 24)));
+        assert!(!subnet.contains(Ipv4Addr::new(0, 0, 0, 0)));
+        assert!(!subnet.contains(Ipv4Addr::new(255, 255, 255, 255)));
+
+        assert!(subnet.intersects(Ipv4Subnet::new(Ipv4Addr::new(192, 168, 2, 0), 10)));
+        assert!(!subnet.intersects(Ipv4Subnet::new(Ipv4Addr::new(193, 168, 2, 0), 10)));
+    }
+
+    #[test]
+    fn ip_subnet_v6() {
+        let subnet = Ipv6Subnet::new(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0), 64);
+        assert_eq!(subnet.prefix(), Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0));
+
+        assert!(subnet.contains(Ipv6Addr::new(0xfe80, 0, 0, 0, 2, 0, 24, 0)));
+        assert!(subnet.contains(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0)));
+        assert!(subnet.contains(Ipv6Addr::new(
+            0xfe80, 0, 0, 0, 0xffff, 0xffff, 0xffff, 0xffff
+        )));
+
+        assert!(!subnet.contains(Ipv6Addr::new(0xfe80, 0, 0, 3, 0, 0, 0, 0)));
+        assert!(!subnet.contains(Ipv6Addr::UNSPECIFIED));
+        assert!(!subnet.contains(Ipv6Addr::new(
+            0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff
+        )));
+
+        assert!(subnet.intersects(Ipv6Subnet::new(
+            Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0),
+            52
+        )));
+        assert!(!subnet.intersects(Ipv6Subnet::new(
+            Ipv6Addr::new(0xfe81, 0, 0, 0, 0, 0, 0, 0),
+            40
+        )));
+    }
 
     #[test]
     fn ip_version_v4() -> Result {

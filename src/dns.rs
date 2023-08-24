@@ -54,22 +54,17 @@ impl Dns {
 
     pub(crate) fn register(&mut self, addr: impl ToIpAddr) -> IpAddr {
         // Manual lookup
-        let scoped_addr = addr
-            .to_ip_addr(self)
-            .map(|addr| {
-                if addr.is_ipv4() {
-                    ScopedIpAddr {
-                        addr,
-                        subnet: IpSubnet::V4(Ipv4Subnet::default()),
-                    }
-                } else {
-                    ScopedIpAddr {
-                        addr,
-                        subnet: IpSubnet::V6(Ipv6Subnet::default()),
-                    }
-                }
-            })
-            .unwrap_or_else(|| self.addrs.next());
+        let scoped_addr = match addr.to_ip_addr(self) {
+            Some(addr) if addr.is_ipv4() => ScopedIpAddr {
+                addr,
+                subnet: IpSubnet::V4(Ipv4Subnet::default()),
+            },
+            Some(addr) /*if addr.is_ipv6() */=> ScopedIpAddr {
+                addr,
+                subnet: IpSubnet::V6(Ipv6Subnet::default()),
+            },
+            None => self.addrs.next(),
+        };
 
         let name = self.reverse(addr);
         let addr = scoped_addr.addr;
