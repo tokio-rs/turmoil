@@ -43,7 +43,7 @@ impl World {
     ) -> World {
         World {
             hosts: IndexMap::new(),
-            topology: Topology::new(link),
+            topology: Topology::new(link, &subnets),
             dns: Dns::new(addrs, subnets),
             current: None,
             rng,
@@ -144,16 +144,10 @@ impl World {
             "already registered host for the given nodename"
         );
 
-        // TODO: Fixed when multi IP support is done
-        // assert_eq!(addrs.len(), 1);
-        let addr = addrs[0];
+        tracing::info!(target: TRACING_TARGET, nodename=&*id, ?addrs, "New");
 
-        tracing::info!(target: TRACING_TARGET, nodename=&*id, ?addr, "New");
-
-        // Register links between the new host and all existing hosts
-        for existing in self.hosts.values() {
-            self.topology.register(existing.addr, addr);
-        }
+        // Register link between new host an all existing hosts (per subnet)
+        self.topology.register_interfaces(&addrs);
 
         // Initialize host state
         self.hosts.insert(

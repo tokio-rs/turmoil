@@ -1,5 +1,6 @@
 use std::{
     fmt,
+    hash::Hash,
     net::{AddrParseError, IpAddr, Ipv4Addr, Ipv6Addr},
     num::ParseIntError,
     ops::Deref,
@@ -63,13 +64,20 @@ impl Default for IpSubnets {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IpSubnet {
     V4(Ipv4Subnet),
     V6(Ipv6Subnet),
 }
 
 impl IpSubnet {
+    pub fn addr_from_entropy(&self, entropy: u128) -> IpAddr {
+        match self {
+            IpSubnet::V4(v4) => v4.addr_from_entropy(entropy),
+            IpSubnet::V6(v6) => v6.addr_from_entropy(entropy),
+        }
+    }
+
     pub fn prefix(&self) -> IpAddr {
         match self {
             IpSubnet::V4(v4) => v4.prefix().into(),
@@ -110,6 +118,15 @@ impl fmt::Display for IpSubnet {
     }
 }
 
+impl Hash for IpSubnet {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        match self {
+            Self::V4(v4) => v4.hash(state),
+            Self::V6(v6) => v6.hash(state),
+        }
+    }
+}
+
 /// An error type that models errors when parsing IpSubnets.
 ///
 /// The syntax is `<addr>/<prefixlen>`
@@ -122,7 +139,7 @@ pub enum IpSubnetParsingError {
 
 /// An IP subnet which speaks Ipv4, defined by a subnet prefix of
 /// a given length.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Ipv4Subnet {
     subnet: Ipv4Addr,
     mask: Ipv4Addr,
@@ -145,6 +162,13 @@ impl Ipv4Subnet {
         let mask = prefixlen_to_mask_v4(prefixlen);
         let subnet = truncate_netmask_v4(subnet, mask);
         Self { subnet, mask }
+    }
+
+    pub(crate) fn addr_from_entropy(&self, entropy: u128) -> IpAddr {
+        let mut bytes = entropy as u32;
+        bytes &= !u32::from(self.mask);
+        bytes |= u32::from(self.subnet);
+        IpAddr::V4(Ipv4Addr::from(bytes))
     }
 
     /// Returns the network address of the given subnet.
@@ -211,6 +235,13 @@ impl Default for Ipv4Subnet {
     }
 }
 
+impl Hash for Ipv4Subnet {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.subnet.hash(state);
+        self.mask.hash(state);
+    }
+}
+
 // Helper functions
 
 fn truncate_netmask_v4(subnet: Ipv4Addr, mask: Ipv4Addr) -> Ipv4Addr {
@@ -227,7 +258,7 @@ fn mask_to_prefixlen_v4(mask: Ipv4Addr) -> usize {
 
 /// An IP subnet which speaks Ipv6, defined by a subnet prefix of
 /// a given length.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Ipv6Subnet {
     subnet: Ipv6Addr,
     mask: Ipv6Addr,
@@ -250,6 +281,13 @@ impl Ipv6Subnet {
         let mask = prefixlen_to_mask_v6(prefixlen);
         let subnet = truncate_netmask_v6(subnet, mask);
         Self { subnet, mask }
+    }
+
+    pub(crate) fn addr_from_entropy(&self, entropy: u128) -> IpAddr {
+        let mut bytes = entropy;
+        bytes &= !u128::from(self.mask);
+        bytes |= u128::from(self.subnet);
+        IpAddr::V6(Ipv6Addr::from(bytes))
     }
 
     /// Returns the network address of the given subnet.
@@ -313,6 +351,13 @@ impl fmt::Display for Ipv6Subnet {
 impl Default for Ipv6Subnet {
     fn default() -> Self {
         Ipv6Subnet::new(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0), 64)
+    }
+}
+
+impl Hash for Ipv6Subnet {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.subnet.hash(state);
+        self.mask.hash(state);
     }
 }
 

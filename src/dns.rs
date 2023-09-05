@@ -3,10 +3,7 @@ use indexmap::IndexMap;
 use regex::Regex;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
-use crate::{
-    ip::{IpSubnets, IpVersionAddrIter},
-    IpSubnet,
-};
+use crate::ip::{IpSubnets, IpVersionAddrIter};
 
 /// Each new host has an IP in the subnet defined by the
 /// ip version of the simulation.
@@ -91,12 +88,7 @@ impl Dns {
             } else {
                 let raw = self.counters[i];
                 self.counters[i] = self.counters[i].wrapping_add(1);
-
-                *item = if matches!(self.subnets[i], IpSubnet::V4(_)) {
-                    IpAddr::V4(Ipv4Addr::from(raw as u32))
-                } else {
-                    IpAddr::V6(Ipv6Addr::from(raw))
-                }
+                *item = self.subnets[i].addr_from_entropy(raw);
             }
         }
 
