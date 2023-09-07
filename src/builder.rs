@@ -114,12 +114,15 @@ impl Builder {
     }
 
     pub fn build_with_rng<'a>(&self, rng: Box<dyn RngCore>) -> Sim<'a> {
-        let world = World::new(
-            self.link.clone(),
-            rng,
-            self.ip_version.iter(),
-            self.ip_subnets.clone(),
-        );
+        // FIXME: quick fix for to keep depr API within new rules
+        let subnets = if self.ip_version == IpVersion::V6 && self.ip_subnets == IpSubnets::default()
+        {
+            IpSubnets::default_reverse()
+        } else {
+            self.ip_subnets.clone()
+        };
+
+        let world = World::new(self.link.clone(), rng, subnets);
         Sim::new(self.config.clone(), world)
     }
 }

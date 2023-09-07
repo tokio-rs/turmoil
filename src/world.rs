@@ -1,6 +1,6 @@
 use crate::config::Config;
 use crate::envelope::Protocol;
-use crate::ip::{IpSubnets, IpVersionAddrIter};
+use crate::ip::IpSubnets;
 use crate::node::NodeIdentifer;
 use crate::{config, for_pairs, Dns, Host, ToIpAddr, ToIpAddrs, Topology, TRACING_TARGET};
 
@@ -35,16 +35,11 @@ scoped_thread_local!(static CURRENT: RefCell<World>);
 
 impl World {
     /// Initialize a new world.
-    pub(crate) fn new(
-        link: config::Link,
-        rng: Box<dyn RngCore>,
-        addrs: IpVersionAddrIter,
-        subnets: IpSubnets,
-    ) -> World {
+    pub(crate) fn new(link: config::Link, rng: Box<dyn RngCore>, subnets: IpSubnets) -> World {
         World {
             hosts: IndexMap::new(),
             topology: Topology::new(link, &subnets),
-            dns: Dns::new(addrs, subnets),
+            dns: Dns::new(subnets),
             current: None,
             rng,
         }

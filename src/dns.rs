@@ -3,7 +3,7 @@ use indexmap::IndexMap;
 use regex::Regex;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
-use crate::ip::{IpSubnets, IpVersionAddrIter};
+use crate::ip::IpSubnets;
 
 /// Each new host has an IP in the subnet defined by the
 /// ip version of the simulation.
@@ -11,7 +11,6 @@ use crate::ip::{IpSubnets, IpVersionAddrIter};
 /// Ipv4 simulations use the subnet 192.168.0.0/16.
 /// Ipv6 simulations use the link local subnet fe80:::/64
 pub struct Dns {
-    addrs: IpVersionAddrIter,
     pub(crate) subnets: IpSubnets,
     counters: Vec<u128>,
     mapping: IndexMap<String, NodeInfo>,
@@ -46,11 +45,10 @@ pub trait ToSocketAddrs: sealed::Sealed {
 }
 
 impl Dns {
-    pub(crate) fn new(addrs: IpVersionAddrIter, subnets: IpSubnets) -> Dns {
+    pub(crate) fn new(subnets: IpSubnets) -> Dns {
         Dns {
-            addrs,
             mapping: IndexMap::new(),
-            counters: vec![0; subnets.len()],
+            counters: vec![1; subnets.len()],
             subnets,
         }
     }
@@ -59,7 +57,11 @@ impl Dns {
         // Manual lookup
         let scoped_addr = match addr.to_ip_addr(self) {
             Some(addr) => addr,
-            None => self.addrs.next().addr,
+            None => {
+                let raw = self.counters[0];
+                self.counters[0] += 1;
+                self.subnets[0].addr_from_entropy(raw).into()
+            }
         };
 
         let name = addr.to_name();
@@ -305,16 +307,12 @@ mod sealed {
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        dns::Dns,
-        ip::{IpSubnets, IpVersionAddrIter},
-        ToSocketAddrs,
-    };
+    use crate::{dns::Dns, ip::IpSubnets, ToSocketAddrs};
     use std::net::Ipv4Addr;
 
     #[test]
     fn parse_str() {
-        let mut dns = Dns::new(IpVersionAddrIter::default(), IpSubnets::default());
+        let mut dns = Dns::new(IpSubnets::default());
         let (_, generated_addr) = dns.register_legacy("foo");
 
         let hostname_port = "foo:5000".to_socket_addr(&dns);
@@ -334,7 +332,7 @@ mod tests {
         // lookups of raw ip addrs should be consistent
         // between to_ip_addr() and to_socket_addr()
         // for &str and IpAddr
-        let mut dns = Dns::new(IpVersionAddrIter::default(), IpSubnets::default());
+        let mut dns = Dns::new(IpSubnets::default());
         let addr = dns.lookup(Ipv4Addr::new(192, 168, 2, 2));
         assert_eq!(addr, Ipv4Addr::new(192, 168, 2, 2));
 

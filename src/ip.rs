@@ -7,19 +7,21 @@ use std::{
     str::FromStr,
 };
 
-/// An address withing a subnet.
-pub(crate) struct ScopedIpAddr {
-    pub(crate) addr: IpAddr,
-    #[allow(dead_code)]
-    pub(crate) subnet: IpSubnet,
-}
-
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IpSubnets {
     subnets: Vec<IpSubnet>,
 }
 
 impl IpSubnets {
+    pub(crate) fn default_reverse() -> IpSubnets {
+        IpSubnets {
+            subnets: vec![
+                IpSubnet::V6(Ipv6Subnet::default()),
+                IpSubnet::V4(Ipv4Subnet::default()),
+            ],
+        }
+    }
+
     pub fn add(&mut self, subnet: IpSubnet) {
         assert!(
             !self
@@ -383,62 +385,6 @@ pub enum IpVersion {
     V4,
     /// An local area Ipv6 network with an address space of fe80::/64
     V6,
-}
-
-impl IpVersion {
-    pub(crate) fn iter(&self) -> IpVersionAddrIter {
-        match self {
-            Self::V4 => IpVersionAddrIter::V4(1),
-            Self::V6 => IpVersionAddrIter::V6(1),
-        }
-    }
-}
-
-#[derive(Debug)]
-pub(crate) enum IpVersionAddrIter {
-    /// the next ip addr without the network prefix, as u32
-    V4(u32),
-    /// the next ip addr without the network prefix, as u128
-    V6(u128),
-}
-
-impl Default for IpVersionAddrIter {
-    fn default() -> Self {
-        Self::V4(1)
-    }
-}
-
-impl IpVersionAddrIter {
-    pub(crate) fn next(&mut self) -> ScopedIpAddr {
-        match self {
-            Self::V4(next) => {
-                let host = *next;
-                *next = next.wrapping_add(1);
-
-                let a = (host >> 8) as u8;
-                let b = (host & 0xFF) as u8;
-
-                ScopedIpAddr {
-                    addr: IpAddr::V4(Ipv4Addr::new(192, 168, a, b)),
-                    subnet: IpSubnet::V4(Ipv4Subnet::default()),
-                }
-            }
-            Self::V6(next) => {
-                let host = *next;
-                *next = next.wrapping_add(1);
-
-                let a = ((host >> 48) & 0xffff) as u16;
-                let b = ((host >> 32) & 0xffff) as u16;
-                let c = ((host >> 16) & 0xffff) as u16;
-                let d = (host & 0xffff) as u16;
-
-                ScopedIpAddr {
-                    addr: IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, a, b, c, d)),
-                    subnet: IpSubnet::V6(Ipv6Subnet::default()),
-                }
-            }
-        }
-    }
 }
 
 #[cfg(test)]
