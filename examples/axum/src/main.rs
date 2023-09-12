@@ -29,15 +29,27 @@ fn main() {
     sim.host("server", move || {
         let router = router.clone();
         async move {
-            Server::builder(from_stream(async_stream::stream! {
+            let mut set = tokio::task::JoinSet::new();
+
+            let server = Server::builder(from_stream(async_stream::stream! {
+                println!("accepting");
                 let listener = net::TcpListener::bind(addr).await?;
                 loop {
                     yield listener.accept().await.map(|(s, _)| s);
                 }
             }))
-            .serve(Shared::new(router))
-            .await
-            .unwrap();
+            .serve(Shared::new(router));
+
+            println!("about to sleep in a blocking thread");
+            tokio::task::spawn_blocking(|| {
+                println!("sleeping");
+                std::thread::sleep(std::time::Duration::from_secs(10));
+            });
+            println!("This shouldn't take 10s to print");
+
+            set.spawn(server);
+
+            set.join_next().await.unwrap().unwrap().unwrap();
 
             Ok(())
         }
@@ -47,6 +59,8 @@ fn main() {
     sim.client(
         "client",
         async move {
+            // This does not print right away because spawn_blocking is somehow blocking everything
+            println!("running client");
             let client = Client::builder().build(connector::connector());
 
             let mut request = Request::new(Body::empty());
