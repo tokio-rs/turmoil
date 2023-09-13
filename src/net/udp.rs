@@ -291,7 +291,7 @@ impl UdpSocket {
             src.set_ip(world.current_host_mut().addr);
         }
 
-        if dst.ip().is_loopback() {
+        if dst.ip().is_loopback() || src.ip() == dst.ip() {
             send_loopback(src, dst, msg);
         } else {
             world.send_message(src, dst, msg)?;

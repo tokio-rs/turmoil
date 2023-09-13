@@ -74,7 +74,7 @@ impl TcpStream {
             let rx = host.tcp.new_stream(pair);
 
             let syn = Protocol::Tcp(Segment::Syn(Syn { ack }));
-            if !dst.ip().is_loopback() {
+            if !dst.ip().is_loopback() && dst.ip() != local_addr.ip() {
                 world.send_message(local_addr, dst, syn)?;
             } else {
                 send_loopback(local_addr, dst, syn);
@@ -270,7 +270,7 @@ impl WriteHalf {
 
     fn send(&self, world: &mut World, segment: Segment) -> Result<()> {
         let message = Protocol::Tcp(segment);
-        if self.pair.remote.ip().is_loopback() {
+        if self.pair.remote.ip().is_loopback() || self.pair.local.ip() == self.pair.remote.ip() {
             send_loopback(self.pair.local, self.pair.remote, message);
         } else {
             world.send_message(self.pair.local, self.pair.remote, message)?;

@@ -831,6 +831,38 @@ fn loopback_to_localhost_v4() -> Result {
 }
 
 #[test]
+fn loopback_wildcard_public_v4() -> Result {
+    let bind_addr = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 1234);
+    let connect_addr = SocketAddr::from((Ipv4Addr::new(192, 168, 0, 1), 1234));
+    run_localhost_test(IpVersion::V4, bind_addr, connect_addr)
+}
+
+#[test]
+fn loopback_localhost_public_v4() -> Result {
+    let bind_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1234);
+    let connect_addr = SocketAddr::from((Ipv4Addr::new(192, 168, 0, 1), 1234));
+    let mut sim = Builder::new().ip_version(IpVersion::V4).build();
+    sim.client("client", async move {
+        let listener = TcpListener::bind(bind_addr).await?;
+
+        tokio::spawn(async move {
+            let (mut socket, socket_addr) = listener.accept().await.unwrap();
+            socket.write_all(&[0, 1, 3, 7, 8]).await.unwrap();
+
+            assert_eq!(socket_addr.ip(), connect_addr.ip());
+            assert_eq!(socket.local_addr().unwrap().ip(), connect_addr.ip());
+            assert_eq!(socket.peer_addr().unwrap().ip(), connect_addr.ip());
+        });
+
+        let res = TcpStream::connect(connect_addr).await;
+        assert_error_kind(res, io::ErrorKind::ConnectionRefused);
+
+        Ok(())
+    });
+    sim.run()
+}
+
+#[test]
 fn loopback_to_wildcard_v6() -> Result {
     let bind_addr = SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), 1234);
     let connect_addr = SocketAddr::from((Ipv6Addr::LOCALHOST, 1234));
@@ -842,6 +874,38 @@ fn loopback_to_localhost_v6() -> Result {
     let bind_addr = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 1234);
     let connect_addr = SocketAddr::from((Ipv6Addr::LOCALHOST, 1234));
     run_localhost_test(IpVersion::V6, bind_addr, connect_addr)
+}
+
+#[test]
+fn loopback_wildcard_public_v6() -> Result {
+    let bind_addr = SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), 1234);
+    let connect_addr = SocketAddr::from((Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1), 1234));
+    run_localhost_test(IpVersion::V6, bind_addr, connect_addr)
+}
+
+#[test]
+fn loopback_localhost_public_v6() -> Result {
+    let bind_addr = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 1234);
+    let connect_addr = SocketAddr::from((Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1), 1234));
+    let mut sim = Builder::new().ip_version(IpVersion::V6).build();
+    sim.client("client", async move {
+        let listener = TcpListener::bind(bind_addr).await?;
+
+        tokio::spawn(async move {
+            let (mut socket, socket_addr) = listener.accept().await.unwrap();
+            socket.write_all(&[0, 1, 3, 7, 8]).await.unwrap();
+
+            assert_eq!(socket_addr.ip(), connect_addr.ip());
+            assert_eq!(socket.local_addr().unwrap().ip(), connect_addr.ip());
+            assert_eq!(socket.peer_addr().unwrap().ip(), connect_addr.ip());
+        });
+
+        let res = TcpStream::connect(connect_addr).await;
+        assert_error_kind(res, io::ErrorKind::ConnectionRefused);
+
+        Ok(())
+    });
+    sim.run()
 }
 
 #[test]
