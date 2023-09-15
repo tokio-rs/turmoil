@@ -417,6 +417,11 @@ pub fn matches(bind: SocketAddr, dst: SocketAddr) -> bool {
     bind == dst
 }
 
+/// Returns whether loopback is supported from src to dst
+pub(crate) fn is_loopback(src: SocketAddr, dst: SocketAddr) -> bool {
+    dst.ip().is_loopback() || src.ip() == dst.ip()
+}
+
 #[cfg(test)]
 mod test {
     use crate::{Host, Result};

@@ -1,6 +1,5 @@
 use std::{
     io::{self, ErrorKind},
-    matches,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     rc::Rc,
     sync::{atomic::AtomicUsize, atomic::Ordering},
@@ -210,7 +209,7 @@ fn hold_and_release() -> Result {
         send_ping(&sock).await?;
 
         let res = timeout(Duration::from_secs(1), recv_pong(&sock)).await;
-        assert!(matches!(res, Err(_)));
+        assert!(res.is_err());
 
         // resume the network. note that the client ping does not have to be
         // resent.
@@ -406,7 +405,9 @@ fn non_zero_bind() -> Result {
     sim.client("client", async move {
         let sock = UdpSocket::bind("1.1.1.1:1").await;
 
-        let Err(err) = sock else { panic!("socket creation should have failed") };
+        let Err(err) = sock else {
+            panic!("socket creation should have failed")
+        };
         assert_eq!(err.to_string(), "1.1.1.1:1 is not supported");
         Ok(())
     });

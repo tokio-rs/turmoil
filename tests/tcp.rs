@@ -736,7 +736,9 @@ fn non_zero_bind() -> Result {
     sim.client("client", async move {
         let sock = TcpListener::bind("1.1.1.1:1").await;
 
-        let Err(err) = sock else { panic!("bind should have failed") };
+        let Err(err) = sock else {
+            panic!("bind should have failed")
+        };
         assert_eq!(err.to_string(), "1.1.1.1:1 is not supported");
         Ok(())
     });
