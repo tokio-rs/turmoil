@@ -1,4 +1,5 @@
 use crate::envelope::{hex, Datagram, Protocol, Segment, Syn};
+use crate::ip::longest_prefix_match;
 use crate::net::{SocketPair, TcpListener, UdpSocket};
 use crate::world::World;
 use crate::{Envelope, TRACING_TARGET};
@@ -91,6 +92,11 @@ impl Host {
 
             return ret;
         }
+    }
+
+    pub(crate) fn sender_for_dst(&self, dst: SocketAddr) -> IpAddr {
+        // make a longest prefix match on all bound addrs
+        longest_prefix_match(&self.addrs, dst.ip())
     }
 
     /// Receive the `envelope` from the network.

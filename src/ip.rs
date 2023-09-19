@@ -22,6 +22,12 @@ impl IpSubnets {
         }
     }
 
+    pub fn new() -> Self {
+        IpSubnets {
+            subnets: Vec::new(),
+        }
+    }
+
     pub fn add(&mut self, subnet: IpSubnet) {
         assert!(
             !self
@@ -385,6 +391,35 @@ pub enum IpVersion {
     V4,
     /// An local area Ipv6 network with an address space of fe80::/64
     V6,
+}
+
+pub(crate) fn longest_prefix_match(addrs: &[IpAddr], other: IpAddr) -> IpAddr {
+    let mut max = 0;
+    let mut best = addrs[0];
+    for addr in addrs {
+        match (addr, other) {
+            (IpAddr::V4(v4), IpAddr::V4(other)) => {
+                let xored = u32::from(*v4) ^ u32::from(other);
+                let prefixlen = xored.leading_zeros();
+                if prefixlen > max {
+                    max = prefixlen;
+                    best = *addr;
+                }
+            }
+            (IpAddr::V6(v6), IpAddr::V6(other)) => {
+                let xored = u128::from(*v6) ^ u128::from(other);
+                let prefixlen = xored.leading_zeros();
+                if prefixlen > max {
+                    max = prefixlen;
+                    best = *addr;
+                }
+            }
+            _ => continue,
+        }
+    }
+
+    assert!(max > 0, "no prefix match found");
+    best
 }
 
 #[cfg(test)]

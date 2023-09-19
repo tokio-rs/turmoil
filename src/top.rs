@@ -266,7 +266,7 @@ impl Topology {
     // Move messages from any network links to the `dst` host.
     pub(crate) fn deliver_messages(&mut self, rand: &mut dyn RngCore, dst: &mut Host) {
         for (pair, link) in &mut self.links {
-            if pair.0 == dst.addr || pair.1 == dst.addr {
+            if dst.addrs.contains(&pair.0) || dst.addrs.contains(&pair.1) {
                 link.deliver_messages(&self.config, rand, dst);
             }
         }
@@ -425,17 +425,19 @@ impl Link {
         rand: &mut dyn RngCore,
         host: &mut Host,
     ) {
-        let deliverable = self
-            .deliverable
-            .entry(host.addr)
-            .or_default()
-            .drain(..)
-            .collect::<Vec<Envelope>>();
+        for addr in host.addrs.clone() {
+            let deliverable = self
+                .deliverable
+                .entry(addr)
+                .or_default()
+                .drain(..)
+                .collect::<Vec<Envelope>>();
 
-        for message in deliverable {
-            let (src, dst) = (message.src, message.dst);
-            if let Err(message) = host.receive_from_network(message) {
-                self.enqueue_message(global_config, rand, dst, src, message);
+            for message in deliverable {
+                let (src, dst) = (message.src, message.dst);
+                if let Err(message) = host.receive_from_network(message) {
+                    self.enqueue_message(global_config, rand, dst, src, message);
+                }
             }
         }
     }
