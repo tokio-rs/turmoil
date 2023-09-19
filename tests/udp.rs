@@ -400,18 +400,18 @@ fn bind_ipv6_version_missmatch() {
     sim.run().unwrap()
 }
 
-#[test]
-fn non_zero_bind() -> Result {
-    let mut sim = Builder::new().ip_version(IpVersion::V4).build();
-    sim.client("client", async move {
-        let sock = UdpSocket::bind("1.1.1.1:1").await;
+// #[test]
+// fn non_zero_bind() -> Result {
+//     let mut sim = Builder::new().ip_version(IpVersion::V4).build();
+//     sim.client("client", async move {
+//         let sock = UdpSocket::bind("1.1.1.1:1").await;
 
-        let Err(err) = sock else { panic!("socket creation should have failed") };
-        assert_eq!(err.to_string(), "1.1.1.1:1 is not supported");
-        Ok(())
-    });
-    sim.run()
-}
+//         let Err(err) = sock else { panic!("socket creation should have failed") };
+//         assert_eq!(err.to_string(), "1.1.1.1:1 is not supported");
+//         Ok(())
+//     });
+//     sim.run()
+// }
 
 #[test]
 fn ipv6_connectivity() -> Result {

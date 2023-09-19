@@ -99,8 +99,7 @@ fn interface_exclusivity() -> Result {
     sim.node("bob").build_client(async {
         let sock = UdpSocket::bind("192.168.0.2:2000").await?;
         let mut buf = [0; 128];
-        let (n, from) = sock.recv_from(&mut buf).await?;
-        println!("recv {n} bytes from {from}");
+        let (n, _) = sock.recv_from(&mut buf).await?;
         assert_eq!(&buf[..n], b"Hello");
         Ok(())
     });

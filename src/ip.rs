@@ -424,8 +424,36 @@ pub(crate) fn longest_prefix_match(addrs: &[IpAddr], other: IpAddr) -> IpAddr {
 
 #[cfg(test)]
 mod tests {
-    use crate::{lookup, Builder, IpVersion, Ipv4Subnet, Ipv6Subnet, Result};
+    use crate::{lookup, Builder, IpSubnet, IpSubnets, IpVersion, Ipv4Subnet, Ipv6Subnet, Result};
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn subnets_construction() {
+        let mut subnets = IpSubnets::new();
+        subnets.add(IpSubnet::V4(Ipv4Subnet::new(
+            Ipv4Addr::new(10, 1, 0, 0),
+            16,
+        )));
+        subnets.add(IpSubnet::V4(Ipv4Subnet::new(
+            Ipv4Addr::new(10, 2, 0, 0),
+            16,
+        )));
+        subnets.add(IpSubnet::V4(Ipv4Subnet::new(Ipv4Addr::new(20, 0, 0, 0), 8)));
+    }
+
+    #[test]
+    #[should_panic = "Cannot add intersecting IP subnet"]
+    fn subnets_construction_panic() {
+        let mut subnets = IpSubnets::new();
+        subnets.add(IpSubnet::V4(Ipv4Subnet::new(
+            Ipv4Addr::new(10, 1, 0, 0),
+            16,
+        )));
+        subnets.add(IpSubnet::V4(Ipv4Subnet::new(
+            Ipv4Addr::new(10, 1, 6, 0),
+            24,
+        )));
+    }
 
     #[test]
     fn ip_subnet_v4() {
