@@ -41,7 +41,14 @@ pub trait ToIpAddrs: sealed::Sealed {
 /// A simulated version of `tokio::net::ToSocketAddrs`.
 pub trait ToSocketAddrs: sealed::Sealed {
     #[doc(hidden)]
-    fn to_socket_addr(&self, dns: &Dns) -> SocketAddr;
+    fn to_socket_addr(&self, dns: &Dns) -> SocketAddr {
+        *self
+            .to_socket_addrs(dns)
+            .first()
+            .expect("no socket address found")
+    }
+    #[doc(hidden)]
+    fn to_socket_addrs(&self, dns: &Dns) -> Vec<SocketAddr>;
 }
 
 impl Dns {
@@ -204,73 +211,77 @@ impl ToIpAddrs for Regex {
 
 // Hostname and port
 impl ToSocketAddrs for (String, u16) {
-    fn to_socket_addr(&self, dns: &Dns) -> SocketAddr {
-        (&self.0[..], self.1).to_socket_addr(dns)
+    fn to_socket_addrs(&self, dns: &Dns) -> Vec<SocketAddr> {
+        (&self.0[..], self.1).to_socket_addrs(dns)
     }
 }
 
 impl<'a> ToSocketAddrs for (&'a str, u16) {
-    fn to_socket_addr(&self, dns: &Dns) -> SocketAddr {
+    fn to_socket_addrs(&self, dns: &Dns) -> Vec<SocketAddr> {
         // When IP address is passed directly as a str.
         if let Ok(ip) = self.0.parse::<IpAddr>() {
-            return (ip, self.1).into();
+            return vec![(ip, self.1).into()];
         }
 
         match dns.mapping.get(self.0) {
-            Some(info) => (info.addrs[0], self.1).into(),
+            Some(info) => info
+                .addrs
+                .iter()
+                .map(|addr| SocketAddr::new(*addr, self.1))
+                .collect::<Vec<_>>(),
             None => panic!("no ip address found for a hostname: {}", self.0),
         }
     }
 }
 
 impl ToSocketAddrs for SocketAddr {
-    fn to_socket_addr(&self, _: &Dns) -> SocketAddr {
-        *self
+    fn to_socket_addrs(&self, _: &Dns) -> Vec<SocketAddr> {
+        vec![*self]
     }
 }
 
 impl ToSocketAddrs for SocketAddrV4 {
-    fn to_socket_addr(&self, _: &Dns) -> SocketAddr {
-        SocketAddr::V4(*self)
+    fn to_socket_addrs(&self, _: &Dns) -> Vec<SocketAddr> {
+        vec![SocketAddr::V4(*self)]
     }
 }
 
 impl ToSocketAddrs for SocketAddrV6 {
-    fn to_socket_addr(&self, _: &Dns) -> SocketAddr {
-        SocketAddr::V6(*self)
+    fn to_socket_addrs(&self, _: &Dns) -> Vec<SocketAddr> {
+        vec![SocketAddr::V6(*self)]
     }
 }
 
 impl ToSocketAddrs for (IpAddr, u16) {
-    fn to_socket_addr(&self, _: &Dns) -> SocketAddr {
-        (*self).into()
+    fn to_socket_addrs(&self, _: &Dns) -> Vec<SocketAddr> {
+        vec![(*self).into()]
     }
 }
 
 impl ToSocketAddrs for (Ipv4Addr, u16) {
-    fn to_socket_addr(&self, _: &Dns) -> SocketAddr {
-        (*self).into()
+    fn to_socket_addrs(&self, _: &Dns) -> Vec<SocketAddr> {
+        vec![(*self).into()]
     }
 }
 
 impl ToSocketAddrs for (Ipv6Addr, u16) {
-    fn to_socket_addr(&self, _: &Dns) -> SocketAddr {
-        (*self).into()
+    fn to_socket_addrs(&self, _: &Dns) -> Vec<SocketAddr> {
+        vec![(*self).into()]
     }
 }
 
 impl<T: ToSocketAddrs + ?Sized> ToSocketAddrs for &T {
-    fn to_socket_addr(&self, dns: &Dns) -> SocketAddr {
-        (**self).to_socket_addr(dns)
+    fn to_socket_addrs(&self, dns: &Dns) -> Vec<SocketAddr> {
+        (**self).to_socket_addrs(dns)
     }
 }
 
 impl ToSocketAddrs for str {
-    fn to_socket_addr(&self, dns: &Dns) -> SocketAddr {
+    fn to_socket_addrs(&self, dns: &Dns) -> Vec<SocketAddr> {
         let socketaddr: Result<SocketAddr, _> = self.parse();
 
         if let Ok(s) = socketaddr {
-            return s;
+            return vec![s];
         }
 
         // Borrowed from std
@@ -288,13 +299,13 @@ impl ToSocketAddrs for str {
         let (host, port_str) = try_opt!(self.rsplit_once(':'), "invalid socket address");
         let port: u16 = try_opt!(port_str.parse().ok(), "invalid port value");
 
-        (host, port).to_socket_addr(dns)
+        (host, port).to_socket_addrs(dns)
     }
 }
 
 impl ToSocketAddrs for String {
-    fn to_socket_addr(&self, dns: &Dns) -> SocketAddr {
-        self.as_str().to_socket_addr(dns)
+    fn to_socket_addrs(&self, dns: &Dns) -> Vec<SocketAddr> {
+        self.as_str().to_socket_addrs(dns)
     }
 }
 

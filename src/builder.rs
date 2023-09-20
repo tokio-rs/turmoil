@@ -55,6 +55,7 @@ impl Builder {
     }
 
     /// Which kind of network should be simulated.
+    #[deprecated = "Define specific subnets instead"]
     pub fn ip_version(&mut self, value: IpVersion) -> &mut Self {
         self.ip_version = value;
         self

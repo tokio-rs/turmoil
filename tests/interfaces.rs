@@ -4,8 +4,14 @@ use std::{
     time::Duration,
 };
 
-use tokio::time::sleep;
-use turmoil::{net::UdpSocket, *};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    time::sleep,
+};
+use turmoil::{
+    net::{TcpListener, TcpStream, UdpSocket},
+    *,
+};
 
 fn double_ipv4_subnets() -> IpSubnets {
     let mut subnets = IpSubnets::new();
@@ -21,7 +27,7 @@ fn double_ipv4_subnets() -> IpSubnets {
 }
 
 #[test]
-fn ipv4_exclusive_conn_from_unspecifed() -> Result {
+fn udp_ipv4_exclusive_conn_from_unspecifed() -> Result {
     let mut sim = Builder::new().build();
     sim.node("alice").build_client(async {
         let fail = UdpSocket::bind(":::0").await?;
@@ -52,7 +58,7 @@ fn ipv4_exclusive_conn_from_unspecifed() -> Result {
 }
 
 #[test]
-fn ipv6_exclusive_conn_from_unspecified() -> Result {
+fn udp_ipv6_exclusive_conn_from_unspecified() -> Result {
     let mut sim = Builder::new().build();
     sim.node("alice").build_client(async {
         let fail = UdpSocket::bind("0.0.0.0:0").await?;
@@ -80,34 +86,35 @@ fn ipv6_exclusive_conn_from_unspecified() -> Result {
 }
 
 #[test]
-fn interface_exclusivity() -> Result {
+fn udp_interface_exclusivity() -> Result {
     let mut sim = Builder::new().ip_subnets(double_ipv4_subnets()).build();
-    sim.node("alice").build_client(async {
-        let fail = UdpSocket::bind("10.1.0.1:0").await?;
-        let err = fail
-            .send_to(b"Never", "192.168.0.2:2000")
-            .await
-            .unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::ConnectionRefused);
-
-        let succ = UdpSocket::bind("192.168.0.1:0").await?;
-        succ.send_to(b"Hello", "192.168.0.2:2000").await?;
-
-        Ok(())
-    });
-
     sim.node("bob").build_client(async {
-        let sock = UdpSocket::bind("192.168.0.2:2000").await?;
+        let sock = UdpSocket::bind("192.168.0.1:2000").await?;
         let mut buf = [0; 128];
         let (n, _) = sock.recv_from(&mut buf).await?;
         assert_eq!(&buf[..n], b"Hello");
         Ok(())
     });
+
+    sim.node("alice").build_client(async {
+        let fail = UdpSocket::bind("10.1.0.2:0").await?;
+        let err = fail
+            .send_to(b"Never", "192.168.0.1:2000")
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::ConnectionRefused);
+
+        let succ = UdpSocket::bind("192.168.0.2:0").await?;
+        succ.send_to(b"Hello", "192.168.0.1:2000").await?;
+
+        Ok(())
+    });
+
     sim.run()
 }
 
 #[test]
-fn multi_interface_rx() -> Result {
+fn udp_multi_interface_rx() -> Result {
     let mut sim = Builder::new().ip_subnets(double_ipv4_subnets()).build();
     sim.node("rx").build_client(async move {
         let sock = UdpSocket::bind("0.0.0.0:2000").await?;
@@ -145,7 +152,7 @@ fn multi_interface_rx() -> Result {
 }
 
 #[test]
-fn multi_interface_tx() -> Result {
+fn udp_multi_interface_tx() -> Result {
     let mut sim = Builder::new().ip_subnets(double_ipv4_subnets()).build();
     sim.node("tx").build_client(async move {
         let sock = UdpSocket::bind("0.0.0.0:0").await?;
@@ -171,7 +178,7 @@ async fn rx_once(bind: &str, expect: &str) -> Result<()> {
 
 #[test]
 #[should_panic]
-fn ip_version_not_supported() {
+fn udp_ip_version_not_supported() {
     let mut subnets = IpSubnets::new();
     subnets.add(IpSubnet::V4(Ipv4Subnet::new(Ipv4Addr::new(1, 2, 3, 0), 24)));
     let mut sim = Builder::new().ip_subnets(subnets).build();
@@ -181,4 +188,48 @@ fn ip_version_not_supported() {
         Ok(())
     });
     sim.run().unwrap();
+}
+
+#[test]
+fn tcp_connectivity() -> Result {
+    let mut sim = Builder::new().build();
+    sim.node("alice").build_client(async {
+        let lis = TcpListener::bind("0.0.0.0:80").await?;
+        let (mut stream, _) = lis.accept().await?;
+        let mut s = String::new();
+        stream.read_to_string(&mut s).await?;
+        assert_eq!(s, "Hello world!");
+
+        Ok(())
+    });
+    sim.node("bob").build_client(async {
+        let mut stream = TcpStream::connect("192.168.0.1:80").await?;
+        stream.write_all(b"Hello world!").await?;
+        Ok(())
+    });
+
+    sim.run()
+}
+
+#[test]
+fn tcp_interface_exclusivity() -> Result {
+    let mut sim = Builder::new().build();
+    sim.node("alice").build_client(async {
+        let lis = TcpListener::bind(":::80").await?;
+        let (mut stream, _) = lis.accept().await?;
+        let mut s = [0; 128];
+        let n = stream.read(&mut s).await?;
+        assert_eq!(&s[..n], b"Hello world!");
+
+        Ok(())
+    });
+    sim.node("bob").build_client(async {
+        let mut stream = TcpStream::connect("fe80::1:80").await?;
+        assert!(stream.local_addr()?.is_ipv6());
+        stream.write_all(b"Hello world!").await?;
+
+        Ok(())
+    });
+
+    sim.run()
 }

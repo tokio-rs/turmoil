@@ -424,7 +424,7 @@ pub(crate) fn longest_prefix_match(addrs: &[IpAddr], other: IpAddr) -> IpAddr {
 
 #[cfg(test)]
 mod tests {
-    use crate::{lookup, Builder, IpSubnet, IpSubnets, IpVersion, Ipv4Subnet, Ipv6Subnet, Result};
+    use crate::{lookup, Builder, IpSubnet, IpSubnets, Ipv4Subnet, Ipv6Subnet, Result};
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     #[test]
@@ -523,7 +523,9 @@ mod tests {
 
     #[test]
     fn ip_version_v6() -> Result {
-        let mut sim = Builder::new().ip_version(IpVersion::V6).build();
+        let mut sim = Builder::new()
+            .ip_subnets(IpSubnets::from_iter([IpSubnet::V6(Ipv6Subnet::default())]))
+            .build();
         sim.client("client", async move {
             assert_eq!(
                 lookup("client"),

@@ -39,19 +39,29 @@ impl TcpListener {
             let mut addr = addr.to_socket_addr(&world.dns);
             let host = world.current_host_mut();
 
-            if !addr.ip().is_unspecified() && !addr.ip().is_loopback() {
-                return Err(Error::new(
-                    ErrorKind::AddrNotAvailable,
-                    format!("{addr} is not supported"),
-                ));
-            }
-
-            if addr.is_ipv4() != host.addr.is_ipv4() {
-                panic!("ip version mismatch: {:?} host: {:?}", addr, host.addr)
-            }
-
+            // Ports are independent of bind type.
             if addr.port() == 0 {
                 addr.set_port(host.assign_ephemeral_port());
+            }
+
+            if addr.ip().is_unspecified() || addr.ip().is_loopback() {
+                // Check whether the ip version is even supported
+                assert!(
+                    host.addrs
+                        .iter()
+                        .any(|bind| bind.is_ipv4() == addr.is_ipv4()),
+                    "cannot bind socket, ip version is not supported in this simulation"
+                );
+
+                return host.tcp.bind(addr);
+            }
+
+            // Bind to specific addres, check whether current host supports thus bind
+            if !host.addrs.contains(&addr.ip()) {
+                return Err(Error::new(
+                    ErrorKind::AddrNotAvailable,
+                    "can't assign requested address",
+                ));
             }
 
             host.tcp.bind(addr)
@@ -81,11 +91,8 @@ impl TcpListener {
                 }
 
                 let mut my_addr = self.local_addr;
-                if origin.ip().is_loopback() {
-                    my_addr.set_ip(origin.ip());
-                }
                 if my_addr.ip().is_unspecified() {
-                    my_addr.set_ip(host.addr);
+                    my_addr.set_ip(host.sender_for_dst(origin));
                 }
 
                 let pair = SocketPair::new(my_addr, origin);

@@ -20,9 +20,6 @@ use tokio::time::{Duration, Instant};
 ///
 /// Both modes may be used simultaneously.
 pub(crate) struct Host {
-    /// Host ip address.
-    pub(crate) addr: IpAddr,
-
     #[allow(unused)]
     pub(crate) addrs: Vec<IpAddr>,
 
@@ -46,7 +43,6 @@ pub(crate) struct Host {
 impl Host {
     pub(crate) fn new(addrs: Vec<IpAddr>, tcp_capacity: usize, udp_capacity: usize) -> Host {
         Host {
-            addr: addrs[0],
             addrs,
             udp: Udp::new(udp_capacity),
             tcp: Tcp::new(tcp_capacity),
@@ -96,7 +92,11 @@ impl Host {
 
     pub(crate) fn sender_for_dst(&self, dst: SocketAddr) -> IpAddr {
         // make a longest prefix match on all bound addrs
-        longest_prefix_match(&self.addrs, dst.ip())
+        if dst.ip().is_loopback() {
+            dst.ip()
+        } else {
+            longest_prefix_match(&self.addrs, dst.ip())
+        }
     }
 
     /// Receive the `envelope` from the network.
@@ -283,6 +283,7 @@ impl StreamSocket {
     // Buffer and re-order received segments by `seq` as the network may deliver
     // them out of order.
     fn buffer(&mut self, seq: u64, segment: SequencedSegment) -> Result<(), Protocol> {
+        println!("tcp buffer");
         use mpsc::error::TrySendError::*;
 
         let exists = self.buf.insert(seq, segment);
@@ -364,6 +365,7 @@ impl Tcp {
         dst: SocketAddr,
         segment: Segment,
     ) -> Result<(), Protocol> {
+        println!("recv from [{src}] :: {segment:?}");
         match segment {
             Segment::Syn(syn) => {
                 // If bound, queue the syn; else we drop the syn triggering
@@ -379,11 +381,11 @@ impl Tcp {
                     }
                 }
             }
-            Segment::Data(seq, data) => match self.sockets.get_mut(&SocketPair::new(dst, src)) {
+            Segment::Data(seq, data) => match self.get_socket_mut(src, dst) {
                 Some(sock) => sock.buffer(seq, SequencedSegment::Data(data))?,
                 None => return Err(Protocol::Tcp(Segment::Rst)),
             },
-            Segment::Fin(seq) => match self.sockets.get_mut(&SocketPair::new(dst, src)) {
+            Segment::Fin(seq) => match self.get_socket_mut(src, dst) {
                 Some(sock) => sock.buffer(seq, SequencedSegment::Fin)?,
                 None => return Err(Protocol::Tcp(Segment::Rst)),
             },
@@ -395,6 +397,14 @@ impl Tcp {
         };
 
         Ok(())
+    }
+
+    fn get_socket_mut(
+        &mut self,
+        origin: SocketAddr,
+        local: SocketAddr,
+    ) -> Option<&mut StreamSocket> {
+        self.sockets.get_mut(&SocketPair::new(local, origin))
     }
 
     pub(crate) fn close_stream_half(&mut self, pair: SocketPair) {
@@ -436,8 +446,8 @@ mod test {
     fn recycle_ports() -> Result {
         let mut host = Host::new(vec![Ipv4Addr::UNSPECIFIED.into()], 1, 1);
 
-        host.udp.bind((host.addr, 65534).into())?;
-        host.udp.bind((host.addr, 65535).into())?;
+        host.udp.bind((host.addrs[0], 65534).into())?;
+        host.udp.bind((host.addrs[0], 65535).into())?;
 
         for _ in 49152..65534 {
             host.assign_ephemeral_port();
