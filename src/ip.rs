@@ -13,15 +13,6 @@ pub struct IpSubnets {
 }
 
 impl IpSubnets {
-    pub(crate) fn default_reverse() -> IpSubnets {
-        IpSubnets {
-            subnets: vec![
-                IpSubnet::V6(Ipv6Subnet::default()),
-                IpSubnet::V4(Ipv4Subnet::default()),
-            ],
-        }
-    }
-
     pub fn new() -> Self {
         IpSubnets {
             subnets: Vec::new(),
@@ -381,16 +372,6 @@ fn prefixlen_to_mask_v6(prefixlen: usize) -> Ipv6Addr {
 
 fn mask_to_prefixlen_v6(mask: Ipv6Addr) -> usize {
     u128::from(mask).leading_ones() as usize
-}
-
-/// The kinds of networks that can be simulated in turmoil
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub enum IpVersion {
-    /// An Ipv4 network with an address space of 192.168.0.0/16
-    #[default]
-    V4,
-    /// An local area Ipv6 network with an address space of fe80::/64
-    V6,
 }
 
 pub(crate) fn longest_prefix_match(addrs: &[IpAddr], other: IpAddr) -> IpAddr {

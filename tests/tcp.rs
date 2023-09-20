@@ -15,7 +15,7 @@ use tokio::{
 use turmoil::{
     lookup,
     net::{TcpListener, TcpStream},
-    Builder, IpVersion, Result,
+    Builder, IpSubnet, IpSubnets, Ipv4Subnet, Ipv6Subnet, Result,
 };
 
 const PORT: u16 = 1738;
@@ -688,7 +688,9 @@ fn split() -> Result {
 
 #[test]
 fn bind_ipv4_socket() -> Result {
-    let mut sim = Builder::new().ip_version(IpVersion::V4).build();
+    let mut sim = Builder::new()
+        .ip_subnets(IpSubnets::from_iter([IpSubnet::V4(Ipv4Subnet::default())]))
+        .build();
     sim.client("client", async move {
         let sock = bind_to_v4(0).await?;
         assert!(sock.local_addr().unwrap().is_ipv4());
@@ -699,7 +701,9 @@ fn bind_ipv4_socket() -> Result {
 
 #[test]
 fn bind_ipv6_socket() -> Result {
-    let mut sim = Builder::new().ip_version(IpVersion::V6).build();
+    let mut sim = Builder::new()
+        .ip_subnets(IpSubnets::from_iter([IpSubnet::V6(Ipv6Subnet::default())]))
+        .build();
     sim.client("client", async move {
         let sock = bind_to_v6(0).await?;
         assert!(sock.local_addr().unwrap().is_ipv6());
@@ -711,7 +715,9 @@ fn bind_ipv6_socket() -> Result {
 #[test]
 #[should_panic]
 fn bind_ipv4_version_missmatch() {
-    let mut sim = Builder::new().ip_version(IpVersion::V6).build();
+    let mut sim = Builder::new()
+        .ip_subnets(IpSubnets::from_iter([IpSubnet::V6(Ipv6Subnet::default())]))
+        .build();
     sim.client("client", async move {
         let _sock = bind_to_v4(0).await?;
         Ok(())
@@ -722,7 +728,9 @@ fn bind_ipv4_version_missmatch() {
 #[test]
 #[should_panic]
 fn bind_ipv6_version_missmatch() {
-    let mut sim = Builder::new().ip_version(IpVersion::V4).build();
+    let mut sim = Builder::new()
+        .ip_subnets(IpSubnets::from_iter([IpSubnet::V4(Ipv4Subnet::default())]))
+        .build();
     sim.client("client", async move {
         let _sock = bind_to_v6(0).await?;
         Ok(())
@@ -732,7 +740,9 @@ fn bind_ipv6_version_missmatch() {
 
 #[test]
 fn ipv6_connectivity() -> Result {
-    let mut sim = Builder::new().ip_version(IpVersion::V6).build();
+    let mut sim = Builder::new()
+        .ip_subnets(IpSubnets::from_iter([IpSubnet::V6(Ipv6Subnet::default())]))
+        .build();
     sim.client("server", async move {
         let list = TcpListener::bind(("::", 80)).await.unwrap();
         let _stream = list.accept().await.unwrap();
@@ -771,12 +781,10 @@ fn bind_addr_in_use() -> Result {
     sim.run()
 }
 
-fn run_localhost_test(
-    ip_version: IpVersion,
-    bind_addr: SocketAddr,
-    connect_addr: SocketAddr,
-) -> Result {
-    let mut sim = Builder::new().ip_version(ip_version).build();
+fn run_localhost_test(subnet: IpSubnet, bind_addr: SocketAddr, connect_addr: SocketAddr) -> Result {
+    let mut sim = Builder::new()
+        .ip_subnets(IpSubnets::from_iter([subnet]))
+        .build();
     let expected = [0, 1, 7, 3, 8];
     sim.client("client", async move {
         let listener = TcpListener::bind(bind_addr).await?;
@@ -807,28 +815,28 @@ fn run_localhost_test(
 fn loopback_to_wildcard_v4() -> Result {
     let bind_addr = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 1234);
     let connect_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 1234));
-    run_localhost_test(IpVersion::V4, bind_addr, connect_addr)
+    run_localhost_test(IpSubnet::V4(Ipv4Subnet::default()), bind_addr, connect_addr)
 }
 
 #[test]
 fn loopback_to_localhost_v4() -> Result {
     let bind_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1234);
     let connect_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 1234));
-    run_localhost_test(IpVersion::V4, bind_addr, connect_addr)
+    run_localhost_test(IpSubnet::V4(Ipv4Subnet::default()), bind_addr, connect_addr)
 }
 
 #[test]
 fn loopback_to_wildcard_v6() -> Result {
     let bind_addr = SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), 1234);
     let connect_addr = SocketAddr::from((Ipv6Addr::LOCALHOST, 1234));
-    run_localhost_test(IpVersion::V6, bind_addr, connect_addr)
+    run_localhost_test(IpSubnet::V6(Ipv6Subnet::default()), bind_addr, connect_addr)
 }
 
 #[test]
 fn loopback_to_localhost_v6() -> Result {
     let bind_addr = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 1234);
     let connect_addr = SocketAddr::from((Ipv6Addr::LOCALHOST, 1234));
-    run_localhost_test(IpVersion::V6, bind_addr, connect_addr)
+    run_localhost_test(IpSubnet::V6(Ipv6Subnet::default()), bind_addr, connect_addr)
 }
 
 #[test]

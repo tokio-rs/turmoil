@@ -105,7 +105,6 @@ pub use host::elapsed;
 use host::Host;
 
 mod ip;
-pub use ip::IpVersion;
 pub use ip::{IpSubnet, IpSubnetParsingError, IpSubnets, Ipv4Subnet, Ipv6Subnet};
 
 pub mod net;
