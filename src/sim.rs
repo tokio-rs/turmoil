@@ -152,7 +152,7 @@ impl<'a> Sim<'a> {
 
     /// Run `f` with the resolved hosts at `addrs` set on the world.
     fn run_with_hosts(&mut self, query: impl ToIpAddrs, mut f: impl FnMut(NodeIdentifer, &mut Rt)) {
-        let hosts = self.lookup_id(query);
+        let hosts = self.lookup_ids(query);
         for id in hosts {
             let rt = self.rts.get_mut(&id).expect("missing host");
 
@@ -166,7 +166,7 @@ impl<'a> Sim<'a> {
 
     /// Check whether a host has software running.
     pub fn is_host_running(&mut self, addr: impl ToIpAddrs) -> bool {
-        let hosts = self.world.borrow_mut().lookup_id(addr);
+        let hosts = self.world.borrow_mut().lookup_ids(addr);
         let Some(host) = hosts.first() else {
             return false;
         };
@@ -181,35 +181,35 @@ impl<'a> Sim<'a> {
         self.world.borrow_mut().lookup(addr)
     }
 
-    pub(crate) fn lookup_id(&self, query: impl ToIpAddrs) -> Vec<NodeIdentifer> {
-        self.world.borrow_mut().lookup_id(query)
+    pub(crate) fn lookup_ids(&self, query: impl ToIpAddrs) -> Vec<NodeIdentifer> {
+        self.world.borrow_mut().lookup_ids(query)
     }
 
     /// Hold messages between two hosts, or sets of hosts, until [`release`] is
     /// called.
     pub fn hold(&self, a: impl ToIpAddrs, b: impl ToIpAddrs) {
         let mut world = self.world.borrow_mut();
-        world.hold_many(a, b);
+        world.hold(a, b);
     }
 
     /// Repair the connection between two hosts, or sets of hosts, resulting in
     /// messages to be delivered.
     pub fn repair(&self, a: impl ToIpAddrs, b: impl ToIpAddrs) {
         let mut world = self.world.borrow_mut();
-        world.repair_many(a, b);
+        world.repair(a, b);
     }
 
     /// The opposite of [`hold`]. All held messages are immediately delivered.
     pub fn release(&self, a: impl ToIpAddrs, b: impl ToIpAddrs) {
         let mut world = self.world.borrow_mut();
-        world.release_many(a, b);
+        world.release(a, b);
     }
 
     /// Partition two hosts, or sets of hosts, resulting in all messages sent
     /// between them to be dropped.
     pub fn partition(&self, a: impl ToIpAddrs, b: impl ToIpAddrs) {
         let mut world = self.world.borrow_mut();
-        world.partition_many(a, b);
+        world.partition(a, b);
     }
 
     /// Resolve host names for an [`IpAddr`] pair.

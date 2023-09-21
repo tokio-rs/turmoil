@@ -85,7 +85,7 @@ impl Dns {
         addr.to_ip_addrs(self)
     }
 
-    pub(crate) fn lookup_id(&mut self, query: impl ToIpAddrs) -> Vec<NodeIdentifer> {
+    pub(crate) fn lookup_ids(&mut self, query: impl ToIpAddrs) -> Vec<NodeIdentifer> {
         query.to_node_ids(self)
     }
 

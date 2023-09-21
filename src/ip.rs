@@ -29,10 +29,7 @@ impl IpSubnets {
     /// exiting subnet in the collection.
     pub fn add(&mut self, subnet: IpSubnet) {
         assert!(
-            !self
-                .subnets
-                .iter()
-                .any(|net| net.intersects(subnet.clone())),
+            !self.subnets.iter().any(|net| net.intersects(subnet)),
             "Cannot add intersecting IP subnet"
         );
         self.subnets.push(subnet);

@@ -283,7 +283,6 @@ impl StreamSocket {
     // Buffer and re-order received segments by `seq` as the network may deliver
     // them out of order.
     fn buffer(&mut self, seq: u64, segment: SequencedSegment) -> Result<(), Protocol> {
-        println!("tcp buffer");
         use mpsc::error::TrySendError::*;
 
         let exists = self.buf.insert(seq, segment);
@@ -365,7 +364,6 @@ impl Tcp {
         dst: SocketAddr,
         segment: Segment,
     ) -> Result<(), Protocol> {
-        println!("recv from [{src}] :: {segment:?}");
         match segment {
             Segment::Syn(syn) => {
                 // If bound, queue the syn; else we drop the syn triggering

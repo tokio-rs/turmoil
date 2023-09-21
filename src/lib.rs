@@ -156,14 +156,14 @@ pub fn lookup(addr: impl ToIpAddrs) -> Vec<IpAddr> {
 ///
 /// Must be called from within a Turmoil simulation.
 pub fn hold(a: impl ToIpAddrs, b: impl ToIpAddrs) {
-    World::current(|world| world.hold_many(a, b))
+    World::current(|world| world.hold(a, b))
 }
 
 /// The opposite of [`hold`]. All held messages are immediately delivered.
 ///
 /// Must be called from within a Turmoil simulation.
 pub fn release(a: impl ToIpAddrs, b: impl ToIpAddrs) {
-    World::current(|world| world.release_many(a, b))
+    World::current(|world| world.release(a, b))
 }
 
 /// Partition two hosts, or sets of hosts, resulting in all messages sent
@@ -171,7 +171,7 @@ pub fn release(a: impl ToIpAddrs, b: impl ToIpAddrs) {
 ///
 /// Must be called from within a Turmoil simulation.
 pub fn partition(a: impl ToIpAddrs, b: impl ToIpAddrs) {
-    World::current(|world| world.partition_many(a, b))
+    World::current(|world| world.partition(a, b))
 }
 
 /// Repair the connection between two hosts, or sets of hosts, resulting in
@@ -179,5 +179,5 @@ pub fn partition(a: impl ToIpAddrs, b: impl ToIpAddrs) {
 ///
 /// Must be called from within a Turmoil simulation.
 pub fn repair(a: impl ToIpAddrs, b: impl ToIpAddrs) {
-    World::current(|world| world.repair_many(a, b))
+    World::current(|world| world.repair(a, b))
 }

@@ -76,11 +76,11 @@ impl World {
         self.dns.lookup(host)
     }
 
-    pub(crate) fn lookup_id(&mut self, query: impl ToIpAddrs) -> Vec<NodeIdentifer> {
-        self.dns.lookup_id(query)
+    pub(crate) fn lookup_ids(&mut self, query: impl ToIpAddrs) -> Vec<NodeIdentifer> {
+        self.dns.lookup_ids(query)
     }
 
-    pub(crate) fn hold_many(&mut self, a: impl ToIpAddrs, b: impl ToIpAddrs) {
+    pub(crate) fn hold(&mut self, a: impl ToIpAddrs, b: impl ToIpAddrs) {
         let a = self.lookup(a);
         let b = self.lookup(b);
 
@@ -89,7 +89,7 @@ impl World {
         });
     }
 
-    pub(crate) fn release_many(&mut self, a: impl ToIpAddrs, b: impl ToIpAddrs) {
+    pub(crate) fn release(&mut self, a: impl ToIpAddrs, b: impl ToIpAddrs) {
         let a = self.lookup(a);
         let b = self.lookup(b);
 
@@ -98,7 +98,7 @@ impl World {
         });
     }
 
-    pub(crate) fn partition_many(&mut self, a: impl ToIpAddrs, b: impl ToIpAddrs) {
+    pub(crate) fn partition(&mut self, a: impl ToIpAddrs, b: impl ToIpAddrs) {
         let a = self.lookup(a);
         let b = self.lookup(b);
 
@@ -107,7 +107,7 @@ impl World {
         });
     }
 
-    pub(crate) fn repair_many(&mut self, a: impl ToIpAddrs, b: impl ToIpAddrs) {
+    pub(crate) fn repair(&mut self, a: impl ToIpAddrs, b: impl ToIpAddrs) {
         let a = self.lookup(a);
         let b = self.lookup(b);
 
