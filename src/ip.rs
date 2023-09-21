@@ -7,18 +7,26 @@ use std::{
     str::FromStr,
 };
 
+/// A collection of all subnets that will be simulated.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IpSubnets {
     subnets: Vec<IpSubnet>,
 }
 
 impl IpSubnets {
+    /// Creates a new instance of `Self`, containing no predefined subnets.
     pub fn new() -> Self {
         IpSubnets {
             subnets: Vec::new(),
         }
     }
 
+    /// Adds a new subnet to the collection.
+    ///
+    /// # Panics
+    ///
+    /// This function panics should the subnet intersect any
+    /// exiting subnet in the collection.
     pub fn add(&mut self, subnet: IpSubnet) {
         assert!(
             !self
@@ -63,20 +71,24 @@ impl Default for IpSubnets {
     }
 }
 
+/// A subnet of an IP network.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IpSubnet {
+    /// A subnet using Ipv4 addressing.
     V4(Ipv4Subnet),
+    /// A subnet using Ipv6 addressing.
     V6(Ipv6Subnet),
 }
 
 impl IpSubnet {
-    pub fn addr_from_entropy(&self, entropy: u128) -> IpAddr {
+    pub(crate) fn addr_from_entropy(&self, entropy: u128) -> IpAddr {
         match self {
             IpSubnet::V4(v4) => v4.addr_from_entropy(entropy),
             IpSubnet::V6(v6) => v6.addr_from_entropy(entropy),
         }
     }
 
+    /// The network prefix of the subnet.
     pub fn prefix(&self) -> IpAddr {
         match self {
             IpSubnet::V4(v4) => v4.prefix().into(),
@@ -84,6 +96,7 @@ impl IpSubnet {
         }
     }
 
+    /// The length of the network prefix of the subnet.
     pub fn prefixlen(&self) -> usize {
         match self {
             IpSubnet::V4(v4) => v4.prefixlen(),
@@ -91,6 +104,7 @@ impl IpSubnet {
         }
     }
 
+    /// Checks whether an address is contained within this subnet.
     pub fn contains(&self, addr: IpAddr) -> bool {
         match (self, addr) {
             (IpSubnet::V4(v4), IpAddr::V4(addr)) => v4.contains(addr),
@@ -99,6 +113,7 @@ impl IpSubnet {
         }
     }
 
+    /// Checks whether the subnets intersect.
     pub fn intersects(&self, subnet: IpSubnet) -> bool {
         match (self, subnet) {
             (IpSubnet::V4(v4), IpSubnet::V4(subnet)) => v4.intersects(subnet),
