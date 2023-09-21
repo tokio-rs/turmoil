@@ -168,7 +168,17 @@ impl ToIpAddrs for Regex {
         let hosts = dns.mapping.keys().cloned().collect::<Vec<_>>();
         hosts
             .into_iter()
-            .filter_map(|h| self.is_match(&h).then(|| h.to_ip_addr(dns)))
+            .filter_map(|h| self.is_match(&h).then(|| h.to_ip_addrs(dns)))
+            .flatten()
+            .collect::<Vec<_>>()
+    }
+
+    fn to_node_ids(&self, dns: &Dns) -> Vec<NodeIdentifer> {
+        #[allow(clippy::needless_collect)]
+        let hosts = dns.mapping.keys().cloned().collect::<Vec<_>>();
+        hosts
+            .into_iter()
+            .filter_map(|h| self.is_match(&h).then(|| h.to_node_ids(dns)))
             .flatten()
             .collect::<Vec<_>>()
     }
