@@ -2,7 +2,7 @@ use crate::config::Config;
 use crate::envelope::Protocol;
 use crate::ip::IpSubnets;
 use crate::node::NodeIdentifer;
-use crate::{config, for_pairs, Dns, Host, ToIpAddr, ToIpAddrs, Topology, TRACING_TARGET};
+use crate::{config, for_connected_pairs, Dns, Host, ToIpAddrs, Topology, TRACING_TARGET};
 
 use indexmap::IndexMap;
 use rand::RngCore;
@@ -72,63 +72,47 @@ impl World {
         self.hosts.get_mut(id).expect("host missing")
     }
 
-    pub(crate) fn lookup(&mut self, host: impl ToIpAddr) -> IpAddr {
+    pub(crate) fn lookup(&mut self, host: impl ToIpAddrs) -> Vec<IpAddr> {
         self.dns.lookup(host)
     }
 
-    pub(crate) fn lookup_many(&mut self, hosts: impl ToIpAddrs) -> Vec<IpAddr> {
-        self.dns.lookup_many(hosts)
-    }
-
-    pub(crate) fn hold(&mut self, a: IpAddr, b: IpAddr) {
-        self.topology.hold(a, b);
+    pub(crate) fn lookup_id(&mut self, query: impl ToIpAddrs) -> Vec<NodeIdentifer> {
+        self.dns.lookup_id(query)
     }
 
     pub(crate) fn hold_many(&mut self, a: impl ToIpAddrs, b: impl ToIpAddrs) {
-        let a = self.lookup_many(a);
-        let b = self.lookup_many(b);
+        let a = self.lookup(a);
+        let b = self.lookup(b);
 
-        for_pairs(&a, &b, |a, b| {
-            self.hold(a, b);
+        for_connected_pairs(&a, &b, &self.dns.subnets, |a, b| {
+            self.topology.hold(a, b);
         });
-    }
-
-    pub(crate) fn release(&mut self, a: IpAddr, b: IpAddr) {
-        self.topology.release(a, b);
     }
 
     pub(crate) fn release_many(&mut self, a: impl ToIpAddrs, b: impl ToIpAddrs) {
-        let a = self.lookup_many(a);
-        let b = self.lookup_many(b);
+        let a = self.lookup(a);
+        let b = self.lookup(b);
 
-        for_pairs(&a, &b, |a, b| {
-            self.release(a, b);
+        for_connected_pairs(&a, &b, &self.dns.subnets, |a, b| {
+            self.topology.release(a, b);
         });
-    }
-
-    pub(crate) fn partition(&mut self, a: IpAddr, b: IpAddr) {
-        self.topology.partition(a, b);
     }
 
     pub(crate) fn partition_many(&mut self, a: impl ToIpAddrs, b: impl ToIpAddrs) {
-        let a = self.lookup_many(a);
-        let b = self.lookup_many(b);
+        let a = self.lookup(a);
+        let b = self.lookup(b);
 
-        for_pairs(&a, &b, |a, b| {
-            self.partition(a, b);
+        for_connected_pairs(&a, &b, &self.dns.subnets, |a, b| {
+            self.topology.partition(a, b);
         });
     }
 
-    pub(crate) fn repair(&mut self, a: IpAddr, b: IpAddr) {
-        self.topology.repair(a, b);
-    }
-
     pub(crate) fn repair_many(&mut self, a: impl ToIpAddrs, b: impl ToIpAddrs) {
-        let a = self.lookup_many(a);
-        let b = self.lookup_many(b);
+        let a = self.lookup(a);
+        let b = self.lookup(b);
 
-        for_pairs(&a, &b, |a, b| {
-            self.repair(a, b);
+        for_connected_pairs(&a, &b, &self.dns.subnets, |a, b| {
+            self.topology.repair(a, b);
         });
     }
 

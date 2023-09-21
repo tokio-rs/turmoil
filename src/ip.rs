@@ -37,6 +37,12 @@ impl IpSubnets {
         );
         self.subnets.push(subnet);
     }
+
+    pub(crate) fn shared_subnet(&self, a: IpAddr, b: IpAddr) -> Option<&IpSubnet> {
+        self.subnets
+            .iter()
+            .find(|subnet| subnet.contains_both(a, b))
+    }
 }
 
 impl Deref for IpSubnets {
@@ -111,6 +117,14 @@ impl IpSubnet {
             (IpSubnet::V6(v6), IpAddr::V6(addr)) => v6.contains(addr),
             _ => false,
         }
+    }
+
+    pub(crate) fn contains_both(&self, a: IpAddr, b: IpAddr) -> bool {
+        if a.is_ipv4() != b.is_ipv4() {
+            return false;
+        }
+        // TODO: this operation can be done better
+        self.contains(a) && self.contains(b)
     }
 
     /// Checks whether the subnets intersect.
@@ -497,20 +511,28 @@ mod tests {
 
     #[test]
     fn ip_version_v4() -> Result {
-        let mut sim = Builder::new().build();
+        let mut sim = Builder::new()
+            .ip_subnets(IpSubnets::from_iter([IpSubnet::V4(Ipv4Subnet::default())]))
+            .build();
         sim.client("client", async move {
-            assert_eq!(lookup("client"), IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1)));
-            assert_eq!(lookup("server"), IpAddr::V4(Ipv4Addr::new(192, 168, 0, 2)));
+            assert_eq!(
+                lookup("client")[0],
+                IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1))
+            );
+            assert_eq!(
+                lookup("server")[0],
+                IpAddr::V4(Ipv4Addr::new(192, 168, 0, 2))
+            );
             Ok(())
         });
         sim.client("server", async move { Ok(()) });
 
         assert_eq!(
-            sim.lookup("client"),
+            sim.lookup("client")[0],
             IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1))
         );
         assert_eq!(
-            sim.lookup("server"),
+            sim.lookup("server")[0],
             IpAddr::V4(Ipv4Addr::new(192, 168, 0, 2))
         );
 
@@ -524,11 +546,11 @@ mod tests {
             .build();
         sim.client("client", async move {
             assert_eq!(
-                lookup("client"),
+                lookup("client")[0],
                 IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1))
             );
             assert_eq!(
-                lookup("server"),
+                lookup("server")[0],
                 IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 2))
             );
             Ok(())
@@ -536,11 +558,11 @@ mod tests {
         sim.client("server", async move { Ok(()) });
 
         assert_eq!(
-            sim.lookup("client"),
+            sim.lookup("client")[0],
             IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1))
         );
         assert_eq!(
-            sim.lookup("server"),
+            sim.lookup("server")[0],
             IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 2))
         );
 

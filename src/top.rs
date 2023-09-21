@@ -206,12 +206,6 @@ impl Topology {
         }
     }
 
-    // /// Register a link between two hosts
-    // pub(crate) fn register_link(&mut self, a: IpAddr, b: IpAddr) {
-    //     let pair = Pair::new(a, b);
-    //     assert!(self.links.insert(pair, Link::new(self.rt.now())).is_none());
-    // }
-
     pub(crate) fn set_max_message_latency(&mut self, value: Duration) {
         self.config.latency_mut().max_message_latency = value;
     }

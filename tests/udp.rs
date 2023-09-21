@@ -33,13 +33,13 @@ async fn bind_to_v6(port: u16) -> std::result::Result<net::UdpSocket, std::io::E
 }
 
 async fn send_ping(sock: &net::UdpSocket) -> Result<()> {
-    sock.send_to(b"ping", (lookup("server"), 1738)).await?;
+    sock.send_to(b"ping", (lookup("server")[0], 1738)).await?;
 
     Ok(())
 }
 
 fn try_send_ping(sock: &net::UdpSocket) -> Result<()> {
-    sock.try_send_to(b"ping", (lookup("server"), 1738))?;
+    sock.try_send_to(b"ping", (lookup("server")[0], 1738))?;
 
     Ok(())
 }
@@ -179,7 +179,7 @@ fn recv_buf_is_clipped() -> Result {
     sim.client("client", async move {
         let sock = bind().await?;
 
-        let server_addr = lookup("server");
+        let server_addr = lookup("server")[0];
         sock.send_to(b"hello, world", (server_addr, PORT)).await?;
 
         Ok(())
@@ -338,7 +338,7 @@ fn bulk_transfer() -> Result {
     sim.client("client", async move {
         let sock = bind_to_v4(456).await?;
 
-        let server = (lookup("server"), 123);
+        let server = (lookup("server")[0], 123);
 
         for _ in 0..send_rounds {
             for _ in 0..send_batch_size {
@@ -607,7 +607,7 @@ fn socket_capacity() -> Result {
 fn socket_to_nonexistent_node() -> Result {
     let mut sim = Builder::new().build();
     sim.client("client", async move {
-        assert_eq!(lookup("client"), Ipv4Addr::new(192, 168, 0, 1));
+        assert_eq!(lookup("client")[0], Ipv4Addr::new(192, 168, 0, 1));
         let sock = UdpSocket::bind("0.0.0.0:0").await?;
         let send = sock.send_to(b"Hello world!", "192.168.0.2:80").await;
         assert!(

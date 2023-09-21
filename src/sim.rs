@@ -1,5 +1,5 @@
 use crate::node::NodeIdentifer;
-use crate::{for_pairs, Config, LinksIter, Result, Rt, ToIpAddr, ToIpAddrs, World, TRACING_TARGET};
+use crate::{for_connected_pairs, Config, LinksIter, Result, Rt, ToIpAddrs, World, TRACING_TARGET};
 
 use indexmap::IndexMap;
 use std::cell::RefCell;
@@ -62,18 +62,27 @@ impl<'a> Sim<'a> {
     }
 
     /// Register a client with the simulation.
-    pub fn client<F>(&mut self, addr: impl ToIpAddr, client: F)
+    pub fn client<F>(&mut self, name: impl AsRef<str>, client: F)
     where
         F: Future<Output = Result> + 'static,
     {
-        let (node_name, addr) = self.world.borrow_mut().dns.register_legacy(addr);
-        let id = NodeIdentifer::new(node_name);
+        let name = name.as_ref();
+
+        // FIXME: Willb e derprecated, only used temporarily
+        let mut addrs = Vec::new();
+        if let Ok(addr) = name.parse::<IpAddr>() {
+            addrs.push(addr);
+            eprintln!("WARNING, using deprecated API")
+        }
+
+        let addrs = self.world.borrow_mut().dns.register(name, addrs);
+        let id = NodeIdentifer::new(name);
 
         {
             let world = RefCell::get_mut(&mut self.world);
 
             // Register host state with the world
-            world.register(id.clone(), vec![addr], &self.config);
+            world.register(id.clone(), addrs, &self.config);
         }
 
         let rt = World::enter(&self.world, || Rt::client(id.clone(), client));
@@ -87,19 +96,28 @@ impl<'a> Sim<'a> {
     /// [`Sim::client`] which just takes a future. The reason for this is we
     /// might restart the host, and so need to be able to call the future
     /// multiple times.
-    pub fn host<F, Fut>(&mut self, addr: impl ToIpAddr, host: F)
+    pub fn host<F, Fut>(&mut self, name: impl AsRef<str>, host: F)
     where
         F: Fn() -> Fut + 'a,
         Fut: Future<Output = Result> + 'static,
     {
-        let (node_name, addr) = self.world.borrow_mut().dns.register_legacy(addr);
-        let id = NodeIdentifer::new(node_name);
+        let name = name.as_ref();
+
+        // FIXME: Willb e derprecated, only used temporarily
+        let mut addrs = Vec::new();
+        if let Ok(addr) = name.parse::<IpAddr>() {
+            addrs.push(addr);
+            eprintln!("WARNING, using deprecated API")
+        }
+
+        let addrs = self.world.borrow_mut().dns.register(name, addrs);
+        let id = NodeIdentifer::new(name);
 
         {
             let world = RefCell::get_mut(&mut self.world);
 
             // Register host state with the world
-            world.register(id.clone(), vec![addr], &self.config);
+            world.register(id.clone(), addrs, &self.config);
         }
 
         let rt = World::enter(&self.world, || Rt::host(id.clone(), host));
@@ -133,48 +151,38 @@ impl<'a> Sim<'a> {
     }
 
     /// Run `f` with the resolved hosts at `addrs` set on the world.
-    fn run_with_hosts(&mut self, addrs: impl ToIpAddrs, mut f: impl FnMut(IpAddr, &mut Rt)) {
-        let hosts_addrs = self.world.borrow_mut().lookup_many(addrs);
-        let hosts = self.addrs_to_node_ids(hosts_addrs);
-        for (id, addr) in hosts {
+    fn run_with_hosts(&mut self, query: impl ToIpAddrs, mut f: impl FnMut(NodeIdentifer, &mut Rt)) {
+        let hosts = self.lookup_id(query);
+        for id in hosts {
             let rt = self.rts.get_mut(&id).expect("missing host");
 
-            self.world.borrow_mut().current = Some(id);
+            self.world.borrow_mut().current = Some(id.clone());
 
-            World::enter(&self.world, || f(addr, rt));
+            World::enter(&self.world, || f(id, rt));
         }
 
         self.world.borrow_mut().current = None;
     }
 
-    fn addrs_to_node_ids(&self, addrs: Vec<IpAddr>) -> Vec<(NodeIdentifer, IpAddr)> {
-        addrs
-            .into_iter()
-            .map(|addr| self.addr_to_node_id(addr))
-            .collect::<Vec<_>>()
-    }
-
-    fn addr_to_node_id(&self, addr: IpAddr) -> (NodeIdentifer, IpAddr) {
-        (
-            NodeIdentifer::new(self.world.borrow_mut().dns.reverse(addr)),
-            addr,
-        )
-    }
-
     /// Check whether a host has software running.
-    pub fn is_host_running(&mut self, addr: impl ToIpAddr) -> bool {
-        let host = self.world.borrow_mut().lookup(addr);
-        let (id, _) = self.addr_to_node_id(host);
-
+    pub fn is_host_running(&mut self, addr: impl ToIpAddrs) -> bool {
+        let hosts = self.world.borrow_mut().lookup_id(addr);
+        let Some(host) = hosts.first() else {
+            return false;
+        };
         self.rts
-            .get(&id)
+            .get(host)
             .expect("missing host")
             .is_software_running()
     }
 
     /// Lookup an IP address by host name.
-    pub fn lookup(&self, addr: impl ToIpAddr) -> IpAddr {
+    pub fn lookup(&self, addr: impl ToIpAddrs) -> Vec<IpAddr> {
         self.world.borrow_mut().lookup(addr)
+    }
+
+    pub(crate) fn lookup_id(&self, query: impl ToIpAddrs) -> Vec<NodeIdentifer> {
+        self.world.borrow_mut().lookup_id(query)
     }
 
     /// Hold messages between two hosts, or sets of hosts, until [`release`] is
@@ -209,13 +217,10 @@ impl<'a> Sim<'a> {
     /// Useful when interacting with network [links](#method.links).
     pub fn reverse_lookup_pair(&self, pair: (IpAddr, IpAddr)) -> (String, String) {
         let world = self.world.borrow();
-
-        (world.dns.reverse(pair.0), world.dns.reverse(pair.1))
-    }
-
-    /// Lookup IP addresses for resolved hosts.
-    pub fn lookup_many(&self, addr: impl ToIpAddrs) -> Vec<IpAddr> {
-        self.world.borrow_mut().lookup_many(addr)
+        (
+            world.dns.reverse(pair.0).to_string(),
+            world.dns.reverse(pair.1).to_string(),
+        )
     }
 
     /// Set the max message latency for all links.
@@ -232,11 +237,12 @@ impl<'a> Sim<'a> {
     /// latency.
     pub fn set_link_latency(&self, a: impl ToIpAddrs, b: impl ToIpAddrs, value: Duration) {
         let mut world = self.world.borrow_mut();
-        let a = world.lookup_many(a);
-        let b = world.lookup_many(b);
+        let World { topology, dns, .. } = &mut *world;
+        let a = dns.lookup(a);
+        let b = dns.lookup(b);
 
-        for_pairs(&a, &b, |a, b| {
-            world.topology.set_link_message_latency(a, b, value);
+        for_connected_pairs(&a, &b, &dns.subnets, |a, b| {
+            topology.set_link_message_latency(a, b, value);
         });
     }
 
@@ -248,11 +254,12 @@ impl<'a> Sim<'a> {
         value: Duration,
     ) {
         let mut world = self.world.borrow_mut();
-        let a = world.lookup_many(a);
-        let b = world.lookup_many(b);
+        let World { topology, dns, .. } = &mut *world;
+        let a = dns.lookup(a);
+        let b = dns.lookup(b);
 
-        for_pairs(&a, &b, |a, b| {
-            world.topology.set_link_max_message_latency(a, b, value);
+        for_connected_pairs(&a, &b, &dns.subnets, |a, b| {
+            topology.set_link_max_message_latency(a, b, value);
         });
     }
 
@@ -273,11 +280,12 @@ impl<'a> Sim<'a> {
 
     pub fn set_link_fail_rate(&mut self, a: impl ToIpAddrs, b: impl ToIpAddrs, value: f64) {
         let mut world = self.world.borrow_mut();
-        let a = world.lookup_many(a);
-        let b = world.lookup_many(b);
+        let World { topology, dns, .. } = &mut *world;
+        let a = dns.lookup(a);
+        let b = dns.lookup(b);
 
-        for_pairs(&a, &b, |a, b| {
-            world.topology.set_link_fail_rate(a, b, value);
+        for_connected_pairs(&a, &b, &dns.subnets, |a, b| {
+            topology.set_link_fail_rate(a, b, value);
         });
     }
 
@@ -649,7 +657,7 @@ mod test {
         sim.step()?;
 
         sim.links(|l| {
-            assert!(l.count() == 1);
+            assert_eq!(l.count(), 2);
         });
 
         // Verify that msg is still not delivered.
@@ -957,7 +965,7 @@ mod test {
             .with_addr(Ipv4Addr::new(192, 168, 22, 33))
             .build_client(async { Ok(()) });
 
-        assert_eq!(sim.lookup("test"), Ipv4Addr::new(192, 168, 22, 33));
+        assert_eq!(sim.lookup("test")[0], Ipv4Addr::new(192, 168, 22, 33));
     }
 
     #[test]
@@ -968,6 +976,6 @@ mod test {
             .with_addr(Ipv4Addr::new(193, 168, 22, 33))
             .build_client(async { Ok(()) });
 
-        assert_eq!(sim.lookup("test"), Ipv4Addr::new(192, 168, 22, 33));
+        assert_eq!(sim.lookup("test")[0], Ipv4Addr::new(192, 168, 22, 33));
     }
 }

@@ -1,7 +1,7 @@
 use std::{ops::Deref, sync::Arc};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct NodeIdentifer {
+pub struct NodeIdentifer {
     node_name: Arc<str>,
 }
 

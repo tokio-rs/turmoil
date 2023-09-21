@@ -955,7 +955,7 @@ fn socket_capacity() {
 fn socket_to_nonexistent_node() -> Result {
     let mut sim = Builder::new().build();
     sim.client("client", async move {
-        assert_eq!(lookup("client"), Ipv4Addr::new(192, 168, 0, 1));
+        assert_eq!(lookup("client")[0], Ipv4Addr::new(192, 168, 0, 1));
         let sock = TcpStream::connect("192.168.0.2:80").await;
         assert!(
             sock.is_err(),
