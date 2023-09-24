@@ -360,12 +360,10 @@ impl Link {
             }
             State::Hold => {
                 tracing::trace!(target: TRACING_TARGET,?src, ?dst, protocol = %message, "Hold");
-
                 DeliveryStatus::Hold
             }
             _ => {
                 tracing::trace!(target: TRACING_TARGET,?src, ?dst, protocol = %message, "Drop");
-
                 return;
             }
         };
@@ -422,10 +420,8 @@ impl Link {
         for addr in host.addrs.clone() {
             let deliverable = self
                 .deliverable
-                .entry(addr)
-                .or_default()
-                .drain(..)
-                .collect::<Vec<Envelope>>();
+                .get_mut(&addr)
+                .map_or(Vec::new(), |entry| entry.drain(..).collect());
 
             for message in deliverable {
                 let (src, dst) = (message.src, message.dst);

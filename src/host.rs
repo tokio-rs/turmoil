@@ -366,6 +366,7 @@ impl Tcp {
     ) -> Result<(), Protocol> {
         match segment {
             Segment::Syn(syn) => {
+                println!("SYN");
                 // If bound, queue the syn; else we drop the syn triggering
                 // connection refused on the client.
                 if let Some(b) = self.binds.get_mut(&dst.port()) {
@@ -428,7 +429,7 @@ impl Tcp {
 
 /// Returns whether the given bind addr can accept a packet routed to the given dst
 pub fn matches(bind: SocketAddr, dst: SocketAddr) -> bool {
-    if bind.ip().is_unspecified() && bind.port() == dst.port() {
+    if bind.ip().is_unspecified() && bind.port() == dst.port() && bind.is_ipv4() == dst.is_ipv4() {
         return true;
     }
 
