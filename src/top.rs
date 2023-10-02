@@ -1,7 +1,8 @@
 use crate::envelope::{Envelope, Protocol};
 use crate::host::Host;
+use crate::ip::IpSubnets;
 use crate::rt::Rt;
-use crate::{config, TRACING_TARGET};
+use crate::{config, IpSubnet, TRACING_TARGET};
 
 use indexmap::IndexMap;
 use rand::{Rng, RngCore};
@@ -15,6 +16,9 @@ use tokio::time::Instant;
 /// Describes the network topology.
 pub(crate) struct Topology {
     config: config::Link,
+
+    /// A mapping assigning each endpoint in the topology to a subnet
+    endpoints: IndexMap<IpSubnet, Vec<IpAddr>>,
 
     /// Specific configuration overrides between specific hosts.
     links: IndexMap<Pair, Link>,
@@ -164,18 +168,42 @@ enum State {
 }
 
 impl Topology {
-    pub(crate) fn new(config: config::Link) -> Topology {
+    pub(crate) fn new(config: config::Link, subnets: &IpSubnets) -> Topology {
+        let mut endpoints = IndexMap::new();
+        for subnet in subnets.iter() {
+            endpoints.insert(*subnet, Vec::new());
+        }
+
         Topology {
             config,
+            endpoints,
             links: IndexMap::new(),
             rt: Rt::no_software(),
         }
     }
 
-    /// Register a link between two hosts
-    pub(crate) fn register(&mut self, a: IpAddr, b: IpAddr) {
-        let pair = Pair::new(a, b);
-        assert!(self.links.insert(pair, Link::new(self.rt.now())).is_none());
+    pub(crate) fn register_interfaces(&mut self, addrs: &[IpAddr]) {
+        let Self {
+            endpoints,
+            links,
+            rt,
+            ..
+        } = self;
+
+        for &addr in addrs {
+            // Per subnets connect to all nodes of likeminded subnets
+            let (_, subnet_members) = endpoints
+                .iter_mut()
+                .find(|(subnet, _)| subnet.contains(addr))
+                .expect("registered interface does not belong to any subnet");
+
+            for existing in subnet_members.iter() {
+                let pair = Pair::new(addr, *existing);
+                assert!(links.insert(pair, Link::new(rt.now())).is_none());
+            }
+
+            subnet_members.push(addr);
+        }
     }
 
     pub(crate) fn set_max_message_latency(&mut self, value: Duration) {
@@ -232,7 +260,7 @@ impl Topology {
     // Move messages from any network links to the `dst` host.
     pub(crate) fn deliver_messages(&mut self, rand: &mut dyn RngCore, dst: &mut Host) {
         for (pair, link) in &mut self.links {
-            if pair.0 == dst.addr || pair.1 == dst.addr {
+            if dst.addrs.contains(&pair.0) || dst.addrs.contains(&pair.1) {
                 link.deliver_messages(&self.config, rand, dst);
             }
         }
@@ -332,12 +360,10 @@ impl Link {
             }
             State::Hold => {
                 tracing::trace!(target: TRACING_TARGET,?src, ?dst, protocol = %message, "Hold");
-
                 DeliveryStatus::Hold
             }
             _ => {
                 tracing::trace!(target: TRACING_TARGET,?src, ?dst, protocol = %message, "Drop");
-
                 return;
             }
         };
@@ -391,17 +417,17 @@ impl Link {
         rand: &mut dyn RngCore,
         host: &mut Host,
     ) {
-        let deliverable = self
-            .deliverable
-            .entry(host.addr)
-            .or_default()
-            .drain(..)
-            .collect::<Vec<Envelope>>();
+        for addr in host.addrs.clone() {
+            let deliverable = self
+                .deliverable
+                .get_mut(&addr)
+                .map_or(Vec::new(), |entry| entry.drain(..).collect());
 
-        for message in deliverable {
-            let (src, dst) = (message.src, message.dst);
-            if let Err(message) = host.receive_from_network(message) {
-                self.enqueue_message(global_config, rand, dst, src, message);
+            for message in deliverable {
+                let (src, dst) = (message.src, message.dst);
+                if let Err(message) = host.receive_from_network(message) {
+                    self.enqueue_message(global_config, rand, dst, src, message);
+                }
             }
         }
     }
@@ -477,5 +503,54 @@ impl Link {
         self.config
             .message_loss
             .get_or_insert_with(|| global.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    use super::*;
+    use crate::{config::Link, Ipv4Subnet, Ipv6Subnet};
+
+    #[test]
+    fn multi_ip_binding() {
+        // subnets 192.168.0.0/16 and fe80::/64
+        let mut top = Topology::new(Link::default(), &IpSubnets::default());
+
+        top.register_interfaces(&[
+            IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1)),
+            IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1)),
+        ]);
+
+        top.register_interfaces(&[
+            IpAddr::V4(Ipv4Addr::new(192, 168, 0, 2)),
+            IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 101)),
+        ]);
+
+        top.register_interfaces(&[
+            IpAddr::V4(Ipv4Addr::new(192, 168, 3, 3)),
+            IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 1, 1, 1, 1)),
+        ]);
+
+        assert_eq!(
+            top.endpoints.get(&IpSubnet::V4(Ipv4Subnet::default())),
+            Some(&vec![
+                IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1)),
+                IpAddr::V4(Ipv4Addr::new(192, 168, 0, 2)),
+                IpAddr::V4(Ipv4Addr::new(192, 168, 3, 3)),
+            ])
+        );
+
+        assert_eq!(
+            top.endpoints.get(&IpSubnet::V6(Ipv6Subnet::default())),
+            Some(&vec![
+                IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1)),
+                IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 101)),
+                IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 1, 1, 1, 1)),
+            ])
+        );
+
+        assert_eq!(top.links.len(), 2 * 3);
     }
 }

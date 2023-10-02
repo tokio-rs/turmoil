@@ -1,4 +1,5 @@
 use crate::envelope::{hex, Datagram, Protocol, Segment, Syn};
+use crate::ip::longest_prefix_match;
 use crate::net::{SocketPair, TcpListener, UdpSocket};
 use crate::world::World;
 use crate::{Envelope, TRACING_TARGET};
@@ -19,8 +20,8 @@ use tokio::time::{Duration, Instant};
 ///
 /// Both modes may be used simultaneously.
 pub(crate) struct Host {
-    /// Host ip address.
-    pub(crate) addr: IpAddr,
+    #[allow(unused)]
+    pub(crate) addrs: Vec<IpAddr>,
 
     /// L4 User Datagram Protocol (UDP).
     pub(crate) udp: Udp,
@@ -40,9 +41,9 @@ pub(crate) struct Host {
 }
 
 impl Host {
-    pub(crate) fn new(addr: IpAddr, tcp_capacity: usize, udp_capacity: usize) -> Host {
+    pub(crate) fn new(addrs: Vec<IpAddr>, tcp_capacity: usize, udp_capacity: usize) -> Host {
         Host {
-            addr,
+            addrs,
             udp: Udp::new(udp_capacity),
             tcp: Tcp::new(tcp_capacity),
             next_ephemeral_port: 49152,
@@ -86,6 +87,15 @@ impl Host {
             }
 
             return ret;
+        }
+    }
+
+    pub(crate) fn sender_for_dst(&self, dst: SocketAddr) -> IpAddr {
+        // make a longest prefix match on all bound addrs
+        if dst.ip().is_loopback() {
+            dst.ip()
+        } else {
+            longest_prefix_match(&self.addrs, dst.ip())
         }
     }
 
@@ -369,11 +379,11 @@ impl Tcp {
                     }
                 }
             }
-            Segment::Data(seq, data) => match self.sockets.get_mut(&SocketPair::new(dst, src)) {
+            Segment::Data(seq, data) => match self.get_socket_mut(src, dst) {
                 Some(sock) => sock.buffer(seq, SequencedSegment::Data(data))?,
                 None => return Err(Protocol::Tcp(Segment::Rst)),
             },
-            Segment::Fin(seq) => match self.sockets.get_mut(&SocketPair::new(dst, src)) {
+            Segment::Fin(seq) => match self.get_socket_mut(src, dst) {
                 Some(sock) => sock.buffer(seq, SequencedSegment::Fin)?,
                 None => return Err(Protocol::Tcp(Segment::Rst)),
             },
@@ -385,6 +395,14 @@ impl Tcp {
         };
 
         Ok(())
+    }
+
+    fn get_socket_mut(
+        &mut self,
+        origin: SocketAddr,
+        local: SocketAddr,
+    ) -> Option<&mut StreamSocket> {
+        self.sockets.get_mut(&SocketPair::new(local, origin))
     }
 
     pub(crate) fn close_stream_half(&mut self, pair: SocketPair) {
@@ -410,7 +428,7 @@ impl Tcp {
 
 /// Returns whether the given bind addr can accept a packet routed to the given dst
 pub fn matches(bind: SocketAddr, dst: SocketAddr) -> bool {
-    if bind.ip().is_unspecified() && bind.port() == dst.port() {
+    if bind.ip().is_unspecified() && bind.port() == dst.port() && bind.is_ipv4() == dst.is_ipv4() {
         return true;
     }
 
@@ -420,13 +438,14 @@ pub fn matches(bind: SocketAddr, dst: SocketAddr) -> bool {
 #[cfg(test)]
 mod test {
     use crate::{Host, Result};
+    use std::net::Ipv4Addr;
 
     #[test]
     fn recycle_ports() -> Result {
-        let mut host = Host::new(std::net::Ipv4Addr::UNSPECIFIED.into(), 1, 1);
+        let mut host = Host::new(vec![Ipv4Addr::UNSPECIFIED.into()], 1, 1);
 
-        host.udp.bind((host.addr, 65534).into())?;
-        host.udp.bind((host.addr, 65535).into())?;
+        host.udp.bind((host.addrs[0], 65534).into())?;
+        host.udp.bind((host.addrs[0], 65535).into())?;
 
         for _ in 49152..65534 {
             host.assign_ephemeral_port();

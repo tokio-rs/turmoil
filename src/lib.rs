@@ -91,7 +91,7 @@ use config::Config;
 
 mod dns;
 use dns::Dns;
-pub use dns::{ToIpAddr, ToIpAddrs, ToSocketAddrs};
+pub use dns::{ToIpAddrs, ToSocketAddrs};
 
 mod envelope;
 use envelope::Envelope;
@@ -105,9 +105,11 @@ pub use host::elapsed;
 use host::Host;
 
 mod ip;
-pub use ip::IpVersion;
+pub use ip::{IpSubnet, IpSubnetParsingError, IpSubnets, Ipv4Subnet, Ipv6Subnet};
 
 pub mod net;
+
+mod node;
 
 mod rt;
 use rt::Rt;
@@ -125,12 +127,17 @@ use world::World;
 const TRACING_TARGET: &str = "turmoil";
 
 /// Utility method for performing a function on all hosts in `a` against all
-/// hosts in `b`.
-pub(crate) fn for_pairs(a: &Vec<IpAddr>, b: &Vec<IpAddr>, mut f: impl FnMut(IpAddr, IpAddr)) {
+/// hosts in `b`, if they are (should be) connected in the topology.
+fn for_connected_pairs(
+    a: &[IpAddr],
+    b: &[IpAddr],
+    subnets: &IpSubnets,
+    mut f: impl FnMut(IpAddr, IpAddr),
+) {
     for first in a {
         for second in b {
             // skip for the same host
-            if first != second {
+            if first != second && subnets.shared_subnet(*first, *second).is_some() {
                 f(*first, *second)
             }
         }
@@ -140,15 +147,8 @@ pub(crate) fn for_pairs(a: &Vec<IpAddr>, b: &Vec<IpAddr>, mut f: impl FnMut(IpAd
 /// Lookup an IP address by host name.
 ///
 /// Must be called from within a Turmoil simulation.
-pub fn lookup(addr: impl ToIpAddr) -> IpAddr {
+pub fn lookup(addr: impl ToIpAddrs) -> Vec<IpAddr> {
     World::current(|world| world.lookup(addr))
-}
-
-/// Lookup an IP address by host name. Use regex to match a number of hosts.
-///
-/// Must be called from within a Turmoil simulation.
-pub fn lookup_many(addr: impl ToIpAddrs) -> Vec<IpAddr> {
-    World::current(|world| world.lookup_many(addr))
 }
 
 /// Hold messages between two hosts, or sets of hosts, until [`release`] is
@@ -156,14 +156,14 @@ pub fn lookup_many(addr: impl ToIpAddrs) -> Vec<IpAddr> {
 ///
 /// Must be called from within a Turmoil simulation.
 pub fn hold(a: impl ToIpAddrs, b: impl ToIpAddrs) {
-    World::current(|world| world.hold_many(a, b))
+    World::current(|world| world.hold(a, b))
 }
 
 /// The opposite of [`hold`]. All held messages are immediately delivered.
 ///
 /// Must be called from within a Turmoil simulation.
 pub fn release(a: impl ToIpAddrs, b: impl ToIpAddrs) {
-    World::current(|world| world.release_many(a, b))
+    World::current(|world| world.release(a, b))
 }
 
 /// Partition two hosts, or sets of hosts, resulting in all messages sent
@@ -171,7 +171,7 @@ pub fn release(a: impl ToIpAddrs, b: impl ToIpAddrs) {
 ///
 /// Must be called from within a Turmoil simulation.
 pub fn partition(a: impl ToIpAddrs, b: impl ToIpAddrs) {
-    World::current(|world| world.partition_many(a, b))
+    World::current(|world| world.partition(a, b))
 }
 
 /// Repair the connection between two hosts, or sets of hosts, resulting in
@@ -179,5 +179,5 @@ pub fn partition(a: impl ToIpAddrs, b: impl ToIpAddrs) {
 ///
 /// Must be called from within a Turmoil simulation.
 pub fn repair(a: impl ToIpAddrs, b: impl ToIpAddrs) {
-    World::current(|world| world.repair_many(a, b))
+    World::current(|world| world.repair(a, b))
 }

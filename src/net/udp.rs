@@ -101,25 +101,35 @@ impl UdpSocket {
     /// to this listener. The port allocated can be queried via the `local_addr`
     /// method.
     ///
-    /// Only `0.0.0.0`, `::`, or localhost are currently supported.
+    /// Supporst binds to `0.0.0.0` / `::`, localhost or any bound ip addr.
     pub async fn bind<A: ToSocketAddrs>(addr: A) -> Result<UdpSocket> {
         World::current(|world| {
             let mut addr = addr.to_socket_addr(&world.dns);
             let host = world.current_host_mut();
 
-            if !addr.ip().is_unspecified() && !addr.ip().is_loopback() {
-                return Err(Error::new(
-                    ErrorKind::AddrNotAvailable,
-                    format!("{addr} is not supported"),
-                ));
-            }
-
-            if addr.is_ipv4() != host.addr.is_ipv4() {
-                panic!("ip version mismatch: {:?} host: {:?}", addr, host.addr)
-            }
-
+            // Ports are independent of bind type.
             if addr.port() == 0 {
                 addr.set_port(host.assign_ephemeral_port());
+            }
+
+            if addr.ip().is_unspecified() || addr.ip().is_loopback() {
+                // Check whether the ip version is even supported
+                assert!(
+                    host.addrs
+                        .iter()
+                        .any(|bind| bind.is_ipv4() == addr.is_ipv4()),
+                    "cannot bind socket, ip version is not supported in this simulation"
+                );
+
+                return host.udp.bind(addr);
+            }
+
+            // Bind to specific addres, check whether current host supports thus bind
+            if !host.addrs.contains(&addr.ip()) {
+                return Err(Error::new(
+                    ErrorKind::AddrNotAvailable,
+                    "can't assign requested address",
+                ));
             }
 
             host.udp.bind(addr)
@@ -283,12 +293,17 @@ impl UdpSocket {
     fn send(&self, world: &mut World, dst: SocketAddr, packet: Datagram) -> Result<()> {
         let msg = Protocol::Udp(packet);
 
+        if self.local_addr.is_ipv4() != dst.is_ipv4() {
+            return Err(Error::new(ErrorKind::InvalidInput, "invalid argument"));
+        }
+
         let mut src = self.local_addr;
         if dst.ip().is_loopback() {
             src.set_ip(dst.ip());
         }
         if src.ip().is_unspecified() {
-            src.set_ip(world.current_host_mut().addr);
+            // use an address within the same subnet as the dst
+            src.set_ip(world.current_host_mut().sender_for_dst(dst));
         }
 
         if dst.ip().is_loopback() {

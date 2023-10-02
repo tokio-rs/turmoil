@@ -65,10 +65,8 @@ impl TcpStream {
             let dst = addr.to_socket_addr(&world.dns);
 
             let host = world.current_host_mut();
-            let mut local_addr = SocketAddr::new(host.addr, host.assign_ephemeral_port());
-            if dst.ip().is_loopback() {
-                local_addr.set_ip(dst.ip());
-            }
+            let local_addr =
+                SocketAddr::new(host.sender_for_dst(dst), host.assign_ephemeral_port());
 
             let pair = SocketPair::new(local_addr, dst);
             let rx = host.tcp.new_stream(pair);

@@ -15,7 +15,7 @@ use tokio::{
 use turmoil::{
     lookup,
     net::{TcpListener, TcpStream},
-    Builder, IpVersion, Result,
+    Builder, IpSubnet, IpSubnets, Ipv4Subnet, Ipv6Subnet, Result, ToSocketAddrs,
 };
 
 const PORT: u16 = 1738;
@@ -26,10 +26,6 @@ fn assert_error_kind<T>(res: io::Result<T>, kind: io::ErrorKind) {
 
 async fn bind_to_v4(port: u16) -> std::result::Result<TcpListener, std::io::Error> {
     TcpListener::bind((IpAddr::from(Ipv4Addr::UNSPECIFIED), port)).await
-}
-
-async fn bind_to_v6(port: u16) -> std::result::Result<TcpListener, std::io::Error> {
-    TcpListener::bind((IpAddr::from(Ipv6Addr::UNSPECIFIED), port)).await
 }
 
 async fn bind() -> std::result::Result<TcpListener, std::io::Error> {
@@ -684,80 +680,145 @@ fn split() -> Result {
     sim.run()
 }
 
-// # IpVersion specific tests
-
 #[test]
-fn bind_ipv4_socket() -> Result {
-    let mut sim = Builder::new().ip_version(IpVersion::V4).build();
-    sim.client("client", async move {
-        let sock = bind_to_v4(0).await?;
-        assert!(sock.local_addr().unwrap().is_ipv4());
+fn ipv4_connectivity() -> Result {
+    let mut sim = Builder::new().build();
+    sim.host("server", || async move {
+        let list = TcpListener::bind(("0.0.0.0", 80)).await?;
+        loop {
+            let (stream, from) = list.accept().await?;
+            anwser_query(stream, "Hello server", &format!("Hello {}", from.ip())).await?;
+        }
+    });
+    sim.client(
+        "suceed",
+        connect_tx_and_rx("192.168.0.1:80", "Hello server", "Hello 192.168.0.2"),
+    );
+    sim.client("fail", async {
+        let err = TcpStream::connect("fe80::1:80").await.unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::ConnectionRefused);
         Ok(())
     });
-    sim.run()
-}
 
-#[test]
-fn bind_ipv6_socket() -> Result {
-    let mut sim = Builder::new().ip_version(IpVersion::V6).build();
-    sim.client("client", async move {
-        let sock = bind_to_v6(0).await?;
-        assert!(sock.local_addr().unwrap().is_ipv6());
-        Ok(())
-    });
-    sim.run()
-}
-
-#[test]
-#[should_panic]
-fn bind_ipv4_version_missmatch() {
-    let mut sim = Builder::new().ip_version(IpVersion::V6).build();
-    sim.client("client", async move {
-        let _sock = bind_to_v4(0).await?;
-        Ok(())
-    });
-    sim.run().unwrap()
-}
-
-#[test]
-#[should_panic]
-fn bind_ipv6_version_missmatch() {
-    let mut sim = Builder::new().ip_version(IpVersion::V4).build();
-    sim.client("client", async move {
-        let _sock = bind_to_v6(0).await?;
-        Ok(())
-    });
-    sim.run().unwrap()
-}
-
-#[test]
-fn non_zero_bind() -> Result {
-    let mut sim = Builder::new().ip_version(IpVersion::V4).build();
-    sim.client("client", async move {
-        let sock = TcpListener::bind("1.1.1.1:1").await;
-
-        let Err(err) = sock else { panic!("bind should have failed") };
-        assert_eq!(err.to_string(), "1.1.1.1:1 is not supported");
-        Ok(())
-    });
     sim.run()
 }
 
 #[test]
 fn ipv6_connectivity() -> Result {
-    let mut sim = Builder::new().ip_version(IpVersion::V6).build();
-    sim.client("server", async move {
-        let list = TcpListener::bind(("::", 80)).await.unwrap();
-        let _stream = list.accept().await.unwrap();
-        Ok(())
+    tracing_subscriber::fmt::init();
+
+    let mut sim = Builder::new().build();
+    sim.host("server", || async move {
+        let list = TcpListener::bind(("::", 80)).await?;
+        loop {
+            let (stream, from) = list.accept().await?;
+            anwser_query(stream, "Hello server", &format!("Hello {}", from.ip())).await?;
+        }
     });
-    sim.client("client", async move {
-        let stream = TcpStream::connect("server:80").await.unwrap();
-        let _ = stream;
+    sim.client(
+        "succeed",
+        connect_tx_and_rx("fe80::1:80", "Hello server", "Hello fe80::2"),
+    );
+    sim.client("fail", async {
+        let err = TcpStream::connect("192.168.0.1:80").await.unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::ConnectionRefused);
         Ok(())
     });
 
     sim.run()
+}
+
+async fn connect_tx_and_rx(addr: impl ToSocketAddrs, query: &str, resp: &str) -> Result {
+    let mut sock = TcpStream::connect(addr).await?;
+    sock.write_all(query.as_bytes()).await?;
+    let mut buf = [0; 128];
+    let n = sock.read(&mut buf).await?;
+    let s = String::from_utf8_lossy(&buf[..n]);
+    assert_eq!(s, resp);
+    Ok(())
+}
+
+async fn anwser_query(mut sock: TcpStream, query: &str, resp: &str) -> Result {
+    let mut buf = [0; 128];
+    let n = sock.read(&mut buf).await?;
+    let s = String::from_utf8_lossy(&buf[..n]);
+    assert_eq!(s, query);
+    sock.write_all(resp.as_bytes()).await?;
+    Ok(())
+}
+
+#[test]
+fn interface_exclusivity() -> Result {
+    let mut sim = Builder::new().build();
+    sim.node("alice").build_client(async {
+        let lis = TcpListener::bind(":::80").await?;
+        let (mut stream, _) = lis.accept().await?;
+        let mut s = [0; 128];
+        let n = stream.read(&mut s).await?;
+        assert_eq!(&s[..n], b"Hello world!");
+
+        Ok(())
+    });
+    sim.node("bob").build_client(async {
+        let mut stream = TcpStream::connect("fe80::1:80").await?;
+        assert!(stream.local_addr()?.is_ipv6());
+        stream.write_all(b"Hello world!").await?;
+
+        Ok(())
+    });
+
+    sim.run()
+}
+
+fn double_ipv4_subnets() -> IpSubnets {
+    let mut subnets = IpSubnets::new();
+    subnets.add(IpSubnet::V4(Ipv4Subnet::new(
+        Ipv4Addr::new(192, 168, 0, 0),
+        16,
+    )));
+    subnets.add(IpSubnet::V4(Ipv4Subnet::new(
+        Ipv4Addr::new(10, 1, 0, 0),
+        16,
+    )));
+    subnets
+}
+
+#[test]
+fn unspecified_listener_all_interface_accept() -> Result {
+    let mut sim = Builder::new().ip_subnets(double_ipv4_subnets()).build();
+    sim.node("alice").build_client(async {
+        let lis = TcpListener::bind("0.0.0.0:80").await?;
+        for _ in 0..2 {
+            let (sock, from) = lis.accept().await?;
+            anwser_query(sock, "Hello server", &format!("Hello {}", from.ip())).await?;
+        }
+        Ok(())
+    });
+    sim.node("bob").build_client(connect_tx_and_rx(
+        "192.168.0.1:80",
+        "Hello server",
+        "Hello 192.168.0.2",
+    ));
+    sim.node("eve").build_client(connect_tx_and_rx(
+        "10.1.0.1:80",
+        "Hello server",
+        "Hello 10.1.0.3",
+    ));
+    sim.run()
+}
+
+#[test]
+#[should_panic]
+fn direct_bind_ip_version_not_supported() {
+    let mut subnets = IpSubnets::new();
+    subnets.add(IpSubnet::V4(Ipv4Subnet::new(Ipv4Addr::new(1, 2, 3, 0), 24)));
+    let mut sim = Builder::new().ip_subnets(subnets).build();
+    sim.node("alice").build_client(async {
+        let _ = TcpListener::bind(":::0").await?;
+
+        Ok(())
+    });
+    sim.run().expect("paniced at subtask");
 }
 
 #[test]
@@ -784,12 +845,10 @@ fn bind_addr_in_use() -> Result {
     sim.run()
 }
 
-fn run_localhost_test(
-    ip_version: IpVersion,
-    bind_addr: SocketAddr,
-    connect_addr: SocketAddr,
-) -> Result {
-    let mut sim = Builder::new().ip_version(ip_version).build();
+fn run_localhost_test(subnet: IpSubnet, bind_addr: SocketAddr, connect_addr: SocketAddr) -> Result {
+    let mut sim = Builder::new()
+        .ip_subnets(IpSubnets::from_iter([subnet]))
+        .build();
     let expected = [0, 1, 7, 3, 8];
     sim.client("client", async move {
         let listener = TcpListener::bind(bind_addr).await?;
@@ -820,28 +879,28 @@ fn run_localhost_test(
 fn loopback_to_wildcard_v4() -> Result {
     let bind_addr = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 1234);
     let connect_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 1234));
-    run_localhost_test(IpVersion::V4, bind_addr, connect_addr)
+    run_localhost_test(IpSubnet::V4(Ipv4Subnet::default()), bind_addr, connect_addr)
 }
 
 #[test]
 fn loopback_to_localhost_v4() -> Result {
     let bind_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1234);
     let connect_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 1234));
-    run_localhost_test(IpVersion::V4, bind_addr, connect_addr)
+    run_localhost_test(IpSubnet::V4(Ipv4Subnet::default()), bind_addr, connect_addr)
 }
 
 #[test]
 fn loopback_to_wildcard_v6() -> Result {
     let bind_addr = SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), 1234);
     let connect_addr = SocketAddr::from((Ipv6Addr::LOCALHOST, 1234));
-    run_localhost_test(IpVersion::V6, bind_addr, connect_addr)
+    run_localhost_test(IpSubnet::V6(Ipv6Subnet::default()), bind_addr, connect_addr)
 }
 
 #[test]
 fn loopback_to_localhost_v6() -> Result {
     let bind_addr = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 1234);
     let connect_addr = SocketAddr::from((Ipv6Addr::LOCALHOST, 1234));
-    run_localhost_test(IpVersion::V6, bind_addr, connect_addr)
+    run_localhost_test(IpSubnet::V6(Ipv6Subnet::default()), bind_addr, connect_addr)
 }
 
 #[test]
@@ -960,7 +1019,7 @@ fn socket_capacity() {
 fn socket_to_nonexistent_node() -> Result {
     let mut sim = Builder::new().build();
     sim.client("client", async move {
-        assert_eq!(lookup("client"), Ipv4Addr::new(192, 168, 0, 1));
+        assert_eq!(lookup("client")[0], Ipv4Addr::new(192, 168, 0, 1));
         let sock = TcpStream::connect("192.168.0.2:80").await;
         assert!(
             sock.is_err(),
