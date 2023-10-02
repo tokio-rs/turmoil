@@ -366,7 +366,6 @@ impl Tcp {
     ) -> Result<(), Protocol> {
         match segment {
             Segment::Syn(syn) => {
-                println!("SYN");
                 // If bound, queue the syn; else we drop the syn triggering
                 // connection refused on the client.
                 if let Some(b) = self.binds.get_mut(&dst.port()) {
