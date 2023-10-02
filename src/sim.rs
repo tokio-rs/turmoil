@@ -951,7 +951,7 @@ mod test {
             flag.store(true, Ordering::SeqCst);
             Ok(())
         });
-        sim.node("host-b").build_host(|| future::pending());
+        sim.node("host-b").build_host(future::pending);
 
         sim.run()?;
         assert!(flag_c.load(Ordering::SeqCst));

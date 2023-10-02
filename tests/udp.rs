@@ -1,6 +1,5 @@
 use std::{
     io::{self, ErrorKind},
-    matches,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     rc::Rc,
     sync::{atomic::AtomicUsize, atomic::Ordering},
@@ -209,7 +208,7 @@ fn hold_and_release() -> Result {
         send_ping(&sock).await?;
 
         let res = timeout(Duration::from_secs(1), recv_pong(&sock)).await;
-        assert!(matches!(res, Err(_)));
+        assert!(res.is_err());
 
         // resume the network. note that the client ping does not have to be
         // resent.
