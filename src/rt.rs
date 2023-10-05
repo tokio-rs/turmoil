@@ -224,7 +224,7 @@ fn init() -> (Runtime, LocalSet) {
 }
 
 fn new_local() -> LocalSet {
-    let local = LocalSet::new();
+    let mut local = LocalSet::new();
 
     #[cfg(tokio_unstable)]
     local.unhandled_panic(tokio::runtime::UnhandledPanic::ShutdownRuntime);
