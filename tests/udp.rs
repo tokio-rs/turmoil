@@ -1,6 +1,5 @@
 use std::{
     io::{self, ErrorKind},
-    matches,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     rc::Rc,
     sync::{atomic::AtomicUsize, atomic::Ordering},
@@ -210,7 +209,7 @@ fn hold_and_release() -> Result {
         send_ping(&sock).await?;
 
         let res = timeout(Duration::from_secs(1), recv_pong(&sock)).await;
-        assert!(matches!(res, Err(_)));
+        assert!(res.is_err());
 
         // resume the network. note that the client ping does not have to be
         // resent.
@@ -406,7 +405,9 @@ fn non_zero_bind() -> Result {
     sim.client("client", async move {
         let sock = UdpSocket::bind("1.1.1.1:1").await;
 
-        let Err(err) = sock else { panic!("socket creation should have failed") };
+        let Err(err) = sock else {
+            panic!("socket creation should have failed")
+        };
         assert_eq!(err.to_string(), "1.1.1.1:1 is not supported");
         Ok(())
     });
@@ -507,6 +508,43 @@ fn loopback_to_localhost_v4() -> Result {
 }
 
 #[test]
+fn loopback_wildcard_public_v4() -> Result {
+    let bind_addr = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 1234);
+    let connect_addr = SocketAddr::from((Ipv4Addr::new(192, 168, 0, 1), 1234));
+    run_localhost_test(IpVersion::V4, bind_addr, connect_addr)
+}
+
+#[test]
+fn loopback_localhost_public_v4() -> Result {
+    let bind_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1234);
+    let connect_addr = SocketAddr::from((Ipv4Addr::new(192, 168, 0, 1), 1234));
+    let mut sim = Builder::new().ip_version(IpVersion::V4).build();
+    let expected = [0, 1, 7, 3, 8];
+    sim.client("client", async move {
+        let socket = UdpSocket::bind(bind_addr).await?;
+
+        tokio::spawn(async move {
+            let mut buf = [0; 5];
+            let (_, peer) = socket.recv_from(&mut buf).await.unwrap();
+
+            assert_eq!(expected, buf);
+            assert_eq!(peer.ip(), connect_addr.ip());
+            assert_eq!(socket.local_addr().unwrap().ip(), bind_addr.ip());
+
+            socket.send_to(&expected, peer).await.unwrap();
+        });
+
+        let bind_addr = SocketAddr::new(bind_addr.ip(), 0);
+        let socket = UdpSocket::bind(bind_addr).await?;
+        let res = socket.send_to(&expected, connect_addr).await;
+        assert_error_kind(res, io::ErrorKind::ConnectionRefused);
+
+        Ok(())
+    });
+    sim.run()
+}
+
+#[test]
 fn loopback_to_wildcard_v6() -> Result {
     let bind_addr = SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), 1234);
     let connect_addr = SocketAddr::from((Ipv6Addr::LOCALHOST, 1234));
@@ -518,6 +556,43 @@ fn loopback_to_localhost_v6() -> Result {
     let bind_addr = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 1234);
     let connect_addr = SocketAddr::from((Ipv6Addr::LOCALHOST, 1234));
     run_localhost_test(IpVersion::V6, bind_addr, connect_addr)
+}
+
+#[test]
+fn loopback_wildcard_public_v6() -> Result {
+    let bind_addr = SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), 1234);
+    let connect_addr = SocketAddr::from((Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1), 1234));
+    run_localhost_test(IpVersion::V6, bind_addr, connect_addr)
+}
+
+#[test]
+fn loopback_localhost_public_v6() -> Result {
+    let bind_addr = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 1234);
+    let connect_addr = SocketAddr::from((Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1), 1234));
+    let mut sim = Builder::new().ip_version(IpVersion::V6).build();
+    let expected = [0, 1, 7, 3, 8];
+    sim.client("client", async move {
+        let socket = UdpSocket::bind(bind_addr).await?;
+
+        tokio::spawn(async move {
+            let mut buf = [0; 5];
+            let (_, peer) = socket.recv_from(&mut buf).await.unwrap();
+
+            assert_eq!(expected, buf);
+            assert_eq!(peer.ip(), connect_addr.ip());
+            assert_eq!(socket.local_addr().unwrap().ip(), bind_addr.ip());
+
+            socket.send_to(&expected, peer).await.unwrap();
+        });
+
+        let bind_addr = SocketAddr::new(bind_addr.ip(), 0);
+        let socket = UdpSocket::bind(bind_addr).await?;
+        let res = socket.send_to(&expected, connect_addr).await;
+        assert_error_kind(res, io::ErrorKind::ConnectionRefused);
+
+        Ok(())
+    });
+    sim.run()
 }
 
 #[test]

@@ -6,6 +6,7 @@ use tokio::{
 
 use crate::{
     envelope::{Datagram, Envelope, Protocol},
+    host::is_same,
     ToSocketAddrs, World, TRACING_TARGET,
 };
 
@@ -291,7 +292,7 @@ impl UdpSocket {
             src.set_ip(world.current_host_mut().addr);
         }
 
-        if dst.ip().is_loopback() {
+        if is_same(src, dst) {
             send_loopback(src, dst, msg);
         } else {
             world.send_message(src, dst, msg)?;

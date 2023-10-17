@@ -17,6 +17,7 @@ use tokio::{
 
 use crate::{
     envelope::{Envelope, Protocol, Segment, Syn},
+    host::is_same,
     host::SequencedSegment,
     net::SocketPair,
     world::World,
@@ -74,7 +75,7 @@ impl TcpStream {
             let rx = host.tcp.new_stream(pair);
 
             let syn = Protocol::Tcp(Segment::Syn(Syn { ack }));
-            if !dst.ip().is_loopback() {
+            if !is_same(local_addr, dst) {
                 world.send_message(local_addr, dst, syn)?;
             } else {
                 send_loopback(local_addr, dst, syn);
@@ -270,7 +271,7 @@ impl WriteHalf {
 
     fn send(&self, world: &mut World, segment: Segment) -> Result<()> {
         let message = Protocol::Tcp(segment);
-        if self.pair.remote.ip().is_loopback() {
+        if is_same(self.pair.local, self.pair.remote) {
             send_loopback(self.pair.local, self.pair.remote, message);
         } else {
             world.send_message(self.pair.local, self.pair.remote, message)?;

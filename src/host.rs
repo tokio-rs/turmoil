@@ -417,6 +417,12 @@ pub fn matches(bind: SocketAddr, dst: SocketAddr) -> bool {
     bind == dst
 }
 
+/// Returns true if loopback is supported between two addresses, or
+/// if the IPs are the same (in which case turmoil treats it like loopback)
+pub(crate) fn is_same(src: SocketAddr, dst: SocketAddr) -> bool {
+    dst.ip().is_loopback() || src.ip() == dst.ip()
+}
+
 #[cfg(test)]
 mod test {
     use crate::{Host, Result};
