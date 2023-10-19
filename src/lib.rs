@@ -144,6 +144,13 @@ pub fn lookup(addr: impl ToIpAddr) -> IpAddr {
     World::current(|world| world.lookup(addr))
 }
 
+/// Perform a reverse DNS lookup, returning the hostname if the entry exists.
+///
+/// Must be called from within a Turmoil simulation.
+pub fn reverse_lookup(addr: IpAddr) -> Option<String> {
+    World::current(|world| world.reverse_lookup(addr).map(|h| h.to_owned()))
+}
+
 /// Lookup an IP address by host name. Use regex to match a number of hosts.
 ///
 /// Must be called from within a Turmoil simulation.

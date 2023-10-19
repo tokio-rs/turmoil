@@ -170,6 +170,15 @@ impl<'a> Sim<'a> {
         self.world.borrow_mut().lookup(addr)
     }
 
+    /// Perform a reverse DNS lookup, returning the hostname if the entry
+    /// exists.
+    pub fn reverse_lookup(&self, addr: IpAddr) -> Option<String> {
+        self.world
+            .borrow()
+            .reverse_lookup(addr)
+            .map(|h| h.to_owned())
+    }
+
     /// Hold messages between two hosts, or sets of hosts, until [`release`] is
     /// called.
     pub fn hold(&self, a: impl ToIpAddrs, b: impl ToIpAddrs) {
@@ -788,6 +797,33 @@ mod test {
 
         sim.crash("host");
         assert!(!sim.is_host_running("host"));
+
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(feature = "regex")]
+    fn host_scan() -> Result {
+        let mut sim = Builder::new().build();
+
+        let how_many = 3;
+        for i in 0..how_many {
+            sim.host(format!("host-{i}"), || async {
+                futures::future::pending().await
+            })
+        }
+
+        let mut ips = sim.lookup_many(regex::Regex::new(".*")?);
+        ips.sort();
+
+        assert_eq!(how_many, ips.len());
+
+        for (i, ip) in ips.iter().enumerate() {
+            assert_eq!(
+                format!("host-{i}"),
+                sim.reverse_lookup(*ip).ok_or("Unable to resolve ip")?
+            );
+        }
 
         Ok(())
     }

@@ -79,6 +79,10 @@ impl World {
         self.dns.lookup(host)
     }
 
+    pub(crate) fn reverse_lookup(&self, addr: IpAddr) -> Option<&str> {
+        self.dns.reverse(addr)
+    }
+
     pub(crate) fn lookup_many(&mut self, hosts: impl ToIpAddrs) -> Vec<IpAddr> {
         self.dns.lookup_many(hosts)
     }
