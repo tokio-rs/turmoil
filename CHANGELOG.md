@@ -1,3 +1,18 @@
+# 0.5.7 (October 20, 2023)
+
+### Added
+
+- Add reverse DNS resolution capabilities ([#141])
+
+### Fixed
+
+- Fix duplicate FIN in the drop glue ([#142])
+- Extend loopback workaround ([#140])
+
+[#142]: https://github.com/tokio-rs/turmoil/pull/142
+[#141]: https://github.com/tokio-rs/turmoil/pull/141
+[#140]: https://github.com/tokio-rs/turmoil/pull/140
+
 # 0.5.6 (July 24, 2023)
 
 ### Added
