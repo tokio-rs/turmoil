@@ -37,6 +37,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 [dev-dependencies]
 doc-comment = "0.3.3"
 regex = "1"
+tracing-subscriber = "0.3"
 
 [features]
 default = []

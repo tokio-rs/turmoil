@@ -370,6 +370,11 @@ impl Drop for ReadHalf {
 
 impl Drop for WriteHalf {
     fn drop(&mut self) {
+        // skip if write half is already shutdown
+        if self.is_shutdown {
+            return;
+        }
+
         World::current_if_set(|world| {
             let pair = *self.pair;
 
