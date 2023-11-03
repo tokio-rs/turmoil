@@ -87,6 +87,64 @@ fn ephemeral_port() -> Result {
 }
 
 #[test]
+fn ephemeral_port_does_not_leak_on_server_shutdown() -> Result {
+    let mut sim = Builder::new()
+        .simulation_duration(Duration::from_secs(60))
+        .min_message_latency(Duration::from_millis(1))
+        .max_message_latency(Duration::from_millis(1))
+        .build();
+
+    sim.host("server", || async {
+        let listener = bind().await?;
+        loop {
+            let (stream, _) = listener.accept().await?;
+            let (_, mut write) = stream.into_split();
+            write.shutdown().await?;
+        }
+    });
+
+    sim.client("client", async {
+        for _ in 49152..=(65535 + 1) {
+            let mut stream = TcpStream::connect(("server", PORT)).await?;
+            let _ = stream.read_u8().await;
+        }
+
+        Ok(())
+    });
+
+    sim.run()
+}
+
+#[test]
+fn ephemeral_port_does_not_leak_on_client_shutdown() -> Result {
+    let mut sim = Builder::new()
+        .simulation_duration(Duration::from_secs(60))
+        .min_message_latency(Duration::from_millis(1))
+        .max_message_latency(Duration::from_millis(1))
+        .build();
+
+    sim.host("server", || async {
+        let listener = bind().await?;
+        loop {
+            let (mut stream, _) = listener.accept().await?;
+            let _ = stream.read_u8().await;
+        }
+    });
+
+    sim.client("client", async {
+        for _ in 49152..=(65535 + 1) {
+            let stream = TcpStream::connect(("server", PORT)).await?;
+            let (_, mut write) = stream.into_split();
+            write.shutdown().await?;
+        }
+
+        Ok(())
+    });
+
+    sim.run()
+}
+
+#[test]
 fn client_hangup_on_connect() -> Result {
     let mut sim = Builder::new().build();
 
