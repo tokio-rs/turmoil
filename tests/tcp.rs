@@ -1041,3 +1041,33 @@ fn socket_to_nonexistent_node() -> Result {
     });
     sim.run()
 }
+
+#[test]
+fn high_host_latency() -> Result {
+    let mut sim = Builder::new()
+        .min_message_latency(Duration::from_secs(2))
+        .build();
+
+    sim.client("server", async move {
+        let listener = bind().await?;
+        let (mut s, _) = listener.accept().await?;
+
+        assert!(timeout(Duration::from_secs(1), s.read_u8()).await.is_err());
+
+        s.write_u8(1).await?;
+
+        Ok(())
+    });
+
+    sim.client("client", async move {
+        let mut s = TcpStream::connect(("server", PORT)).await?;
+
+        s.write_u8(1).await?;
+
+        assert!(timeout(Duration::from_secs(1), s.read_u8()).await.is_err());
+
+        Ok(())
+    });
+
+    sim.run()
+}

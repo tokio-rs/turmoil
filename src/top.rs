@@ -268,6 +268,7 @@ impl Topology {
     }
 }
 
+/// Represents a message sent between two hosts on the network.
 struct Sent {
     src: SocketAddr,
     dst: SocketAddr,
