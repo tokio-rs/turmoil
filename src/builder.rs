@@ -69,30 +69,36 @@ impl Builder {
             .as_mut()
             .expect("`Latency` missing")
             .min_message_latency = value;
-        // If the min latency is greater than the max latency, update 
+        // If the min latency is greater than the max latency, update
         // the max latency.
-        if self.link
+        if self
+            .link
             .latency
             .as_mut()
             .expect("`Latency` missing")
-            .max_message_latency < value {
-                self.link
-                    .latency
-                    .as_mut()
-                    .expect("`Latency` missing")
-                    .max_message_latency = value.clone()
-            }
+            .max_message_latency
+            < value
+        {
+            self.link
+                .latency
+                .as_mut()
+                .expect("`Latency` missing")
+                .max_message_latency = value
+        }
         self
     }
 
     pub fn max_message_latency(&mut self, value: Duration) -> &mut Self {
-        if self.link
+        if self
+            .link
             .latency
             .as_mut()
             .expect("`Latency` missing")
-            .min_message_latency > value {
-                panic!("Max message latency must be greater than minimum.")
-            };
+            .min_message_latency
+            > value
+        {
+            panic!("Max message latency must be greater than minimum.")
+        };
         self.link
             .latency
             .as_mut()
