@@ -149,6 +149,7 @@ struct Link {
     now: Instant,
 }
 
+/// States that a link between two nodes can be in.
 enum State {
     /// The link is healthy.
     Healthy,
@@ -268,6 +269,7 @@ impl Topology {
     }
 }
 
+/// Represents a message sent between two hosts on the network.
 struct Sent {
     src: SocketAddr,
     dst: SocketAddr,

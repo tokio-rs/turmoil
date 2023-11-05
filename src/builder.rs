@@ -64,20 +64,12 @@ impl Builder {
     }
 
     pub fn min_message_latency(&mut self, value: Duration) -> &mut Self {
-        self.link
-            .latency
-            .as_mut()
-            .expect("`Latency` missing")
-            .min_message_latency = value;
+        self.link.latency_mut().min_message_latency = value;
         self
     }
 
     pub fn max_message_latency(&mut self, value: Duration) -> &mut Self {
-        self.link
-            .latency
-            .as_mut()
-            .expect("`MessageLoss` missing")
-            .max_message_latency = value;
+        self.link.latency_mut().max_message_latency = value;
         self
     }
 
@@ -106,7 +98,27 @@ impl Builder {
     }
 
     pub fn build_with_rng<'a>(&self, rng: Box<dyn RngCore>) -> Sim<'a> {
+        if self.link.latency().max_message_latency < self.link.latency().min_message_latency {
+            panic!("Maximum message latency must be greater than minimum.");
+        }
+
         let world = World::new(self.link.clone(), rng, self.ip_version.iter());
         Sim::new(self.config.clone(), world)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use crate::Builder;
+
+    #[test]
+    #[should_panic]
+    fn invalid_latency() {
+        let _sim = Builder::new()
+            .min_message_latency(Duration::from_millis(100))
+            .max_message_latency(Duration::from_millis(50))
+            .build();
     }
 }
