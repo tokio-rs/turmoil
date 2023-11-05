@@ -370,18 +370,14 @@ impl Drop for ReadHalf {
 
 impl Drop for WriteHalf {
     fn drop(&mut self) {
-        // skip if write half is already shutdown
-        if self.is_shutdown {
-            return;
-        }
-
         World::current_if_set(|world| {
-            let pair = *self.pair;
-
-            if let Some(seq) = world.current_host_mut().tcp.assign_send_seq(pair) {
-                let _ = self.send(world, Segment::Fin(seq));
-                world.current_host_mut().tcp.close_stream_half(pair);
+            // skip sending Fin if the write half is already shutdown
+            if !self.is_shutdown {
+                if let Ok(seq) = self.seq(world) {
+                    let _ = self.send(world, Segment::Fin(seq));
+                }
             }
+            world.current_host_mut().tcp.close_stream_half(*self.pair);
         })
     }
 }
