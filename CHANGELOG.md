@@ -1,3 +1,13 @@
+# 0.5.8 (November 6, 2023)
+
+### Fixed
+
+- Fix subtraction overflow bug with latency ([#147]) 
+- Fix ephemeral port leak upon tcp stream shutdown ([#145]) 
+
+[#147]: https://github.com/tokio-rs/turmoil/pull/147
+[#145]: https://github.com/tokio-rs/turmoil/pull/145
+
 # 0.5.7 (October 20, 2023)
 
 ### Added
