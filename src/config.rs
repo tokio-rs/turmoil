@@ -3,7 +3,7 @@ use std::time::{Duration, SystemTime};
 
 #[derive(Clone)]
 pub(crate) struct Config {
-    /// How long the test should run for
+    /// How long the test should run for in simulated time.
     pub(crate) duration: Duration,
 
     /// How much simulated time should elapse each tick

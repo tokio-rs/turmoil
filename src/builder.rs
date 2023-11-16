@@ -5,8 +5,6 @@ use std::time::{Duration, SystemTime};
 
 /// Configure the simulation
 pub struct Builder {
-    rng: Option<Box<dyn RngCore>>,
-
     config: Config,
 
     ip_version: IpVersion,
@@ -23,7 +21,6 @@ impl Default for Builder {
 impl Builder {
     pub fn new() -> Self {
         Self {
-            rng: None,
             config: Config::default(),
             ip_version: IpVersion::default(),
             link: config::Link {
@@ -57,12 +54,6 @@ impl Builder {
         self
     }
 
-    /// Set the random number generator used to fuzz
-    pub fn rng(&mut self, rng: impl RngCore + 'static) -> &mut Self {
-        self.rng = Some(Box::new(rng));
-        self
-    }
-
     pub fn min_message_latency(&mut self, value: Duration) -> &mut Self {
         self.link.latency_mut().min_message_latency = value;
         self
@@ -93,11 +84,15 @@ impl Builder {
         self
     }
 
+    /// Build with default rng.
     pub fn build<'a>(&self) -> Sim<'a> {
         self.build_with_rng(Box::new(rand::rngs::SmallRng::from_entropy()))
     }
 
-    pub fn build_with_rng<'a>(&self, rng: Box<dyn RngCore>) -> Sim<'a> {
+    /// Build a sim with a provided `rng`.
+    ///
+    /// This allows setting the random number generator used to fuzz
+    fn build_with_rng<'a>(&self, rng: Box<dyn RngCore>) -> Sim<'a> {
         if self.link.latency().max_message_latency < self.link.latency().min_message_latency {
             panic!("Maximum message latency must be greater than minimum.");
         }
