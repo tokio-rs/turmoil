@@ -179,7 +179,7 @@ impl<'a> Sim<'a> {
             .map(|h| h.to_owned())
     }
 
-    /// Hold messages between two hosts, or sets of hosts, until [`release`] is
+    /// Hold messages between two hosts, or sets of hosts, until [`release`](crate::release) is
     /// called.
     pub fn hold(&self, a: impl ToIpAddrs, b: impl ToIpAddrs) {
         let mut world = self.world.borrow_mut();
@@ -193,7 +193,7 @@ impl<'a> Sim<'a> {
         world.repair_many(a, b);
     }
 
-    /// The opposite of [`hold`]. All held messages are immediately delivered.
+    /// The opposite of [`hold`](crate::hold). All held messages are immediately delivered.
     pub fn release(&self, a: impl ToIpAddrs, b: impl ToIpAddrs) {
         let mut world = self.world.borrow_mut();
         world.release_many(a, b);
