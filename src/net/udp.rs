@@ -144,7 +144,7 @@ impl UdpSocket {
     /// # Cancel safety
     ///
     /// This method is cancel safe. If `send_to` is used as the event in a
-    /// [`tokio::select!`](crate::select) statement and some other branch
+    /// [`tokio::select!`](tokio::select) statement and some other branch
     /// completes first, then it is guaranteed that the message was not sent.
     pub async fn send_to<A: ToSocketAddrs>(&self, buf: &[u8], target: A) -> Result<usize> {
         World::current(|world| {

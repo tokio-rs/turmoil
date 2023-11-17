@@ -1,6 +1,19 @@
 use rand_distr::Exp;
 use std::time::{Duration, SystemTime};
 
+/// Configuration for a simulation.
+///
+/// This configuration allows you to define different aspects of how the
+/// simulation should run, such as the duration, or the tick rate.
+///
+/// ## Default values
+///
+/// The config provides a default of:
+/// - duration: 10 seconds
+/// - tick: 1ms
+/// - epoch: the current system time
+/// - tcp_capacity: 64
+/// - udp_capacity: 64
 #[derive(Clone)]
 pub(crate) struct Config {
     /// How long the test should run for in simulated time.
@@ -30,6 +43,11 @@ pub(crate) struct Link {
 }
 
 /// Configure latency behavior between two hosts.
+///
+/// Provides default values of:
+/// - min_message_latency: 0ms
+/// - max_message_latency: 100ms
+/// - latency_distribution: Exp(5)
 #[derive(Clone)]
 pub(crate) struct Latency {
     /// Minimum latency
@@ -42,7 +60,9 @@ pub(crate) struct Latency {
     pub(crate) latency_distribution: Exp<f64>,
 }
 
-/// Configure how often messages are lost
+/// Configure how often messages are lost.
+///
+/// Provides default values of 0% failure rate, and 100% repair rate.
 #[derive(Clone)]
 pub(crate) struct MessageLoss {
     /// Probability of a link failing
