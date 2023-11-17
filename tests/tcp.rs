@@ -844,12 +844,47 @@ fn bind_addr_in_use() -> Result {
     sim.run()
 }
 
+#[test]
+fn loopback_delivery() -> Result {
+    let mut sim = Builder::new()
+        .tick_duration(Duration::from_millis(100))
+        .build();
+
+    sim.client("host", async {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 1738)).await?;
+
+        tokio::spawn(async move {
+            let (mut acc, _) = listener.accept().await.unwrap();
+
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            _ = acc.write_u128(9).await;
+        });
+
+        let mut s = TcpStream::connect((Ipv4Addr::LOCALHOST, 1738)).await?;
+        assert_eq!(9, s.read_u128().await?);
+
+        Ok(())
+    });
+
+    // syn
+    assert!(!sim.step()?);
+    // write
+    assert!(!sim.step()?);
+    // write delivered
+    assert!(sim.step()?);
+
+    Ok(())
+}
+
 fn run_localhost_test(
     ip_version: IpVersion,
     bind_addr: SocketAddr,
     connect_addr: SocketAddr,
 ) -> Result {
-    let mut sim = Builder::new().ip_version(ip_version).build();
+    let mut sim = Builder::new()
+        .tick_duration(Duration::from_millis(100))
+        .ip_version(ip_version)
+        .build();
     let expected = [0, 1, 7, 3, 8];
     sim.client("client", async move {
         let listener = TcpListener::bind(bind_addr).await?;
