@@ -1,4 +1,4 @@
-# 0.6.0 (November 16, 2023)
+# 0.6.0 (November 17, 2023)
 
 ### Added 
 
