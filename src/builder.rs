@@ -137,7 +137,7 @@ impl Builder {
         self
     }
 
-    /// The repair rate of connections on the network. This is how
+    /// The repair rate of messages on the network. This is how
     /// frequently a link is repaired after breaking.
     pub fn repair_rate(&mut self, value: f64) -> &mut Self {
         self.link.message_loss_mut().repair_rate = value;
