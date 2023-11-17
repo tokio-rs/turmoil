@@ -1,3 +1,24 @@
+# 0.6.0 (November 17, 2023)
+
+### Added 
+
+- Documentation to the sim builder ([#152])
+
+### Fixed
+
+- Avoid trying to spawn on teardown when rt is gone ([#153])
+- Deliver loopback packets in the next step ([#153])
+
+### Breaking
+
+- Remove `rng` from sim builder as it wasn't applied when building.
+    This is technically a bug fix, but will break consumers.
+    Use `build_with_rng` instead ([#150])
+
+[#150]: https://github.com/tokio-rs/turmoil/pull/150
+[#152]: https://github.com/tokio-rs/turmoil/pull/152
+[#153]: https://github.com/tokio-rs/turmoil/pull/153
+
 # 0.5.8 (November 6, 2023)
 
 ### Fixed
