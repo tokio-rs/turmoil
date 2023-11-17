@@ -29,6 +29,8 @@ pub struct Sim<'a> {
 
     /// Simulation elapsed time
     elapsed: Duration,
+
+    steps: usize,
 }
 
 impl<'a> Sim<'a> {
@@ -44,6 +46,7 @@ impl<'a> Sim<'a> {
             rts: IndexMap::new(),
             since_epoch,
             elapsed: Duration::ZERO,
+            steps: 1, // bumped after each step
         }
     }
 
@@ -325,8 +328,9 @@ impl<'a> Sim<'a> {
     ///
     /// Returns whether or not all clients have completed.
     pub fn step(&mut self) -> Result<bool> {
-        let tick = self.config.tick;
+        tracing::debug!("step {}", self.steps);
 
+        let tick = self.config.tick;
         let mut is_finished = true;
 
         // Tick the networking, processing messages. This is done before
@@ -376,11 +380,12 @@ impl<'a> Sim<'a> {
         }
 
         self.elapsed += tick;
+        self.steps += 1;
 
         if self.elapsed > self.config.duration && !is_finished {
             return Err(format!(
-                "Ran for {:?} without completing",
-                self.config.duration
+                "Ran for duration: {:?} steps: {} without completing",
+                self.config.duration, self.steps,
             ))?;
         }
 

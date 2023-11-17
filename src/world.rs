@@ -28,6 +28,10 @@ pub(crate) struct World {
     /// Random number generator used for all decisions. To make execution
     /// determinstic, reuse the same seed.
     pub(crate) rng: Box<dyn RngCore>,
+
+    /// Run duration for each host on every step.
+    // TODO: Remove this once we've cleaned up the loopback implementation hacks
+    pub(crate) tick_duration: Duration,
 }
 
 scoped_thread_local!(static CURRENT: RefCell<World>);
@@ -38,6 +42,7 @@ impl World {
         link: config::Link,
         rng: Box<dyn RngCore>,
         addrs: IpVersionAddrIter,
+        tick_duration: Duration,
     ) -> World {
         World {
             hosts: IndexMap::new(),
@@ -45,6 +50,7 @@ impl World {
             dns: Dns::new(addrs),
             current: None,
             rng,
+            tick_duration,
         }
     }
 

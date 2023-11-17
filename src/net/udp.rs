@@ -14,7 +14,6 @@ use std::{
     cmp,
     io::{self, Error, ErrorKind, Result},
     net::SocketAddr,
-    time::Duration,
 };
 
 /// A simulated UDP socket.
@@ -304,7 +303,12 @@ impl UdpSocket {
 
 fn send_loopback(src: SocketAddr, dst: SocketAddr, message: Protocol) {
     tokio::spawn(async move {
-        sleep(Duration::from_micros(1)).await;
+        // FIXME: Forces delivery on the next step which better aligns with the
+        // remote networking behavior.
+        // https://github.com/tokio-rs/turmoil/issues/132
+        let tick_duration = World::current(|world| world.tick_duration);
+        sleep(tick_duration).await;
+
         World::current(|world| {
             world
                 .current_host_mut()

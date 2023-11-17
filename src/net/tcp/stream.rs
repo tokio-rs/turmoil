@@ -5,12 +5,12 @@ use std::{
     pin::Pin,
     sync::Arc,
     task::{ready, Context, Poll},
-    time::Duration,
 };
 
 use bytes::{Buf, Bytes};
 use tokio::{
     io::{AsyncRead, AsyncWrite, ReadBuf},
+    runtime::Handle,
     sync::{mpsc, oneshot},
     time::sleep,
 };
@@ -281,8 +281,21 @@ impl WriteHalf {
 }
 
 fn send_loopback(src: SocketAddr, dst: SocketAddr, message: Protocol) {
+    // Check for a runtime before spawning as this code is hit in the drop path
+    // as streams attempt to send FINs.
+    // TODO: Investigate drop ordering within the Sim to ensure things are unrolling
+    // as expected.
+    if Handle::try_current().is_err() {
+        return;
+    }
+
     tokio::spawn(async move {
-        sleep(Duration::from_micros(1)).await;
+        // FIXME: Forces delivery on the next step which better aligns with the
+        // remote networking behavior.
+        // https://github.com/tokio-rs/turmoil/issues/132
+        let tick_duration = World::current(|world| world.tick_duration);
+        sleep(tick_duration).await;
+
         World::current(|world| {
             if let Err(rst) =
                 world

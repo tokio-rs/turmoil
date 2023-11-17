@@ -171,7 +171,13 @@ impl Builder {
             panic!("Maximum message latency must be greater than minimum.");
         }
 
-        let world = World::new(self.link.clone(), rng, self.ip_version.iter());
+        let world = World::new(
+            self.link.clone(),
+            rng,
+            self.ip_version.iter(),
+            self.config.tick,
+        );
+
         Sim::new(self.config.clone(), world)
     }
 }

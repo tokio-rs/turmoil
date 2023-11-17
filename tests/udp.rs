@@ -458,6 +458,39 @@ fn bind_addr_in_use() -> Result {
     sim.run()
 }
 
+#[test]
+fn loopback_delivery() -> Result {
+    let mut sim = Builder::new()
+        .tick_duration(Duration::from_millis(100))
+        .build();
+
+    sim.client("host", async {
+        let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+
+            _ = socket
+                .send_to(&[1, 7, 3, 8], SocketAddr::from((Ipv4Addr::LOCALHOST, 1738)))
+                .await;
+        });
+
+        let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 1738)).await?;
+        let mut buf: [u8; 4] = [0; 4];
+        socket.recv_from(&mut buf).await?;
+        assert_eq!([1, 7, 3, 8], buf);
+
+        Ok(())
+    });
+
+    // write
+    assert!(!sim.step()?);
+    // write delivered
+    assert!(sim.step()?);
+
+    Ok(())
+}
+
 fn run_localhost_test(
     ip_version: IpVersion,
     bind_addr: SocketAddr,
@@ -479,7 +512,7 @@ fn run_localhost_test(
             socket.send_to(&expected, peer).await.unwrap();
         });
 
-        let mut buf = [0; 5];
+        let mut buf: [u8; 5] = [0; 5];
         let bind_addr = SocketAddr::new(bind_addr.ip(), 0);
         let socket = UdpSocket::bind(bind_addr).await?;
         socket.send_to(&expected, connect_addr).await?;
