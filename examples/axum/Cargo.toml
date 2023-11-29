@@ -5,11 +5,15 @@ edition = "2021"
 publish = false
 
 [dependencies]
-axum = "0.6"
-hyper = { version = "0.14", features = ["full"] }
-async-stream = "0.3"
+axum = "0.7"
+hyper = { version = "1", features = ["full"] }
+hyper-util = { git = "https://github.com/hyperium/hyper-util.git", features = [
+    "full",
+] }
+http-body-util = "0.1"
 turmoil = { path = "../.." }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 tokio = "1"
 tower = "0.4"
+pin-project-lite = "0.2"
