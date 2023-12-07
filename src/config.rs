@@ -15,31 +15,31 @@ use std::time::{Duration, SystemTime};
 /// - tcp_capacity: 64
 /// - udp_capacity: 64
 #[derive(Clone)]
-pub(crate) struct Config {
+pub struct Config {
     /// How long the test should run for in simulated time.
-    pub(crate) duration: Duration,
+    pub duration: Duration,
 
     /// How much simulated time should elapse each tick
-    pub(crate) tick: Duration,
+    pub tick: Duration,
 
     /// When the simulation starts
-    pub(crate) epoch: SystemTime,
+    pub epoch: SystemTime,
 
     /// Max size of the tcp receive buffer
-    pub(crate) tcp_capacity: usize,
+    pub tcp_capacity: usize,
 
     /// Max size of the udp receive buffer
-    pub(crate) udp_capacity: usize,
+    pub udp_capacity: usize,
 }
 
 /// Configures link behavior.
 #[derive(Clone, Default)]
-pub(crate) struct Link {
+pub struct Link {
     /// Message latency between two hosts
-    pub(crate) latency: Option<Latency>,
+    pub latency: Option<Latency>,
 
     /// How often sending a message works vs. the message getting dropped
-    pub(crate) message_loss: Option<MessageLoss>,
+    pub message_loss: Option<MessageLoss>,
 }
 
 /// Configure latency behavior between two hosts.
@@ -49,27 +49,27 @@ pub(crate) struct Link {
 /// - max_message_latency: 100ms
 /// - latency_distribution: Exp(5)
 #[derive(Clone)]
-pub(crate) struct Latency {
+pub struct Latency {
     /// Minimum latency
-    pub(crate) min_message_latency: Duration,
+    pub min_message_latency: Duration,
 
     /// Maximum latency
-    pub(crate) max_message_latency: Duration,
+    pub max_message_latency: Duration,
 
     /// Probability distribution of latency within the range above.
-    pub(crate) latency_distribution: Exp<f64>,
+    pub latency_distribution: Exp<f64>,
 }
 
 /// Configure how often messages are lost.
 ///
 /// Provides default values of 0% failure rate, and 100% repair rate.
 #[derive(Clone)]
-pub(crate) struct MessageLoss {
+pub struct MessageLoss {
     /// Probability of a link failing
-    pub(crate) fail_rate: f64,
+    pub fail_rate: f64,
 
     /// Probability of a failed link returning
-    pub(crate) repair_rate: f64,
+    pub repair_rate: f64,
 }
 
 impl Default for Config {
@@ -85,19 +85,19 @@ impl Default for Config {
 }
 
 impl Link {
-    pub(crate) fn latency(&self) -> &Latency {
+    pub fn latency(&self) -> &Latency {
         self.latency.as_ref().expect("`Latency` missing")
     }
 
-    pub(crate) fn latency_mut(&mut self) -> &mut Latency {
+    pub fn latency_mut(&mut self) -> &mut Latency {
         self.latency.as_mut().expect("`Latency` missing")
     }
 
-    pub(crate) fn message_loss(&self) -> &MessageLoss {
+    pub fn message_loss(&self) -> &MessageLoss {
         self.message_loss.as_ref().expect("`MessageLoss` missing")
     }
 
-    pub(crate) fn message_loss_mut(&mut self) -> &mut MessageLoss {
+    pub fn message_loss_mut(&mut self) -> &mut MessageLoss {
         self.message_loss.as_mut().expect("`MessageLoss` missing")
     }
 }

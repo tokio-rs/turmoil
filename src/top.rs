@@ -13,7 +13,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 /// Describes the network topology.
-pub(crate) struct Topology {
+pub struct Topology {
     config: config::Link,
 
     /// Specific configuration overrides between specific hosts.
@@ -165,7 +165,7 @@ enum State {
 }
 
 impl Topology {
-    pub(crate) fn new(config: config::Link) -> Topology {
+    pub fn new(config: config::Link) -> Topology {
         Topology {
             config,
             links: IndexMap::new(),
@@ -174,36 +174,36 @@ impl Topology {
     }
 
     /// Register a link between two hosts
-    pub(crate) fn register(&mut self, a: IpAddr, b: IpAddr) {
+    pub fn register(&mut self, a: IpAddr, b: IpAddr) {
         let pair = Pair::new(a, b);
         assert!(self.links.insert(pair, Link::new(self.rt.now())).is_none());
     }
 
-    pub(crate) fn set_max_message_latency(&mut self, value: Duration) {
+    pub fn set_max_message_latency(&mut self, value: Duration) {
         self.config.latency_mut().max_message_latency = value;
     }
 
-    pub(crate) fn set_link_message_latency(&mut self, a: IpAddr, b: IpAddr, value: Duration) {
+    pub fn set_link_message_latency(&mut self, a: IpAddr, b: IpAddr, value: Duration) {
         let latency = self.links[&Pair::new(a, b)].latency(self.config.latency());
         latency.min_message_latency = value;
         latency.max_message_latency = value;
     }
 
-    pub(crate) fn set_link_max_message_latency(&mut self, a: IpAddr, b: IpAddr, value: Duration) {
+    pub fn set_link_max_message_latency(&mut self, a: IpAddr, b: IpAddr, value: Duration) {
         self.links[&Pair::new(a, b)]
             .latency(self.config.latency())
             .max_message_latency = value;
     }
 
-    pub(crate) fn set_message_latency_curve(&mut self, value: f64) {
+    pub fn set_message_latency_curve(&mut self, value: f64) {
         self.config.latency_mut().latency_distribution = Exp::new(value).unwrap();
     }
 
-    pub(crate) fn set_fail_rate(&mut self, value: f64) {
+    pub fn set_fail_rate(&mut self, value: f64) {
         self.config.message_loss_mut().fail_rate = value;
     }
 
-    pub(crate) fn set_link_fail_rate(&mut self, a: IpAddr, b: IpAddr, value: f64) {
+    pub fn set_link_fail_rate(&mut self, a: IpAddr, b: IpAddr, value: f64) {
         self.links[&Pair::new(a, b)]
             .message_loss(self.config.message_loss())
             .fail_rate = value;
@@ -212,7 +212,7 @@ impl Topology {
     // Send a `message` from `src` to `dst`. This method returns immediately,
     // and message delivery happens at a later time (or never, if the link is
     // broken).
-    pub(crate) fn enqueue_message(
+    pub fn enqueue_message(
         &mut self,
         rand: &mut dyn RngCore,
         src: SocketAddr,
@@ -231,7 +231,7 @@ impl Topology {
     }
 
     // Move messages from any network links to the `dst` host.
-    pub(crate) fn deliver_messages(&mut self, rand: &mut dyn RngCore, dst: &mut Host) {
+    pub fn deliver_messages(&mut self, rand: &mut dyn RngCore, dst: &mut Host) {
         for (pair, link) in &mut self.links {
             if pair.0 == dst.addr || pair.1 == dst.addr {
                 link.deliver_messages(&self.config, rand, dst);
@@ -239,30 +239,30 @@ impl Topology {
         }
     }
 
-    pub(crate) fn hold(&mut self, a: IpAddr, b: IpAddr) {
+    pub fn hold(&mut self, a: IpAddr, b: IpAddr) {
         self.links[&Pair::new(a, b)].hold();
     }
 
-    pub(crate) fn release(&mut self, a: IpAddr, b: IpAddr) {
+    pub fn release(&mut self, a: IpAddr, b: IpAddr) {
         self.links[&Pair::new(a, b)].release();
     }
 
-    pub(crate) fn partition(&mut self, a: IpAddr, b: IpAddr) {
+    pub fn partition(&mut self, a: IpAddr, b: IpAddr) {
         self.links[&Pair::new(a, b)].explicit_partition();
     }
 
-    pub(crate) fn repair(&mut self, a: IpAddr, b: IpAddr) {
+    pub fn repair(&mut self, a: IpAddr, b: IpAddr) {
         self.links[&Pair::new(a, b)].explicit_repair();
     }
 
-    pub(crate) fn tick_by(&mut self, duration: Duration) {
+    pub fn tick_by(&mut self, duration: Duration) {
         let _ = self.rt.tick(duration);
         for link in self.links.values_mut() {
             link.tick(self.rt.now());
         }
     }
 
-    pub(crate) fn iter_mut(&mut self) -> LinksIter {
+    pub fn iter_mut(&mut self) -> LinksIter {
         LinksIter {
             iter: self.links.iter_mut(),
         }

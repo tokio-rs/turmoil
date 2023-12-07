@@ -18,15 +18,15 @@ use tokio::time::{Duration, Instant};
 /// Hosts have [`Udp`] and [`Tcp`] software available for networking.
 ///
 /// Both modes may be used simultaneously.
-pub(crate) struct Host {
+pub struct Host {
     /// Host ip address.
-    pub(crate) addr: IpAddr,
+    pub addr: IpAddr,
 
     /// L4 User Datagram Protocol (UDP).
-    pub(crate) udp: Udp,
+    pub udp: Udp,
 
     /// L4 Transmission Control Protocol (TCP).
-    pub(crate) tcp: Tcp,
+    pub tcp: Tcp,
 
     /// Ports 49152..=65535 for client connections.
     /// https://www.rfc-editor.org/rfc/rfc6335#section-6
@@ -40,7 +40,7 @@ pub(crate) struct Host {
 }
 
 impl Host {
-    pub(crate) fn new(addr: IpAddr, tcp_capacity: usize, udp_capacity: usize) -> Host {
+    pub fn new(addr: IpAddr, tcp_capacity: usize, udp_capacity: usize) -> Host {
         Host {
             addr,
             udp: Udp::new(udp_capacity),
@@ -58,17 +58,17 @@ impl Host {
     ///
     /// This is required to track logical time across host restarts as a single
     /// `Instant` resets when the tokio runtime is recreated.
-    pub(crate) fn now(&mut self, now: Instant) {
+    pub fn now(&mut self, now: Instant) {
         self.now.replace(now);
     }
 
     /// Returns how long the host has been executing for in virtual time.
-    pub(crate) fn elapsed(&self) -> Duration {
+    pub fn elapsed(&self) -> Duration {
         let run_duration = self.now.expect("host instant not set").elapsed();
         self.elapsed + run_duration
     }
 
-    pub(crate) fn assign_ephemeral_port(&mut self) -> u16 {
+    pub fn assign_ephemeral_port(&mut self) -> u16 {
         // Check for existing binds to avoid port conflicts
         loop {
             let ret = self.next_ephemeral_port;
@@ -96,7 +96,7 @@ impl Host {
     // FIXME: This funkiness is necessary due to how message sending works. The
     // key problem is that the Host doesn't actually send messages, rather the
     // World is borrowed, and it sends.
-    pub(crate) fn receive_from_network(&mut self, envelope: Envelope) -> Result<(), Protocol> {
+    pub fn receive_from_network(&mut self, envelope: Envelope) -> Result<(), Protocol> {
         let Envelope { src, dst, message } = envelope;
 
         tracing::trace!(target: TRACING_TARGET, ?src, ?dst, protocol = %message, "Delivered");
@@ -110,7 +110,7 @@ impl Host {
         }
     }
 
-    pub(crate) fn tick(&mut self, duration: Duration) {
+    pub fn tick(&mut self, duration: Duration) {
         self.elapsed += duration
     }
 }
@@ -124,7 +124,7 @@ pub fn elapsed() -> Duration {
 }
 
 /// Simulated UDP host software.
-pub(crate) struct Udp {
+pub struct Udp {
     /// Bound udp sockets
     binds: IndexMap<u16, UdpBind>,
 
@@ -149,7 +149,7 @@ impl Udp {
         self.binds.keys().any(|p| *p == port)
     }
 
-    pub(crate) fn bind(&mut self, addr: SocketAddr) -> io::Result<UdpSocket> {
+    pub fn bind(&mut self, addr: SocketAddr) -> io::Result<UdpSocket> {
         let (tx, rx) = mpsc::channel(self.capacity);
         let bind = UdpBind {
             bind_addr: addr,
@@ -188,7 +188,7 @@ impl Udp {
         }
     }
 
-    pub(crate) fn unbind(&mut self, addr: SocketAddr) {
+    pub fn unbind(&mut self, addr: SocketAddr) {
         let exists = self.binds.remove(&addr.port());
 
         assert!(exists.is_some(), "unknown bind {addr}");
@@ -197,7 +197,7 @@ impl Udp {
     }
 }
 
-pub(crate) struct Tcp {
+pub struct Tcp {
     /// Bound server sockets
     binds: IndexMap<u16, ServerSocket>,
 
@@ -235,7 +235,7 @@ struct StreamSocket {
 /// Stripped down version of [`Segment`] for delivery out to the application
 /// layer.
 #[derive(Debug)]
-pub(crate) enum SequencedSegment {
+pub enum SequencedSegment {
     Data(Bytes),
     Fin,
 }
@@ -307,7 +307,7 @@ impl Tcp {
         self.binds.keys().any(|p| *p == port) || self.sockets.keys().any(|a| a.local.port() == port)
     }
 
-    pub(crate) fn bind(&mut self, addr: SocketAddr) -> io::Result<TcpListener> {
+    pub fn bind(&mut self, addr: SocketAddr) -> io::Result<TcpListener> {
         let notify = Arc::new(Notify::new());
         let sock = ServerSocket {
             bind_addr: addr,
@@ -327,7 +327,7 @@ impl Tcp {
         Ok(TcpListener::new(addr, notify))
     }
 
-    pub(crate) fn new_stream(&mut self, pair: SocketPair) -> mpsc::Receiver<SequencedSegment> {
+    pub fn new_stream(&mut self, pair: SocketPair) -> mpsc::Receiver<SequencedSegment> {
         let (sock, rx) = StreamSocket::new(pair.local, self.socket_capacity);
 
         let exists = self.sockets.insert(pair, sock);
@@ -337,13 +337,13 @@ impl Tcp {
         rx
     }
 
-    pub(crate) fn accept(&mut self, addr: SocketAddr) -> Option<(Syn, SocketAddr)> {
+    pub fn accept(&mut self, addr: SocketAddr) -> Option<(Syn, SocketAddr)> {
         self.binds[&addr.port()].deque.pop_front()
     }
 
     // Ideally, we could "write through" the tcp software, but this is necessary
     // due to borrowing the world to access the mut host and for sending.
-    pub(crate) fn assign_send_seq(&mut self, pair: SocketPair) -> Option<u64> {
+    pub fn assign_send_seq(&mut self, pair: SocketPair) -> Option<u64> {
         let sock = self.sockets.get_mut(&pair)?;
         Some(sock.assign_seq())
     }
@@ -387,7 +387,7 @@ impl Tcp {
         Ok(())
     }
 
-    pub(crate) fn close_stream_half(&mut self, pair: SocketPair) {
+    pub fn close_stream_half(&mut self, pair: SocketPair) {
         // Receiving a RST removes the socket, so it's possible that has occured
         // when halfs of the stream drop.
         if let Some(sock) = self.sockets.get_mut(&pair) {
@@ -399,7 +399,7 @@ impl Tcp {
         }
     }
 
-    pub(crate) fn unbind(&mut self, addr: SocketAddr) {
+    pub fn unbind(&mut self, addr: SocketAddr) {
         let exists = self.binds.remove(&addr.port());
 
         assert!(exists.is_some(), "unknown bind {addr}");
@@ -419,7 +419,7 @@ pub fn matches(bind: SocketAddr, dst: SocketAddr) -> bool {
 
 /// Returns true if loopback is supported between two addresses, or
 /// if the IPs are the same (in which case turmoil treats it like loopback)
-pub(crate) fn is_same(src: SocketAddr, dst: SocketAddr) -> bool {
+pub fn is_same(src: SocketAddr, dst: SocketAddr) -> bool {
     dst.ip().is_loopback() || src.ip() == dst.ip()
 }
 
