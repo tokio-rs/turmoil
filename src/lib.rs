@@ -95,7 +95,7 @@
 //! received by the client. Note that there are three steps to each packet
 //! trace in turmoil. We see `Send` when a packet is sent from one address
 //! to another. The packet is then `Delivered` to its destination, and when
-//! the destination listener reads the packet it is `Recv`'d.
+//! the destination reads the packet it is `Recv`'d.
 //!
 //! # Feature flags
 //!
