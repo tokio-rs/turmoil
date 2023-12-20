@@ -75,9 +75,9 @@ impl Host {
         for _ in PORT_RANGE {
             let ret = self.next_ephemeral_port;
 
-            if self.next_ephemeral_port == *PORT_RANGE.start() {
+            if self.next_ephemeral_port == *PORT_RANGE.end() {
                 // re-load
-                self.next_ephemeral_port = *PORT_RANGE.end();
+                self.next_ephemeral_port = *PORT_RANGE.start();
             } else {
                 // advance
                 self.next_ephemeral_port += 1;
