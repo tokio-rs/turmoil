@@ -1134,3 +1134,31 @@ fn socket_to_nonexistent_node() -> Result {
     });
     sim.run()
 }
+
+#[should_panic]
+#[test]
+fn exhaust_ephemeral_ports() {
+    let mut sim = Builder::new()
+        .tick_duration(Duration::from_millis(1))
+        .simulation_duration(Duration::from_secs(60))
+        .build();
+
+    sim.client("localhost", async {
+        let l = TcpListener::bind("127.0.0.1:1738").await?;
+        tokio::spawn(async move {
+            loop {
+                let (mut s, _) = l.accept().await.unwrap();
+                tokio::spawn(async move {
+                    _ = s.read_u8().await;
+                });
+            }
+        });
+
+        let mut socks = vec![];
+        loop {
+            socks.push(TcpStream::connect("127.0.0.1:1738").await?);
+        }
+    });
+
+    _ = sim.run()
+}

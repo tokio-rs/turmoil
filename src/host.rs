@@ -9,9 +9,12 @@ use std::collections::VecDeque;
 use std::fmt::Display;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
+use std::ops::RangeInclusive;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Notify};
 use tokio::time::{Duration, Instant};
+
+const PORT_RANGE: RangeInclusive<u16> = 49152..=65535;
 
 /// A host in the simulated network.
 ///
@@ -28,7 +31,7 @@ pub(crate) struct Host {
     /// L4 Transmission Control Protocol (TCP).
     pub(crate) tcp: Tcp,
 
-    /// Ports 49152..=65535 for client connections.
+    /// Ports [`PORT_RANGE`] for client connections.
     /// https://www.rfc-editor.org/rfc/rfc6335#section-6
     next_ephemeral_port: u16,
 
@@ -69,24 +72,26 @@ impl Host {
     }
 
     pub(crate) fn assign_ephemeral_port(&mut self) -> u16 {
-        // Check for existing binds to avoid port conflicts
-        loop {
+        for _ in PORT_RANGE {
             let ret = self.next_ephemeral_port;
 
-            if self.next_ephemeral_port == 65535 {
+            if self.next_ephemeral_port == *PORT_RANGE.start() {
                 // re-load
-                self.next_ephemeral_port = 49152;
+                self.next_ephemeral_port = *PORT_RANGE.end();
             } else {
                 // advance
                 self.next_ephemeral_port += 1;
             }
 
+            // Check for existing binds and connections to avoid port conflicts
             if self.udp.is_port_assigned(ret) || self.tcp.is_port_assigned(ret) {
                 continue;
             }
 
             return ret;
         }
+
+        panic!("Host ports exhausted")
     }
 
     /// Receive the `envelope` from the network.
