@@ -43,7 +43,8 @@ fn main() {
             println!("about to sleep in a blocking thread");
             tokio::task::spawn_blocking(|| {
                 println!("sleeping");
-                std::thread::sleep(std::time::Duration::from_secs(10));
+                // std::thread::sleep(std::time::Duration::from_secs(10));
+                std::thread::park();
             });
             println!("This shouldn't take 10s to print");
 

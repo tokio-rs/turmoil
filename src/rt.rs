@@ -140,11 +140,14 @@ impl<'a> Rt<'a> {
     // expected to fail the simulation.
     pub(crate) fn tick(&mut self, duration: Duration) -> Result<bool> {
         self.tokio.block_on(async {
+            dbg!();
             self.local
                 .run_until(async {
                     sleep(duration).await;
                 })
-                .await
+                .await;
+
+            dbg!();
         });
 
         // pull for software completion
@@ -200,6 +203,7 @@ impl<'a> Rt<'a> {
     ///
     /// Both the [`Runtime`] and [`LocalSet`] are replaced with new instances.
     fn cancel_tasks(&mut self) {
+        dbg!();
         let (tokio, local) = init();
 
         _ = mem::replace(&mut self.tokio, tokio);
