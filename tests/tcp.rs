@@ -6,6 +6,7 @@ use std::{
     time::Duration,
 };
 
+use bytes::{BufMut, BytesMut};
 use std::future;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -1134,3 +1135,40 @@ fn socket_to_nonexistent_node() -> Result {
     });
     sim.run()
 }
+
+#[test]
+fn unread_data_triggers_rst() -> Result {
+    tracing_subscriber::fmt().init();
+    let mut sim = turmoil::Builder::new().build();
+
+    sim.host("server", || async {
+        let l = TcpListener::bind("0.0.0.0:1234").await?;
+        let (mut s, _) = l.accept().await?;
+
+        s.read_u8().await?;
+        tracing::info!("read 1 byte, dropping socket");
+
+        Ok(())
+    });
+
+    sim.client("client", async {
+        let mut s = TcpStream::connect("server:1234").await?;
+
+        let mut buf = BytesMut::new();
+        buf.put_bytes(b'b', 1024);
+
+        s.write_all(&mut buf).await?;
+
+        let res = s.read_u8().await;
+        tracing::info!(?res);
+        assert!(res.is_err_and(|io| io.kind() == ErrorKind::ConnectionReset));
+
+        Ok(())
+    });
+
+    sim.run()
+}
+
+// rx not empty, no partial read
+// split and shutdown(write), prove rst pre-empts
+// split and drop read with unread data

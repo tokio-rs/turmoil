@@ -1,16 +1,12 @@
-use crate::envelope::{hex, Datagram, Protocol, Segment, Syn};
-use crate::net::{SocketPair, TcpListener, UdpSocket};
+use crate::envelope::{Datagram, Protocol};
+use crate::net::UdpSocket;
 use crate::world::World;
-use crate::{Envelope, TRACING_TARGET};
+use crate::{kernel, Envelope, TRACING_TARGET};
 
-use bytes::Bytes;
 use indexmap::IndexMap;
-use std::collections::VecDeque;
-use std::fmt::Display;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
 
 /// A host in the simulated network.
@@ -26,7 +22,7 @@ pub(crate) struct Host {
     pub(crate) udp: Udp,
 
     /// L4 Transmission Control Protocol (TCP).
-    pub(crate) tcp: Tcp,
+    pub(crate) tcp: kernel::tcp::Tcp,
 
     /// Ports 49152..=65535 for client connections.
     /// https://www.rfc-editor.org/rfc/rfc6335#section-6
@@ -44,7 +40,7 @@ impl Host {
         Host {
             addr,
             udp: Udp::new(udp_capacity),
-            tcp: Tcp::new(tcp_capacity),
+            tcp: kernel::tcp::Tcp::new(),
             next_ephemeral_port: 49152,
             elapsed: Duration::ZERO,
             now: None,
@@ -81,7 +77,8 @@ impl Host {
                 self.next_ephemeral_port += 1;
             }
 
-            if self.udp.is_port_assigned(ret) || self.tcp.is_port_assigned(ret) {
+            if self.udp.is_port_assigned(ret) {
+                //} || self.tcp.is_port_assigned(ret) {
                 continue;
             }
 
@@ -194,217 +191,6 @@ impl Udp {
         assert!(exists.is_some(), "unknown bind {addr}");
 
         tracing::info!(target: TRACING_TARGET, ?addr, protocol = %"UDP", "Unbind");
-    }
-}
-
-pub(crate) struct Tcp {
-    /// Bound server sockets
-    binds: IndexMap<u16, ServerSocket>,
-
-    /// TcpListener channel capacity
-    server_socket_capacity: usize,
-
-    /// Active stream sockets
-    sockets: IndexMap<SocketPair, StreamSocket>,
-
-    /// TcpStream channel capacity
-    socket_capacity: usize,
-}
-
-struct ServerSocket {
-    bind_addr: SocketAddr,
-
-    /// Notify the TcpListener when SYNs are delivered
-    notify: Arc<Notify>,
-
-    /// Pending connections for the TcpListener to accept
-    deque: VecDeque<(Syn, SocketAddr)>,
-}
-
-struct StreamSocket {
-    local_addr: SocketAddr,
-    buf: IndexMap<u64, SequencedSegment>,
-    next_send_seq: u64,
-    recv_seq: u64,
-    sender: mpsc::Sender<SequencedSegment>,
-    /// A simple reference counter for tracking read/write half drops. Once 0, the
-    /// socket may be removed from the host.
-    ref_ct: usize,
-}
-
-/// Stripped down version of [`Segment`] for delivery out to the application
-/// layer.
-#[derive(Debug)]
-pub(crate) enum SequencedSegment {
-    Data(Bytes),
-    Fin,
-}
-
-impl Display for SequencedSegment {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            SequencedSegment::Data(data) => hex("TCP", data, f),
-            SequencedSegment::Fin => write!(f, "TCP FIN"),
-        }
-    }
-}
-
-impl StreamSocket {
-    fn new(local_addr: SocketAddr, capacity: usize) -> (Self, mpsc::Receiver<SequencedSegment>) {
-        let (tx, rx) = mpsc::channel(capacity);
-        let sock = Self {
-            local_addr,
-            buf: IndexMap::new(),
-            next_send_seq: 1,
-            recv_seq: 0,
-            sender: tx,
-            ref_ct: 2,
-        };
-
-        (sock, rx)
-    }
-
-    fn assign_seq(&mut self) -> u64 {
-        let seq = self.next_send_seq;
-        self.next_send_seq += 1;
-        seq
-    }
-
-    // Buffer and re-order received segments by `seq` as the network may deliver
-    // them out of order.
-    fn buffer(&mut self, seq: u64, segment: SequencedSegment) -> Result<(), Protocol> {
-        use mpsc::error::TrySendError::*;
-
-        let exists = self.buf.insert(seq, segment);
-
-        assert!(exists.is_none(), "duplicate segment {seq}");
-
-        while self.buf.contains_key(&(self.recv_seq + 1)) {
-            self.recv_seq += 1;
-
-            let segment = self.buf.remove(&self.recv_seq).unwrap();
-            self.sender.try_send(segment).map_err(|e| match e {
-                Closed(_) => Protocol::Tcp(Segment::Rst),
-                Full(_) => panic!("{} socket buffer full", self.local_addr),
-            })?;
-        }
-
-        Ok(())
-    }
-}
-
-impl Tcp {
-    fn new(capacity: usize) -> Self {
-        Self {
-            binds: IndexMap::new(),
-            sockets: IndexMap::new(),
-            server_socket_capacity: capacity,
-            socket_capacity: capacity,
-        }
-    }
-
-    fn is_port_assigned(&self, port: u16) -> bool {
-        self.binds.keys().any(|p| *p == port) || self.sockets.keys().any(|a| a.local.port() == port)
-    }
-
-    pub(crate) fn bind(&mut self, addr: SocketAddr) -> io::Result<TcpListener> {
-        let notify = Arc::new(Notify::new());
-        let sock = ServerSocket {
-            bind_addr: addr,
-            notify: notify.clone(),
-            deque: VecDeque::new(),
-        };
-
-        match self.binds.entry(addr.port()) {
-            indexmap::map::Entry::Occupied(_) => {
-                return Err(io::Error::new(io::ErrorKind::AddrInUse, addr.to_string()));
-            }
-            indexmap::map::Entry::Vacant(entry) => entry.insert(sock),
-        };
-
-        tracing::info!(target: TRACING_TARGET, ?addr, protocol = %"TCP", "Bind");
-
-        Ok(TcpListener::new(addr, notify))
-    }
-
-    pub(crate) fn new_stream(&mut self, pair: SocketPair) -> mpsc::Receiver<SequencedSegment> {
-        let (sock, rx) = StreamSocket::new(pair.local, self.socket_capacity);
-
-        let exists = self.sockets.insert(pair, sock);
-
-        assert!(exists.is_none(), "{pair:?} is already connected");
-
-        rx
-    }
-
-    pub(crate) fn accept(&mut self, addr: SocketAddr) -> Option<(Syn, SocketAddr)> {
-        self.binds[&addr.port()].deque.pop_front()
-    }
-
-    // Ideally, we could "write through" the tcp software, but this is necessary
-    // due to borrowing the world to access the mut host and for sending.
-    pub(crate) fn assign_send_seq(&mut self, pair: SocketPair) -> Option<u64> {
-        let sock = self.sockets.get_mut(&pair)?;
-        Some(sock.assign_seq())
-    }
-
-    fn receive_from_network(
-        &mut self,
-        src: SocketAddr,
-        dst: SocketAddr,
-        segment: Segment,
-    ) -> Result<(), Protocol> {
-        match segment {
-            Segment::Syn(syn) => {
-                // If bound, queue the syn; else we drop the syn triggering
-                // connection refused on the client.
-                if let Some(b) = self.binds.get_mut(&dst.port()) {
-                    if b.deque.len() == self.server_socket_capacity {
-                        panic!("{} server socket buffer full", dst);
-                    }
-
-                    if matches(b.bind_addr, dst) {
-                        b.deque.push_back((syn, src));
-                        b.notify.notify_one();
-                    }
-                }
-            }
-            Segment::Data(seq, data) => match self.sockets.get_mut(&SocketPair::new(dst, src)) {
-                Some(sock) => sock.buffer(seq, SequencedSegment::Data(data))?,
-                None => return Err(Protocol::Tcp(Segment::Rst)),
-            },
-            Segment::Fin(seq) => match self.sockets.get_mut(&SocketPair::new(dst, src)) {
-                Some(sock) => sock.buffer(seq, SequencedSegment::Fin)?,
-                None => return Err(Protocol::Tcp(Segment::Rst)),
-            },
-            Segment::Rst => {
-                if self.sockets.get(&SocketPair::new(dst, src)).is_some() {
-                    self.sockets.remove(&SocketPair::new(dst, src)).unwrap();
-                }
-            }
-        };
-
-        Ok(())
-    }
-
-    pub(crate) fn close_stream_half(&mut self, pair: SocketPair) {
-        // Receiving a RST removes the socket, so it's possible that has occured
-        // when halfs of the stream drop.
-        if let Some(sock) = self.sockets.get_mut(&pair) {
-            sock.ref_ct -= 1;
-
-            if sock.ref_ct == 0 {
-                self.sockets.remove(&pair).unwrap();
-            }
-        }
-    }
-
-    pub(crate) fn unbind(&mut self, addr: SocketAddr) {
-        let exists = self.binds.remove(&addr.port());
-
-        assert!(exists.is_some(), "unknown bind {addr}");
-
-        tracing::info!(target: TRACING_TARGET, ?addr, protocol = %"TCP", "Unbind");
     }
 }
 

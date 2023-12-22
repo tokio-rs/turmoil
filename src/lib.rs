@@ -140,6 +140,8 @@ use host::Host;
 mod ip;
 pub use ip::IpVersion;
 
+mod kernel;
+
 pub mod net;
 
 mod rt;
