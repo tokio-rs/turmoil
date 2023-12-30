@@ -34,22 +34,22 @@ pub trait ToSocketAddrs: sealed::Sealed {
 }
 
 impl Dns {
-    pub(crate) fn new(addrs: IpVersionAddrIter) -> Dns {
+    pub fn new(addrs: IpVersionAddrIter) -> Dns {
         Dns {
             addrs,
             names: IndexMap::new(),
         }
     }
 
-    pub(crate) fn lookup(&mut self, addr: impl ToIpAddr) -> IpAddr {
+    pub fn lookup(&mut self, addr: impl ToIpAddr) -> IpAddr {
         addr.to_ip_addr(self)
     }
 
-    pub(crate) fn lookup_many(&mut self, addrs: impl ToIpAddrs) -> Vec<IpAddr> {
+    pub fn lookup_many(&mut self, addrs: impl ToIpAddrs) -> Vec<IpAddr> {
         addrs.to_ip_addrs(self)
     }
 
-    pub(crate) fn reverse(&self, addr: IpAddr) -> Option<&str> {
+    pub fn reverse(&self, addr: IpAddr) -> Option<&str> {
         self.names
             .iter()
             .find(|(_, a)| **a == addr)

@@ -32,7 +32,7 @@ enum Kind<'a> {
 /// The tokio runtime is paused (see [`Builder::start_paused`]), which gives us
 /// control over when and how to advance time. In particular, see [`Rt::tick`],
 /// which lets the runtime do a bit more work.
-pub(crate) struct Rt<'a> {
+pub struct Rt<'a> {
     kind: Kind<'a>,
 
     /// Handle to the Tokio runtime driving this simulated host. Each runtime
@@ -43,7 +43,7 @@ pub(crate) struct Rt<'a> {
     local: LocalSet,
 
     /// A user readable name to identify the node.
-    pub(crate) nodename: Arc<str>,
+    pub nodename: Arc<str>,
 
     /// Optional handle to a host's software. When software finishes, the handle is
     /// consumed to check for error, which is propagated up to fail the simulation.
@@ -51,7 +51,7 @@ pub(crate) struct Rt<'a> {
 }
 
 impl<'a> Rt<'a> {
-    pub(crate) fn client<F>(nodename: Arc<str>, client: F) -> Self
+    pub fn client<F>(nodename: Arc<str>, client: F) -> Self
     where
         F: Future<Output = Result> + 'static,
     {
@@ -68,7 +68,7 @@ impl<'a> Rt<'a> {
         }
     }
 
-    pub(crate) fn host<F, Fut>(nodename: Arc<str>, software: F) -> Self
+    pub fn host<F, Fut>(nodename: Arc<str>, software: F) -> Self
     where
         F: Fn() -> Fut + 'a,
         Fut: Future<Output = Result> + 'static,
@@ -87,7 +87,7 @@ impl<'a> Rt<'a> {
         }
     }
 
-    pub(crate) fn no_software() -> Self {
+    pub fn no_software() -> Self {
         let (tokio, local) = init();
 
         Self {
@@ -99,7 +99,7 @@ impl<'a> Rt<'a> {
         }
     }
 
-    pub(crate) fn is_client(&self) -> bool {
+    pub fn is_client(&self) -> bool {
         matches!(self.kind, Kind::Client)
     }
 
@@ -107,11 +107,11 @@ impl<'a> Rt<'a> {
         matches!(self.kind, Kind::Host { .. })
     }
 
-    pub(crate) fn is_software_running(&self) -> bool {
+    pub fn is_software_running(&self) -> bool {
         self.handle.is_some()
     }
 
-    pub(crate) fn now(&self) -> Instant {
+    pub fn now(&self) -> Instant {
         let _guard = self.tokio.enter();
         Instant::now()
     }
@@ -138,7 +138,7 @@ impl<'a> Rt<'a> {
     // Returns whether the software has finished successfully or the error
     // that caused failure. Subsequent calls do not return the error as it is
     // expected to fail the simulation.
-    pub(crate) fn tick(&mut self, duration: Duration) -> Result<bool> {
+    pub fn tick(&mut self, duration: Duration) -> Result<bool> {
         self.tokio.block_on(async {
             self.local
                 .run_until(async {
@@ -166,7 +166,7 @@ impl<'a> Rt<'a> {
         }
     }
 
-    pub(crate) fn crash(&mut self) {
+    pub fn crash(&mut self) {
         if !self.is_host() {
             panic!("can only crash host's software");
         }
@@ -176,7 +176,7 @@ impl<'a> Rt<'a> {
         };
     }
 
-    pub(crate) fn bounce(&mut self) {
+    pub fn bounce(&mut self) {
         if !self.is_host() {
             panic!("can only bounce host's software");
         }

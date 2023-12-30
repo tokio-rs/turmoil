@@ -12,33 +12,33 @@ use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
 /// Tracks all the state for the simulated world.
-pub(crate) struct World {
+pub struct World {
     /// Tracks all individual hosts
-    pub(crate) hosts: IndexMap<IpAddr, Host>,
+    pub hosts: IndexMap<IpAddr, Host>,
 
     /// Tracks how each host is connected to each other.
-    pub(crate) topology: Topology,
+    pub topology: Topology,
 
     /// Maps hostnames to ip addresses.
-    pub(crate) dns: Dns,
+    pub dns: Dns,
 
     /// If set, this is the current host being executed.
-    pub(crate) current: Option<IpAddr>,
+    pub current: Option<IpAddr>,
 
     /// Random number generator used for all decisions. To make execution
     /// determinstic, reuse the same seed.
-    pub(crate) rng: Box<dyn RngCore>,
+    pub rng: Box<dyn RngCore>,
 
     /// Run duration for each host on every step.
     // TODO: Remove this once we've cleaned up the loopback implementation hacks
-    pub(crate) tick_duration: Duration,
+    pub tick_duration: Duration,
 }
 
 scoped_thread_local!(static CURRENT: RefCell<World>);
 
 impl World {
     /// Initialize a new world.
-    pub(crate) fn new(
+    pub fn new(
         link: config::Link,
         rng: Box<dyn RngCore>,
         addrs: IpVersionAddrIter,
@@ -55,7 +55,7 @@ impl World {
     }
 
     /// Run `f` on the world.
-    pub(crate) fn current<R>(f: impl FnOnce(&mut World) -> R) -> R {
+    pub fn current<R>(f: impl FnOnce(&mut World) -> R) -> R {
         CURRENT.with(|current| {
             let mut current = current.borrow_mut();
             f(&mut current)
@@ -66,38 +66,38 @@ impl World {
     ///
     /// Used in drop paths, where the simulation may be shutting
     /// down and we don't need to do anything.
-    pub(crate) fn current_if_set(f: impl FnOnce(&mut World)) {
+    pub fn current_if_set(f: impl FnOnce(&mut World)) {
         if CURRENT.is_set() {
             Self::current(f);
         }
     }
 
-    pub(crate) fn enter<R>(world: &RefCell<World>, f: impl FnOnce() -> R) -> R {
+    pub fn enter<R>(world: &RefCell<World>, f: impl FnOnce() -> R) -> R {
         CURRENT.set(world, f)
     }
 
-    pub(crate) fn current_host_mut(&mut self) -> &mut Host {
+    pub fn current_host_mut(&mut self) -> &mut Host {
         let addr = self.current.expect("current host missing");
         self.hosts.get_mut(&addr).expect("host missing")
     }
 
-    pub(crate) fn lookup(&mut self, host: impl ToIpAddr) -> IpAddr {
+    pub fn lookup(&mut self, host: impl ToIpAddr) -> IpAddr {
         self.dns.lookup(host)
     }
 
-    pub(crate) fn reverse_lookup(&self, addr: IpAddr) -> Option<&str> {
+    pub fn reverse_lookup(&self, addr: IpAddr) -> Option<&str> {
         self.dns.reverse(addr)
     }
 
-    pub(crate) fn lookup_many(&mut self, hosts: impl ToIpAddrs) -> Vec<IpAddr> {
+    pub fn lookup_many(&mut self, hosts: impl ToIpAddrs) -> Vec<IpAddr> {
         self.dns.lookup_many(hosts)
     }
 
-    pub(crate) fn hold(&mut self, a: IpAddr, b: IpAddr) {
+    pub fn hold(&mut self, a: IpAddr, b: IpAddr) {
         self.topology.hold(a, b);
     }
 
-    pub(crate) fn hold_many(&mut self, a: impl ToIpAddrs, b: impl ToIpAddrs) {
+    pub fn hold_many(&mut self, a: impl ToIpAddrs, b: impl ToIpAddrs) {
         let a = self.lookup_many(a);
         let b = self.lookup_many(b);
 
@@ -106,11 +106,11 @@ impl World {
         });
     }
 
-    pub(crate) fn release(&mut self, a: IpAddr, b: IpAddr) {
+    pub fn release(&mut self, a: IpAddr, b: IpAddr) {
         self.topology.release(a, b);
     }
 
-    pub(crate) fn release_many(&mut self, a: impl ToIpAddrs, b: impl ToIpAddrs) {
+    pub fn release_many(&mut self, a: impl ToIpAddrs, b: impl ToIpAddrs) {
         let a = self.lookup_many(a);
         let b = self.lookup_many(b);
 
@@ -119,11 +119,11 @@ impl World {
         });
     }
 
-    pub(crate) fn partition(&mut self, a: IpAddr, b: IpAddr) {
+    pub fn partition(&mut self, a: IpAddr, b: IpAddr) {
         self.topology.partition(a, b);
     }
 
-    pub(crate) fn partition_many(&mut self, a: impl ToIpAddrs, b: impl ToIpAddrs) {
+    pub fn partition_many(&mut self, a: impl ToIpAddrs, b: impl ToIpAddrs) {
         let a = self.lookup_many(a);
         let b = self.lookup_many(b);
 
@@ -132,11 +132,11 @@ impl World {
         });
     }
 
-    pub(crate) fn repair(&mut self, a: IpAddr, b: IpAddr) {
+    pub fn repair(&mut self, a: IpAddr, b: IpAddr) {
         self.topology.repair(a, b);
     }
 
-    pub(crate) fn repair_many(&mut self, a: impl ToIpAddrs, b: impl ToIpAddrs) {
+    pub fn repair_many(&mut self, a: impl ToIpAddrs, b: impl ToIpAddrs) {
         let a = self.lookup_many(a);
         let b = self.lookup_many(b);
 
@@ -146,7 +146,7 @@ impl World {
     }
 
     /// Register a new host with the simulation.
-    pub(crate) fn register(&mut self, addr: IpAddr, nodename: &str, config: &Config) {
+    pub fn register(&mut self, addr: IpAddr, nodename: &str, config: &Config) {
         assert!(
             !self.hosts.contains_key(&addr),
             "already registered host for the given ip address"
@@ -168,7 +168,7 @@ impl World {
 
     /// Send `message` from `src` to `dst`. Delivery is asynchronous and not
     /// guaranteed.
-    pub(crate) fn send_message(
+    pub fn send_message(
         &mut self,
         src: SocketAddr,
         dst: SocketAddr,
@@ -179,7 +179,7 @@ impl World {
     }
 
     /// Tick the host at `addr` by `duration`.
-    pub(crate) fn tick(&mut self, addr: IpAddr, duration: Duration) {
+    pub fn tick(&mut self, addr: IpAddr, duration: Duration) {
         self.hosts
             .get_mut(&addr)
             .expect("missing host")

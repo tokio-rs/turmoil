@@ -20,7 +20,7 @@ impl IpVersion {
 }
 
 #[derive(Debug)]
-pub(crate) enum IpVersionAddrIter {
+pub enum IpVersionAddrIter {
     /// the next ip addr without the network prefix, as u32
     V4(u32),
     /// the next ip addr without the network prefix, as u128
@@ -34,7 +34,7 @@ impl Default for IpVersionAddrIter {
 }
 
 impl IpVersionAddrIter {
-    pub(crate) fn next(&mut self) -> IpAddr {
+    pub fn next(&mut self) -> IpAddr {
         match self {
             Self::V4(next) => {
                 let host = *next;

@@ -4,10 +4,10 @@ use bytes::Bytes;
 use tokio::sync::oneshot;
 
 #[derive(Debug)]
-pub(crate) struct Envelope {
-    pub(crate) src: SocketAddr,
-    pub(crate) dst: SocketAddr,
-    pub(crate) message: Protocol,
+pub struct Envelope {
+    pub src: SocketAddr,
+    pub dst: SocketAddr,
+    pub message: Protocol,
 }
 
 /// Supported network protocols.
@@ -36,7 +36,7 @@ pub enum Segment {
 
 #[derive(Debug)]
 pub struct Syn {
-    pub(crate) ack: oneshot::Sender<()>,
+    pub ack: oneshot::Sender<()>,
 }
 
 impl Display for Protocol {
@@ -65,11 +65,7 @@ impl Display for Segment {
     }
 }
 
-pub(crate) fn hex(
-    protocol: &str,
-    bytes: &Bytes,
-    f: &mut std::fmt::Formatter<'_>,
-) -> std::fmt::Result {
+pub fn hex(protocol: &str, bytes: &Bytes, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     write!(f, "{protocol} [")?;
 
     for (i, &b) in bytes.iter().enumerate() {
