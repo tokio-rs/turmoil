@@ -75,7 +75,7 @@ impl Host {
     }
 
     pub(crate) fn assign_ephemeral_port(&mut self) -> u16 {
-        for _ in self.ephemeral_ports.clone().into_iter() {
+        for _ in self.ephemeral_ports.clone() {
             let ret = self.next_ephemeral_port;
 
             if self.next_ephemeral_port == *self.ephemeral_ports.end() {
