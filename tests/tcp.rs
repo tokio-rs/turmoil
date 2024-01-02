@@ -1140,7 +1140,7 @@ fn socket_to_nonexistent_node() -> Result {
 fn exhaust_ephemeral_ports() {
     let mut sim = Builder::new()
         .tick_duration(Duration::from_millis(1))
-        .simulation_duration(Duration::from_secs(60))
+        .ephemeral_ports(49152..=49162)
         .build();
 
     sim.client("localhost", async {

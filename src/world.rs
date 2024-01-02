@@ -162,7 +162,12 @@ impl World {
         // Initialize host state
         self.hosts.insert(
             addr,
-            Host::new(addr, config.tcp_capacity, config.udp_capacity),
+            Host::new(
+                addr,
+                config.ephemeral_ports.clone(),
+                config.tcp_capacity,
+                config.udp_capacity,
+            ),
         );
     }
 
