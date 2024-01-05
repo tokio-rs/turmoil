@@ -72,7 +72,7 @@ impl World {
     /// down and we don't need to do anything.
     pub(crate) fn current_if_set(f: impl FnOnce(&mut World)) {
         if CURRENT.is_set() {
-            Some(Self::current(f));
+            Self::current(f);
         }
     }
 

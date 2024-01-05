@@ -86,9 +86,10 @@ fn configure_tracing() {
 struct SimElapsedTime;
 impl tracing_subscriber::fmt::time::FormatTime for SimElapsedTime {
     fn format_time(&self, w: &mut tracing_subscriber::fmt::format::Writer<'_>) -> std::fmt::Result {
-        // The debug implementation of Duration gives reasonably formatted
-        // durations (e.g. `610ms`, `2.62s`).
-        write!(w, "{:?}", turmoil::sim_elapsed().unwrap_or_default())
+        // Prints real time and sim elapsed time. Example: 2024-01-10T17:06:57.020452Z [76ms]
+        tracing_subscriber::fmt::time()
+            .format_time(w)
+            .and_then(|()| write!(w, " [{:?}]", turmoil::sim_elapsed().unwrap_or_default()))
     }
 }
 
