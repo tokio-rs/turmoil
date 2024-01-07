@@ -20,11 +20,7 @@ jobs:
       - name: Git Checkout
         uses: actions/checkout@v4
       - name: Rust Toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: stable
-          override: true
+        uses: dtolnay/rust-toolchain@stable
       - name: Cargo Test
         run: cargo test --verbose --features "${{ matrix.features }}"
 
@@ -36,11 +32,7 @@ jobs:
         os: [ubuntu-latest]
     steps:
       - uses: actions/checkout@v4
-      - uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: stable
-          override: true
-          components: clippy
+      - name: Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
       - name: Run cargo clippy
         run: cargo clippy --all-targets -- --deny warnings
