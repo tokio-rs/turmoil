@@ -26,10 +26,7 @@ jobs:
           toolchain: stable
           override: true
       - name: Cargo Test
-        uses: actions-rs/cargo@v1
-        with:
-          command: test
-          args: --verbose --features "${{ matrix.features }}"
+        run: cargo test --verbose --features "${{ matrix.features }}"
 
   clippy:
     name: Run Clippy
@@ -46,7 +43,4 @@ jobs:
           override: true
           components: clippy
       - name: Run cargo clippy
-        uses: actions-rs/cargo@v1
-        with:
-          command: clippy
-          args: --all-targets -- --deny warnings
+        run: cargo clippy --all-targets -- --deny warnings
