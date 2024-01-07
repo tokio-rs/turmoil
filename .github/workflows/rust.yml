@@ -18,7 +18,7 @@ jobs:
         os: [ubuntu-latest]
     steps:
       - name: Git Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       - name: Rust Toolchain
         uses: actions-rs/toolchain@v1
         with:
@@ -38,7 +38,7 @@ jobs:
       matrix :
         os: [ubuntu-latest]
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - uses: actions-rs/toolchain@v1
         with:
           profile: minimal
