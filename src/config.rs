@@ -1,5 +1,8 @@
 use rand_distr::Exp;
-use std::time::{Duration, SystemTime};
+use std::{
+    ops::RangeInclusive,
+    time::{Duration, SystemTime},
+};
 
 /// Configuration for a simulation.
 ///
@@ -12,6 +15,7 @@ use std::time::{Duration, SystemTime};
 /// - duration: 10 seconds
 /// - tick: 1ms
 /// - epoch: the current system time
+/// - ephemeral_ports: 49152..=65535
 /// - tcp_capacity: 64
 /// - udp_capacity: 64
 #[derive(Clone)]
@@ -24,6 +28,8 @@ pub(crate) struct Config {
 
     /// When the simulation starts
     pub(crate) epoch: SystemTime,
+
+    pub(crate) ephemeral_ports: RangeInclusive<u16>,
 
     /// Max size of the tcp receive buffer
     pub(crate) tcp_capacity: usize,
@@ -78,6 +84,7 @@ impl Default for Config {
             duration: Duration::from_secs(10),
             tick: Duration::from_millis(1),
             epoch: SystemTime::now(),
+            ephemeral_ports: 49152..=65535,
             tcp_capacity: 64,
             udp_capacity: 64,
         }

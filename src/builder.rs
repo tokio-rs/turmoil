@@ -1,7 +1,10 @@
 use crate::*;
 
 use rand::{RngCore, SeedableRng};
-use std::time::{Duration, SystemTime};
+use std::{
+    ops::RangeInclusive,
+    time::{Duration, SystemTime},
+};
 
 /// A builder that can be used to configure the simulation.
 ///
@@ -141,6 +144,13 @@ impl Builder {
     /// frequently a link is repaired after breaking.
     pub fn repair_rate(&mut self, value: f64) -> &mut Self {
         self.link.message_loss_mut().repair_rate = value;
+        self
+    }
+
+    /// The Dynamic Ports, also known as the Private or Ephemeral Ports.
+    /// See: <https://www.rfc-editor.org/rfc/rfc6335#section-6>
+    pub fn ephemeral_ports(&mut self, value: RangeInclusive<u16>) -> &mut Self {
+        self.config.ephemeral_ports = value;
         self
     }
 
