@@ -1,3 +1,4 @@
+use crate::host::HostTimer;
 use crate::{for_pairs, Config, LinksIter, Result, Rt, ToIpAddr, ToIpAddrs, World, TRACING_TARGET};
 
 use indexmap::IndexMap;
@@ -83,7 +84,7 @@ impl<'a> Sim<'a> {
             let world = RefCell::get_mut(&mut self.world);
 
             // Register host state with the world
-            world.register(addr, &nodename, &self.config);
+            world.register(addr, &nodename, HostTimer::new(self.elapsed), &self.config);
         }
 
         let rt = World::enter(&self.world, || Rt::client(nodename, client));
@@ -116,7 +117,7 @@ impl<'a> Sim<'a> {
             let world = RefCell::get_mut(&mut self.world);
 
             // Register host state with the world
-            world.register(addr, &nodename, &self.config);
+            world.register(addr, &nodename, HostTimer::new(self.elapsed), &self.config);
         }
 
         let rt = World::enter(&self.world, || Rt::host(nodename, host));
@@ -363,7 +364,7 @@ impl<'a> Sim<'a> {
                 // Set the current host (see method docs)
                 world.current = Some(addr);
 
-                world.current_host_mut().now(rt.now());
+                world.current_host_mut().timer.now(rt.now());
             }
 
             let is_software_finished = World::enter(&self.world, || rt.tick(tick))?;
@@ -415,7 +416,7 @@ mod test {
     use crate::{
         elapsed, hold,
         net::{TcpListener, TcpStream},
-        Builder, Result,
+        sim_elapsed, Builder, Result,
     };
 
     #[test]
@@ -518,6 +519,9 @@ mod test {
         sim.client("c1", async move {
             tokio::time::sleep(duration).await;
             assert_eq!(duration, elapsed());
+            // For hosts/clients started before the first `sim.run()` call, the
+            // `elapsed` and `sim_elapsed` time will be identical.
+            assert_eq!(duration, sim_elapsed().unwrap());
 
             Ok(())
         });
@@ -525,6 +529,7 @@ mod test {
         sim.client("c2", async move {
             tokio::time::sleep(duration).await;
             assert_eq!(duration, elapsed());
+            assert_eq!(duration, sim_elapsed().unwrap());
 
             Ok(())
         });
@@ -537,14 +542,20 @@ mod test {
         let start = sim.elapsed();
         sim.client("c3", async move {
             assert_eq!(Duration::ZERO, elapsed());
+            // Note that sim_elapsed is total simulation time while elapsed is
+            // still zero for this newly created host.
+            assert_eq!(duration + tick, sim_elapsed().unwrap());
+            tokio::time::sleep(duration).await;
+            assert_eq!(duration, elapsed());
+            assert_eq!(duration + tick + duration, sim_elapsed().unwrap());
 
             Ok(())
         });
 
         sim.run()?;
 
-        // one tick to complete
-        assert_eq!(tick, sim.elapsed() - start);
+        // Client "c3" takes one sleep duration plus one tick to complete
+        assert_eq!(duration + tick, sim.elapsed() - start);
 
         Ok(())
     }
