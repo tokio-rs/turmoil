@@ -5,7 +5,7 @@ use std::cell::RefCell;
 use std::future::Future;
 use std::net::IpAddr;
 use std::ops::DerefMut;
-use std::sync::mpsc::TryRecvError;
+use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, mpsc};
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::Relaxed;
@@ -313,17 +313,16 @@ impl<'a> Sim<'a> {
     /// returning early if any host software errors.
     pub fn run(&mut self) -> Result {
         let steps = self.steps.clone();
-        let (tx, rx) = mpsc::channel();
+        let (_tx, rx) = mpsc::channel::<()>();
         std::thread::spawn(move || {
             let mut blocked = false;
             loop {
                 let prev = steps.load(std::sync::atomic::Ordering::Relaxed);
                 // Exit if main thread has.
-                match rx.try_recv() {
-                    Ok(_) | Err(TryRecvError::Disconnected) => break,
+                match rx.recv_timeout(Duration::from_secs(10)) {
+                    Ok(_) | Err(RecvTimeoutError::Disconnected) => break,
                     _ => {}
                 }
-                std::thread::sleep(Duration::from_secs(10));
                 if steps.load(std::sync::atomic::Ordering::Relaxed) == prev {
                     if !blocked {
                         tracing::warn!("A task is blocking preventing simulation steps at step {}.", prev);
@@ -338,7 +337,6 @@ impl<'a> Sim<'a> {
             let is_finished = self.step()?;
 
             if is_finished {
-                let _ = tx.send(());
                 return Ok(());
             }
         }
