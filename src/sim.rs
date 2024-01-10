@@ -328,7 +328,7 @@ impl<'a> Sim<'a> {
     ///
     /// Returns whether or not all clients have completed.
     pub fn step(&mut self) -> Result<bool> {
-        tracing::debug!("step {}", self.steps);
+        tracing::trace!("step {}", self.steps);
 
         let tick = self.config.tick;
         let mut is_finished = true;
