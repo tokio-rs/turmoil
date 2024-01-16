@@ -1,3 +1,17 @@
+# 0.6.1 (January 10, 2024)
+
+### Added
+
+- Documentation on using tracing with Turmoil ([#155] [#164])
+- Add a check for port exhaustion ([#157])
+- Add `turmoil::sim_elapsed`` for retrieving total simulation virtual time ([#164])
+- Update Axum example to use axum 0.7 and hyper 1 ([#154])
+
+[#154]: https://github.com/tokio-rs/turmoil/pull/154
+[#155]: https://github.com/tokio-rs/turmoil/pull/155
+[#157]: https://github.com/tokio-rs/turmoil/pull/157
+[#164]: https://github.com/tokio-rs/turmoil/pull/164
+
 # 0.6.0 (November 17, 2023)
 
 ### Added 
