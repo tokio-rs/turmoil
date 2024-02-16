@@ -414,7 +414,7 @@ mod test {
     };
 
     use crate::{
-        elapsed, hold,
+        elapsed, hold, World,
         net::{TcpListener, TcpStream},
         sim_elapsed, Builder, Result,
     };
@@ -556,6 +556,21 @@ mod test {
 
         // Client "c3" takes one sleep duration plus one tick to complete
         assert_eq!(duration + tick, sim.elapsed() - start);
+
+        Ok(())
+    }
+
+    /// This is a regression test to ensure it is safe to call sim_elapsed
+    /// if current world of host is not set. 
+    #[test]
+    fn sim_elapsed_time() -> Result {
+        // Safe to call outside of simution while there 
+        // is no current world set
+        assert!(sim_elapsed().is_none());
+
+        let sim = Builder::new().build();
+        // Safe to call while there is no current host set
+        World::enter(&sim.world, ||  assert!(sim_elapsed().is_none()));
 
         Ok(())
     }
