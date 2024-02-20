@@ -101,6 +101,11 @@ impl World {
         self.hosts.get(&addr).expect("host missing")
     }
 
+    pub(crate) fn try_current_host(&self) -> TurmoilResult<&Host> {
+        let addr = self.current.ok_or("current host missing")?;
+        self.hosts.get(&addr).ok_or_else(|| "host missing".into())
+    }
+
     pub(crate) fn lookup(&mut self, host: impl ToIpAddr) -> IpAddr {
         self.dns.lookup(host)
     }

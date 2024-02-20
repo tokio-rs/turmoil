@@ -182,11 +182,17 @@ pub fn elapsed() -> Duration {
 
 /// Returns how long the simulation has been executing for in virtual time.
 ///
-/// Must be called from within a Turmoil simulation. Will return None if the
-/// duration is not available, typically because there is no currently executing
-/// host.
+/// Will return None if the duration is not available, typically because
+/// there is no currently executing host or world.
 pub fn sim_elapsed() -> Option<Duration> {
-    World::try_current(|world| world.current_host().timer.sim_elapsed()).ok()
+    World::try_current(|world| {
+        world
+            .try_current_host()
+            .map(|host| host.timer.sim_elapsed())
+            .ok()
+    })
+    .ok()
+    .flatten()
 }
 
 /// Lookup an IP address by host name.
