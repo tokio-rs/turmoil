@@ -414,9 +414,9 @@ mod test {
     };
 
     use crate::{
-        elapsed, hold, World,
+        elapsed, hold,
         net::{TcpListener, TcpStream},
-        sim_elapsed, Builder, Result,
+        sim_elapsed, Builder, Result, World,
     };
 
     #[test]
@@ -561,16 +561,16 @@ mod test {
     }
 
     /// This is a regression test to ensure it is safe to call sim_elapsed
-    /// if current world of host is not set. 
+    /// if current world of host is not set.
     #[test]
     fn sim_elapsed_time() -> Result {
-        // Safe to call outside of simution while there 
+        // Safe to call outside of simution while there
         // is no current world set
         assert!(sim_elapsed().is_none());
 
         let sim = Builder::new().build();
         // Safe to call while there is no current host set
-        World::enter(&sim.world, ||  assert!(sim_elapsed().is_none()));
+        World::enter(&sim.world, || assert!(sim_elapsed().is_none()));
 
         Ok(())
     }
