@@ -213,7 +213,12 @@ fn init() -> (Runtime, LocalSet) {
     #[cfg(tokio_unstable)]
     builder.unhandled_panic(tokio::runtime::UnhandledPanic::ShutdownRuntime);
 
-    let tokio = builder.enable_time().start_paused(true).build().unwrap();
+    let tokio = builder
+        .enable_time()
+        .enable_io()
+        .start_paused(true)
+        .build()
+        .unwrap();
 
     tokio.block_on(async {
         // Sleep to "round" `Instant::now()` to the closest `ms`
