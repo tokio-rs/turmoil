@@ -87,7 +87,7 @@ impl<'a> Sim<'a> {
             world.register(addr, &nodename, HostTimer::new(self.elapsed), &self.config);
         }
 
-        let rt = World::enter(&self.world, || Rt::client(nodename, client));
+        let rt = World::enter(&self.world, || Rt::client(nodename, client, self.config.clone()));
 
         self.rts.insert(addr, rt);
     }
@@ -120,7 +120,7 @@ impl<'a> Sim<'a> {
             world.register(addr, &nodename, HostTimer::new(self.elapsed), &self.config);
         }
 
-        let rt = World::enter(&self.world, || Rt::host(nodename, host));
+        let rt = World::enter(&self.world, || Rt::host(nodename, host, self.config.clone()));
 
         self.rts.insert(addr, rt);
     }
