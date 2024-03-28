@@ -1,7 +1,10 @@
 use crate::*;
 
 use rand::{RngCore, SeedableRng};
-use std::{ops::RangeInclusive, time::SystemTime};
+use std::{
+    ops::RangeInclusive,
+    time::{Duration, SystemTime},
+};
 
 /// A builder that can be used to configure the simulation.
 ///
