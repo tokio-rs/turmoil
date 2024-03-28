@@ -1,10 +1,8 @@
-use crate::*;
+use std::{ops::RangeInclusive, time::SystemTime};
 
 use rand::{RngCore, SeedableRng};
-use std::{
-    ops::RangeInclusive,
-    time::{Duration, SystemTime},
-};
+
+use crate::*;
 
 /// A builder that can be used to configure the simulation.
 ///
@@ -163,6 +161,16 @@ impl Builder {
     /// Capacity of host's UDP buffer in the sim.
     pub fn udp_capacity(&mut self, value: usize) -> &mut Self {
         self.config.udp_capacity = value;
+        self
+    }
+
+    pub fn enable_tokio_io(&mut self) -> &mut Self {
+        self.config.enable_tokio_io = true;
+        self
+    }
+
+    pub fn disable_tokio_io(&mut self) -> &mut Self {
+        self.config.enable_tokio_io = false;
         self
     }
 
