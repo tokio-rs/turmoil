@@ -169,11 +169,6 @@ impl Builder {
         self
     }
 
-    pub fn disable_tokio_io(&mut self) -> &mut Self {
-        self.config.enable_tokio_io = false;
-        self
-    }
-
     /// Build a simulation with the settings from the builder.
     ///
     /// This will use default rng with entropy from the device running.
