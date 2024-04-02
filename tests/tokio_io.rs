@@ -25,7 +25,7 @@ fn test_tokio_with_io_enabled() -> turmoil::Result {
 #[test]
 fn test_tokio_with_io_disabled() -> () {
     let mut sim = Builder::new().build();
-    // client, which would panic (if not catched) since tokio is not
+    // client panics (panic is caught) since tokio IO is not enabled
     sim.client("client", async move {
         let path = "/tmp/test_socket2";
         let result = std::panic::catch_unwind(|| {
