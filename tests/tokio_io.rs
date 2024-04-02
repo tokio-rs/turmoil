@@ -4,6 +4,7 @@ use tokio_test::assert_err;
 
 use turmoil::Builder;
 
+/// test assumes IO operation (binding unix domain socket) will succeed
 #[test]
 fn test_tokio_with_io_enabled() -> turmoil::Result {
     let mut sim = Builder::new().enable_tokio_io().build();
@@ -19,10 +20,12 @@ fn test_tokio_with_io_enabled() -> turmoil::Result {
 
     sim.run()
 }
+
+/// test assumes IO operation (binding unix domain socket) will fail
 #[test]
 fn test_tokio_with_io_disabled() -> () {
     let mut sim = Builder::new().build();
-    // client, which would panics (if not catched) since tokio is not
+    // client, which would panic (if not catched) since tokio is not
     sim.client("client", async move {
         let path = "/tmp/test_socket2";
         let result = std::panic::catch_unwind(|| {
