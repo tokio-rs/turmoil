@@ -1,15 +1,16 @@
-use crate::host::HostTimer;
-use crate::{for_pairs, Config, LinksIter, Result, Rt, ToIpAddr, ToIpAddrs, World, TRACING_TARGET};
-
-use indexmap::IndexMap;
 use std::cell::RefCell;
 use std::future::Future;
 use std::net::IpAddr;
 use std::ops::DerefMut;
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
+
+use indexmap::IndexMap;
 use tokio::time::Duration;
 use tracing::Level;
+
+use crate::{Config, for_pairs, LinksIter, Result, Rt, ToIpAddr, ToIpAddrs, TRACING_TARGET, World};
+use crate::host::HostTimer;
 
 /// A handle for interacting with the simulation.
 pub struct Sim<'a> {
@@ -88,7 +89,7 @@ impl<'a> Sim<'a> {
         }
 
         let rt = World::enter(&self.world, || {
-            Rt::client(nodename, client, self.config.clone())
+            Rt::client(nodename, client, self.config.enable_tokio_io)
         });
 
         self.rts.insert(addr, rt);
@@ -123,7 +124,7 @@ impl<'a> Sim<'a> {
         }
 
         let rt = World::enter(&self.world, || {
-            Rt::host(nodename, host, self.config.clone())
+            Rt::host(nodename, host, self.config.enable_tokio_io)
         });
 
         self.rts.insert(addr, rt);
@@ -404,13 +405,13 @@ mod test {
         net::{IpAddr, Ipv4Addr},
         rc::Rc,
         sync::{
-            atomic::{AtomicU64, Ordering},
             Arc,
+            atomic::{AtomicU64, Ordering},
         },
         time::Duration,
     };
-
     use std::future;
+
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         sync::Semaphore,
@@ -418,9 +419,9 @@ mod test {
     };
 
     use crate::{
-        elapsed, hold,
-        net::{TcpListener, TcpStream},
-        sim_elapsed, Builder, Result, World,
+        Builder, elapsed,
+        hold,
+        net::{TcpListener, TcpStream}, Result, sim_elapsed, World,
     };
 
     #[test]

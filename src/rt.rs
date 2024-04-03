@@ -6,9 +6,7 @@ use futures::Future;
 use tokio::runtime::Runtime;
 use tokio::task::JoinHandle;
 use tokio::task::LocalSet;
-use tokio::time::{sleep, Duration, Instant};
-
-use crate::config::Config;
+use tokio::time::{Duration, Instant, sleep};
 
 use super::Result;
 
@@ -53,15 +51,15 @@ pub(crate) struct Rt<'a> {
     handle: Option<JoinHandle<Result>>,
 
     /// Configuration of simulation
-    sim_cfg: Config,
+    enable_io: bool,
 }
 
 impl<'a> Rt<'a> {
-    pub(crate) fn client<F>(nodename: Arc<str>, client: F, sim_cfg: Config) -> Self
+    pub(crate) fn client<F>(nodename: Arc<str>, client: F, enable_io: bool) -> Self
     where
         F: Future<Output = Result> + 'static,
     {
-        let (tokio, local) = init(&sim_cfg);
+        let (tokio, local) = init(enable_io);
 
         let handle = with(&tokio, &local, || tokio::task::spawn_local(client));
 
@@ -71,16 +69,16 @@ impl<'a> Rt<'a> {
             local,
             nodename,
             handle: Some(handle),
-            sim_cfg,
+            enable_io,
         }
     }
 
-    pub(crate) fn host<F, Fut>(nodename: Arc<str>, software: F, sim_cfg: Config) -> Self
+    pub(crate) fn host<F, Fut>(nodename: Arc<str>, software: F, enable_io: bool) -> Self
     where
         F: Fn() -> Fut + 'a,
         Fut: Future<Output = Result> + 'static,
     {
-        let (tokio, local) = init(&sim_cfg);
+        let (tokio, local) = init(enable_io);
 
         let software: Software = Box::new(move || Box::pin(software()));
         let handle = with(&tokio, &local, || tokio::task::spawn_local(software()));
@@ -91,13 +89,12 @@ impl<'a> Rt<'a> {
             local,
             nodename,
             handle: Some(handle),
-            sim_cfg,
+            enable_io,
         }
     }
 
     pub(crate) fn no_software() -> Self {
-        let sim_cfg = Config::default();
-        let (tokio, local) = init(&sim_cfg);
+        let (tokio, local) = init(false);
 
         Self {
             kind: Kind::NoSoftware,
@@ -105,7 +102,7 @@ impl<'a> Rt<'a> {
             local,
             nodename: String::new().into(),
             handle: None,
-            sim_cfg,
+            enable_io: false,
         }
     }
 
@@ -210,20 +207,20 @@ impl<'a> Rt<'a> {
     ///
     /// Both the [`Runtime`] and [`LocalSet`] are replaced with new instances.
     fn cancel_tasks(&mut self) {
-        let (tokio, local) = init(&self.sim_cfg);
+        let (tokio, local) = init(self.enable_io);
 
         _ = mem::replace(&mut self.tokio, tokio);
         drop(mem::replace(&mut self.local, local));
     }
 }
 
-fn init(sim_cfg: &Config) -> (Runtime, LocalSet) {
+fn init(enable_io: bool) -> (Runtime, LocalSet) {
     let mut tokio_builder = tokio::runtime::Builder::new_current_thread();
 
     #[cfg(tokio_unstable)]
     tokio_builder.unhandled_panic(tokio::runtime::UnhandledPanic::ShutdownRuntime);
 
-    if sim_cfg.enable_tokio_io {
+    if enable_io {
         tokio_builder.enable_io();
     }
 
