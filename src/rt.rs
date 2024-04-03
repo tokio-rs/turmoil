@@ -50,7 +50,7 @@ pub(crate) struct Rt<'a> {
     /// consumed to check for error, which is propagated up to fail the simulation.
     handle: Option<JoinHandle<Result>>,
 
-    /// Configuration of simulation
+    /// Whether io is enabled on this runtime.
     enable_io: bool,
 }
 
