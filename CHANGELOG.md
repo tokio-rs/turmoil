@@ -1,3 +1,16 @@
+# 0.6.2 (April 3, 2024)
+
+### Added
+
+- Enable tokio io driver ([#171])
+
+### Fixed
+
+- Make sim_elapsed function safe to call outside of simulation ([#170])
+
+[#170]: https://github.com/tokio-rs/turmoil/pull/170
+[#171]: https://github.com/tokio-rs/turmoil/pull/171 
+
 # 0.6.1 (January 10, 2024)
 
 ### Added
