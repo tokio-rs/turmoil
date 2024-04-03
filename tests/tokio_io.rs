@@ -14,7 +14,7 @@ fn test_tokio_with_io_enabled() -> turmoil::Result {
         // bind unix domain socket -> needs tokio io
         let _ = UnixListener::bind(path).unwrap();
         // remove socket file
-        let _ = remove_file(path).await?;
+        remove_file(path).await?;
         Ok(())
     });
 
@@ -23,7 +23,7 @@ fn test_tokio_with_io_enabled() -> turmoil::Result {
 
 /// test assumes IO operation (binding unix domain socket) will fail
 #[test]
-fn test_tokio_with_io_disabled() -> () {
+fn test_tokio_with_io_disabled() -> turmoil::Result {
     let mut sim = Builder::new().build();
     // client panics (panic is caught) since tokio IO is not enabled
     sim.client("client", async move {
@@ -38,5 +38,5 @@ fn test_tokio_with_io_disabled() -> () {
         Ok(())
     });
 
-    let _ = sim.run();
+    sim.run()
 }
