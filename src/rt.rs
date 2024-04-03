@@ -1,13 +1,14 @@
 use std::mem;
+use std::pin::Pin;
 use std::sync::Arc;
 
-use super::Result;
 use futures::Future;
-use std::pin::Pin;
 use tokio::runtime::Runtime;
 use tokio::task::JoinHandle;
 use tokio::task::LocalSet;
-use tokio::time::{sleep, Duration, Instant};
+use tokio::time::{Duration, Instant, sleep};
+
+use super::Result;
 
 // To support re-creation, we need to store a factory of the future that
 // represents the software. This is somewhat annoying in that it requires
@@ -48,14 +49,17 @@ pub(crate) struct Rt<'a> {
     /// Optional handle to a host's software. When software finishes, the handle is
     /// consumed to check for error, which is propagated up to fail the simulation.
     handle: Option<JoinHandle<Result>>,
+
+    /// Whether io is enabled on this runtime.
+    enable_io: bool,
 }
 
 impl<'a> Rt<'a> {
-    pub(crate) fn client<F>(nodename: Arc<str>, client: F) -> Self
+    pub(crate) fn client<F>(nodename: Arc<str>, client: F, enable_io: bool) -> Self
     where
         F: Future<Output = Result> + 'static,
     {
-        let (tokio, local) = init();
+        let (tokio, local) = init(enable_io);
 
         let handle = with(&tokio, &local, || tokio::task::spawn_local(client));
 
@@ -65,15 +69,16 @@ impl<'a> Rt<'a> {
             local,
             nodename,
             handle: Some(handle),
+            enable_io,
         }
     }
 
-    pub(crate) fn host<F, Fut>(nodename: Arc<str>, software: F) -> Self
+    pub(crate) fn host<F, Fut>(nodename: Arc<str>, software: F, enable_io: bool) -> Self
     where
         F: Fn() -> Fut + 'a,
         Fut: Future<Output = Result> + 'static,
     {
-        let (tokio, local) = init();
+        let (tokio, local) = init(enable_io);
 
         let software: Software = Box::new(move || Box::pin(software()));
         let handle = with(&tokio, &local, || tokio::task::spawn_local(software()));
@@ -84,11 +89,12 @@ impl<'a> Rt<'a> {
             local,
             nodename,
             handle: Some(handle),
+            enable_io,
         }
     }
 
     pub(crate) fn no_software() -> Self {
-        let (tokio, local) = init();
+        let (tokio, local) = init(false);
 
         Self {
             kind: Kind::NoSoftware,
@@ -96,6 +102,7 @@ impl<'a> Rt<'a> {
             local,
             nodename: String::new().into(),
             handle: None,
+            enable_io: false,
         }
     }
 
@@ -200,20 +207,28 @@ impl<'a> Rt<'a> {
     ///
     /// Both the [`Runtime`] and [`LocalSet`] are replaced with new instances.
     fn cancel_tasks(&mut self) {
-        let (tokio, local) = init();
+        let (tokio, local) = init(self.enable_io);
 
         _ = mem::replace(&mut self.tokio, tokio);
         drop(mem::replace(&mut self.local, local));
     }
 }
 
-fn init() -> (Runtime, LocalSet) {
-    let mut builder = tokio::runtime::Builder::new_current_thread();
+fn init(enable_io: bool) -> (Runtime, LocalSet) {
+    let mut tokio_builder = tokio::runtime::Builder::new_current_thread();
 
     #[cfg(tokio_unstable)]
-    builder.unhandled_panic(tokio::runtime::UnhandledPanic::ShutdownRuntime);
+    tokio_builder.unhandled_panic(tokio::runtime::UnhandledPanic::ShutdownRuntime);
 
-    let tokio = builder.enable_time().start_paused(true).build().unwrap();
+    if enable_io {
+        tokio_builder.enable_io();
+    }
+
+    let tokio = tokio_builder
+        .enable_time()
+        .start_paused(true)
+        .build()
+        .unwrap();
 
     tokio.block_on(async {
         // Sleep to "round" `Instant::now()` to the closest `ms`

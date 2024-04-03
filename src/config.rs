@@ -36,6 +36,9 @@ pub(crate) struct Config {
 
     /// Max size of the udp receive buffer
     pub(crate) udp_capacity: usize,
+
+    /// Enables tokio IO driver
+    pub(crate) enable_tokio_io: bool,
 }
 
 /// Configures link behavior.
@@ -87,6 +90,7 @@ impl Default for Config {
             ephemeral_ports: 49152..=65535,
             tcp_capacity: 64,
             udp_capacity: 64,
+            enable_tokio_io: false,
         }
     }
 }

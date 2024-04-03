@@ -1,15 +1,16 @@
-use crate::host::HostTimer;
-use crate::{for_pairs, Config, LinksIter, Result, Rt, ToIpAddr, ToIpAddrs, World, TRACING_TARGET};
-
-use indexmap::IndexMap;
 use std::cell::RefCell;
 use std::future::Future;
 use std::net::IpAddr;
 use std::ops::DerefMut;
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
+
+use indexmap::IndexMap;
 use tokio::time::Duration;
 use tracing::Level;
+
+use crate::{Config, for_pairs, LinksIter, Result, Rt, ToIpAddr, ToIpAddrs, TRACING_TARGET, World};
+use crate::host::HostTimer;
 
 /// A handle for interacting with the simulation.
 pub struct Sim<'a> {
@@ -87,7 +88,9 @@ impl<'a> Sim<'a> {
             world.register(addr, &nodename, HostTimer::new(self.elapsed), &self.config);
         }
 
-        let rt = World::enter(&self.world, || Rt::client(nodename, client));
+        let rt = World::enter(&self.world, || {
+            Rt::client(nodename, client, self.config.enable_tokio_io)
+        });
 
         self.rts.insert(addr, rt);
     }
@@ -120,7 +123,9 @@ impl<'a> Sim<'a> {
             world.register(addr, &nodename, HostTimer::new(self.elapsed), &self.config);
         }
 
-        let rt = World::enter(&self.world, || Rt::host(nodename, host));
+        let rt = World::enter(&self.world, || {
+            Rt::host(nodename, host, self.config.enable_tokio_io)
+        });
 
         self.rts.insert(addr, rt);
     }
@@ -400,13 +405,13 @@ mod test {
         net::{IpAddr, Ipv4Addr},
         rc::Rc,
         sync::{
-            atomic::{AtomicU64, Ordering},
             Arc,
+            atomic::{AtomicU64, Ordering},
         },
         time::Duration,
     };
-
     use std::future;
+
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         sync::Semaphore,
@@ -414,9 +419,9 @@ mod test {
     };
 
     use crate::{
-        elapsed, hold, World,
-        net::{TcpListener, TcpStream},
-        sim_elapsed, Builder, Result,
+        Builder, elapsed,
+        hold,
+        net::{TcpListener, TcpStream}, Result, sim_elapsed, World,
     };
 
     #[test]
@@ -561,16 +566,16 @@ mod test {
     }
 
     /// This is a regression test to ensure it is safe to call sim_elapsed
-    /// if current world of host is not set. 
+    /// if current world of host is not set.
     #[test]
     fn sim_elapsed_time() -> Result {
-        // Safe to call outside of simution while there 
+        // Safe to call outside of simution while there
         // is no current world set
         assert!(sim_elapsed().is_none());
 
         let sim = Builder::new().build();
         // Safe to call while there is no current host set
-        World::enter(&sim.world, ||  assert!(sim_elapsed().is_none()));
+        World::enter(&sim.world, || assert!(sim_elapsed().is_none()));
 
         Ok(())
     }
