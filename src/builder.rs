@@ -164,6 +164,7 @@ impl Builder {
         self
     }
 
+    /// Enables the tokio I/O driver.
     pub fn enable_tokio_io(&mut self) -> &mut Self {
         self.config.enable_tokio_io = true;
         self
