@@ -64,6 +64,9 @@
 //! [`tracing-subscriber`](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/).
 //! The log level of turmoil can be configured using `RUST_LOG=turmoil=info`.
 //!
+//! It is possible to configure your tracing subscriber to log elapsed
+//! simulation time instead of real time. See the grpc example.
+//!
 //! Turmoil can provide a full packet level trace of the events happening in a
 //! simulation by passing `RUST_LOG=turmoil=trace`. This is really useful
 //! when you are unable to identify why some unexpected behaviour is happening
@@ -115,7 +118,7 @@ mod readme;
 
 mod builder;
 
-use std::net::IpAddr;
+use std::{net::IpAddr, time::Duration};
 
 pub use builder::Builder;
 
@@ -134,7 +137,6 @@ mod error;
 pub use error::Result;
 
 mod host;
-pub use host::elapsed;
 use host::Host;
 
 mod ip;
@@ -168,6 +170,29 @@ pub(crate) fn for_pairs(a: &Vec<IpAddr>, b: &Vec<IpAddr>, mut f: impl FnMut(IpAd
             }
         }
     }
+}
+
+/// Returns how long the currently executing host has been executing for in
+/// virtual time.
+///
+/// Must be called from within a Turmoil simulation.
+pub fn elapsed() -> Duration {
+    World::current(|world| world.current_host().timer.elapsed())
+}
+
+/// Returns how long the simulation has been executing for in virtual time.
+///
+/// Will return None if the duration is not available, typically because
+/// there is no currently executing host or world.
+pub fn sim_elapsed() -> Option<Duration> {
+    World::try_current(|world| {
+        world
+            .try_current_host()
+            .map(|host| host.timer.sim_elapsed())
+            .ok()
+    })
+    .ok()
+    .flatten()
 }
 
 /// Lookup an IP address by host name.

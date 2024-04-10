@@ -1,6 +1,5 @@
 use crate::envelope::{hex, Datagram, Protocol, Segment, Syn};
 use crate::net::{SocketPair, TcpListener, UdpSocket};
-use crate::world::World;
 use crate::{Envelope, TRACING_TARGET};
 
 use bytes::Bytes;
@@ -23,6 +22,9 @@ pub(crate) struct Host {
     /// Host ip address.
     pub(crate) addr: IpAddr,
 
+    /// Tracks elapsed time for host and overall simulation.
+    pub(crate) timer: HostTimer,
+
     /// L4 User Datagram Protocol (UDP).
     pub(crate) udp: Udp,
 
@@ -31,17 +33,12 @@ pub(crate) struct Host {
 
     next_ephemeral_port: u16,
     ephemeral_ports: RangeInclusive<u16>,
-
-    /// Host elapsed time.
-    elapsed: Duration,
-
-    /// Set each time the software is run.
-    now: Option<Instant>,
 }
 
 impl Host {
     pub(crate) fn new(
         addr: IpAddr,
+        timer: HostTimer,
         ephemeral_ports: RangeInclusive<u16>,
         tcp_capacity: usize,
         udp_capacity: usize,
@@ -50,28 +47,10 @@ impl Host {
             addr,
             udp: Udp::new(udp_capacity),
             tcp: Tcp::new(tcp_capacity),
+            timer,
             next_ephemeral_port: *ephemeral_ports.start(),
             ephemeral_ports,
-            elapsed: Duration::ZERO,
-            now: None,
         }
-    }
-
-    /// Set a new `Instant` for each iteration of the simulation. `elapsed` is
-    /// updated after each iteration via `tick()`, where as this value is
-    /// necessary to accurately calculate elapsed time while the software is
-    /// running.
-    ///
-    /// This is required to track logical time across host restarts as a single
-    /// `Instant` resets when the tokio runtime is recreated.
-    pub(crate) fn now(&mut self, now: Instant) {
-        self.now.replace(now);
-    }
-
-    /// Returns how long the host has been executing for in virtual time.
-    pub(crate) fn elapsed(&self) -> Duration {
-        let run_duration = self.now.expect("host instant not set").elapsed();
-        self.elapsed + run_duration
     }
 
     pub(crate) fn assign_ephemeral_port(&mut self) -> u16 {
@@ -117,18 +96,55 @@ impl Host {
             }
         }
     }
+}
+
+pub(crate) struct HostTimer {
+    /// Host elapsed time.
+    elapsed: Duration,
+
+    /// Set each time the software is run.
+    now: Option<Instant>,
+
+    /// Time from the start of the simulation until this host was initialized.
+    /// Used to calculate total simulation time below.
+    start_offset: Duration,
+}
+
+impl HostTimer {
+    pub(crate) fn new(start_offset: Duration) -> Self {
+        Self {
+            elapsed: Duration::ZERO,
+            now: None,
+            start_offset,
+        }
+    }
 
     pub(crate) fn tick(&mut self, duration: Duration) {
         self.elapsed += duration
     }
-}
 
-/// Returns how long the currently executing host has been executing for in
-/// virtual time.
-///
-/// Must be called from within a Turmoil simulation.
-pub fn elapsed() -> Duration {
-    World::current(|world| world.current_host_mut().elapsed())
+    /// Set a new `Instant` for each iteration of the simulation. `elapsed` is
+    /// updated after each iteration via `tick()`, where as this value is
+    /// necessary to accurately calculate elapsed time while the software is
+    /// running.
+    ///
+    /// This is required to track logical time across host restarts as a single
+    /// `Instant` resets when the tokio runtime is recreated.
+    pub(crate) fn now(&mut self, now: Instant) {
+        self.now.replace(now);
+    }
+
+    /// Returns how long the host has been executing for in virtual time.
+    pub(crate) fn elapsed(&self) -> Duration {
+        let run_duration = self.now.expect("host instant not set").elapsed();
+        self.elapsed + run_duration
+    }
+
+    /// Returns the total simulation virtual time. If the simulation ran for
+    /// some time before this host was registered then sim_elapsed > elapsed.
+    pub(crate) fn sim_elapsed(&self) -> Duration {
+        self.start_offset + self.elapsed()
+    }
 }
 
 /// Simulated UDP host software.
@@ -433,11 +449,19 @@ pub(crate) fn is_same(src: SocketAddr, dst: SocketAddr) -> bool {
 
 #[cfg(test)]
 mod test {
-    use crate::{Host, Result};
+    use std::time::Duration;
+
+    use crate::{host::HostTimer, Host, Result};
 
     #[test]
     fn recycle_ports() -> Result {
-        let mut host = Host::new(std::net::Ipv4Addr::UNSPECIFIED.into(), 49152..=49162, 1, 1);
+        let mut host = Host::new(
+            std::net::Ipv4Addr::UNSPECIFIED.into(),
+            HostTimer::new(Duration::ZERO),
+            49152..=49162,
+            1,
+            1,
+        );
 
         host.udp.bind((host.addr, 49161).into())?;
         host.udp.bind((host.addr, 49162).into())?;

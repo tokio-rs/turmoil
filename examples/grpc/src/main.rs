@@ -19,11 +19,7 @@ use proto::{HelloReply, HelloRequest};
 use crate::proto::greeter_client::GreeterClient;
 
 fn main() {
-    if std::env::var("RUST_LOG").is_err() {
-        std::env::set_var("RUST_LOG", "info");
-    }
-
-    tracing_subscriber::fmt::init();
+    configure_tracing();
 
     let addr = (IpAddr::from(Ipv4Addr::UNSPECIFIED), 9999);
 
@@ -60,7 +56,7 @@ fn main() {
             let request = Request::new(HelloRequest { name: "foo".into() });
             let res = greeter_client.say_hello(request).await?;
 
-            tracing::info!("Got response: {:?}", res);
+            tracing::info!(?res, "Got response");
 
             Ok(())
         }
@@ -68,6 +64,33 @@ fn main() {
     );
 
     sim.run().unwrap();
+}
+
+/// An example of how to configure a tracing subscriber that will log logical
+/// elapsed time since the simulation started using `turmoil::sim_elapsed()`.
+fn configure_tracing() {
+    if std::env::var("RUST_LOG").is_err() {
+        std::env::set_var("RUST_LOG", "info");
+    }
+
+    tracing::subscriber::set_global_default(
+        tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .with_timer(SimElapsedTime)
+            .finish(),
+    )
+    .expect("Configure tracing");
+}
+
+#[derive(Clone)]
+struct SimElapsedTime;
+impl tracing_subscriber::fmt::time::FormatTime for SimElapsedTime {
+    fn format_time(&self, w: &mut tracing_subscriber::fmt::format::Writer<'_>) -> std::fmt::Result {
+        // Prints real time and sim elapsed time. Example: 2024-01-10T17:06:57.020452Z [76ms]
+        tracing_subscriber::fmt::time()
+            .format_time(w)
+            .and_then(|()| write!(w, " [{:?}]", turmoil::sim_elapsed().unwrap_or_default()))
+    }
 }
 
 #[derive(Default)]
@@ -79,6 +102,7 @@ impl Greeter for MyGreeter {
         &self,
         request: Request<HelloRequest>,
     ) -> Result<Response<HelloReply>, Status> {
+        tracing::info!(?request, "Got request");
         let reply = HelloReply {
             message: format!("Hello {}!", request.into_inner().name),
         };

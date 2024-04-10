@@ -1,7 +1,11 @@
 use crate::config::Config;
 use crate::envelope::Protocol;
+use crate::host::HostTimer;
 use crate::ip::IpVersionAddrIter;
-use crate::{config, for_pairs, Dns, Host, ToIpAddr, ToIpAddrs, Topology, TRACING_TARGET};
+use crate::{
+    config, for_pairs, Dns, Host, Result as TurmoilResult, ToIpAddr, ToIpAddrs, Topology,
+    TRACING_TARGET,
+};
 
 use indexmap::IndexMap;
 use rand::RngCore;
@@ -72,6 +76,17 @@ impl World {
         }
     }
 
+    pub(crate) fn try_current<R>(f: impl FnOnce(&World) -> R) -> TurmoilResult<R> {
+        if CURRENT.is_set() {
+            CURRENT.with(|current| match current.try_borrow() {
+                Ok(world) => Ok(f(&world)),
+                Err(_) => Err("World already borrowed".into()),
+            })
+        } else {
+            Err("World not set".into())
+        }
+    }
+
     pub(crate) fn enter<R>(world: &RefCell<World>, f: impl FnOnce() -> R) -> R {
         CURRENT.set(world, f)
     }
@@ -79,6 +94,16 @@ impl World {
     pub(crate) fn current_host_mut(&mut self) -> &mut Host {
         let addr = self.current.expect("current host missing");
         self.hosts.get_mut(&addr).expect("host missing")
+    }
+
+    pub(crate) fn current_host(&self) -> &Host {
+        let addr = self.current.expect("current host missing");
+        self.hosts.get(&addr).expect("host missing")
+    }
+
+    pub(crate) fn try_current_host(&self) -> TurmoilResult<&Host> {
+        let addr = self.current.ok_or("current host missing")?;
+        self.hosts.get(&addr).ok_or_else(|| "host missing".into())
     }
 
     pub(crate) fn lookup(&mut self, host: impl ToIpAddr) -> IpAddr {
@@ -146,7 +171,13 @@ impl World {
     }
 
     /// Register a new host with the simulation.
-    pub(crate) fn register(&mut self, addr: IpAddr, nodename: &str, config: &Config) {
+    pub(crate) fn register(
+        &mut self,
+        addr: IpAddr,
+        nodename: &str,
+        timer: HostTimer,
+        config: &Config,
+    ) {
         assert!(
             !self.hosts.contains_key(&addr),
             "already registered host for the given ip address"
@@ -164,6 +195,7 @@ impl World {
             addr,
             Host::new(
                 addr,
+                timer,
                 config.ephemeral_ports.clone(),
                 config.tcp_capacity,
                 config.udp_capacity,
@@ -188,6 +220,7 @@ impl World {
         self.hosts
             .get_mut(&addr)
             .expect("missing host")
+            .timer
             .tick(duration);
     }
 }

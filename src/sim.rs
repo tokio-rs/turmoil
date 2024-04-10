@@ -1,6 +1,3 @@
-use crate::{for_pairs, Config, LinksIter, Result, Rt, ToIpAddr, ToIpAddrs, World, TRACING_TARGET};
-
-use indexmap::IndexMap;
 use std::cell::RefCell;
 use std::future::Future;
 use std::net::IpAddr;
@@ -10,8 +7,13 @@ use std::sync::{Arc, mpsc};
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::Relaxed;
 use std::time::UNIX_EPOCH;
+
+use indexmap::IndexMap;
 use tokio::time::Duration;
 use tracing::Level;
+
+use crate::{Config, for_pairs, LinksIter, Result, Rt, ToIpAddr, ToIpAddrs, TRACING_TARGET, World};
+use crate::host::HostTimer;
 
 /// A handle for interacting with the simulation.
 pub struct Sim<'a> {
@@ -86,10 +88,12 @@ impl<'a> Sim<'a> {
             let world = RefCell::get_mut(&mut self.world);
 
             // Register host state with the world
-            world.register(addr, &nodename, &self.config);
+            world.register(addr, &nodename, HostTimer::new(self.elapsed), &self.config);
         }
 
-        let rt = World::enter(&self.world, || Rt::client(nodename, client));
+        let rt = World::enter(&self.world, || {
+            Rt::client(nodename, client, self.config.enable_tokio_io)
+        });
 
         self.rts.insert(addr, rt);
     }
@@ -119,10 +123,12 @@ impl<'a> Sim<'a> {
             let world = RefCell::get_mut(&mut self.world);
 
             // Register host state with the world
-            world.register(addr, &nodename, &self.config);
+            world.register(addr, &nodename, HostTimer::new(self.elapsed), &self.config);
         }
 
-        let rt = World::enter(&self.world, || Rt::host(nodename, host));
+        let rt = World::enter(&self.world, || {
+            Rt::host(nodename, host, self.config.enable_tokio_io)
+        });
 
         self.rts.insert(addr, rt);
     }
@@ -387,7 +393,7 @@ impl<'a> Sim<'a> {
                 // Set the current host (see method docs)
                 world.current = Some(addr);
 
-                world.current_host_mut().now(rt.now());
+                world.current_host_mut().timer.now(rt.now());
             }
 
             let is_software_finished = World::enter(&self.world, || rt.tick(tick))?;
@@ -423,13 +429,13 @@ mod test {
         net::{IpAddr, Ipv4Addr},
         rc::Rc,
         sync::{
-            atomic::{AtomicU64, Ordering},
             Arc,
+            atomic::{AtomicU64, Ordering},
         },
         time::Duration,
     };
-
     use std::future;
+
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         sync::Semaphore,
@@ -437,9 +443,9 @@ mod test {
     };
 
     use crate::{
-        elapsed, hold,
-        net::{TcpListener, TcpStream},
-        Builder, Result,
+        Builder, elapsed,
+        hold,
+        net::{TcpListener, TcpStream}, Result, sim_elapsed, World,
     };
 
     #[test]
@@ -542,6 +548,9 @@ mod test {
         sim.client("c1", async move {
             tokio::time::sleep(duration).await;
             assert_eq!(duration, elapsed());
+            // For hosts/clients started before the first `sim.run()` call, the
+            // `elapsed` and `sim_elapsed` time will be identical.
+            assert_eq!(duration, sim_elapsed().unwrap());
 
             Ok(())
         });
@@ -549,6 +558,7 @@ mod test {
         sim.client("c2", async move {
             tokio::time::sleep(duration).await;
             assert_eq!(duration, elapsed());
+            assert_eq!(duration, sim_elapsed().unwrap());
 
             Ok(())
         });
@@ -561,14 +571,35 @@ mod test {
         let start = sim.elapsed();
         sim.client("c3", async move {
             assert_eq!(Duration::ZERO, elapsed());
+            // Note that sim_elapsed is total simulation time while elapsed is
+            // still zero for this newly created host.
+            assert_eq!(duration + tick, sim_elapsed().unwrap());
+            tokio::time::sleep(duration).await;
+            assert_eq!(duration, elapsed());
+            assert_eq!(duration + tick + duration, sim_elapsed().unwrap());
 
             Ok(())
         });
 
         sim.run()?;
 
-        // one tick to complete
-        assert_eq!(tick, sim.elapsed() - start);
+        // Client "c3" takes one sleep duration plus one tick to complete
+        assert_eq!(duration + tick, sim.elapsed() - start);
+
+        Ok(())
+    }
+
+    /// This is a regression test to ensure it is safe to call sim_elapsed
+    /// if current world of host is not set.
+    #[test]
+    fn sim_elapsed_time() -> Result {
+        // Safe to call outside of simution while there
+        // is no current world set
+        assert!(sim_elapsed().is_none());
+
+        let sim = Builder::new().build();
+        // Safe to call while there is no current host set
+        World::enter(&sim.world, || assert!(sim_elapsed().is_none()));
 
         Ok(())
     }
