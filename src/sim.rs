@@ -1,3 +1,4 @@
+use rand::seq::SliceRandom;
 use std::cell::RefCell;
 use std::future::Future;
 use std::net::IpAddr;
@@ -347,13 +348,18 @@ impl<'a> Sim<'a> {
         // Tick each host runtimes with running software. If the software
         // completes, extract the result and return early if an error is
         // encountered.
-        for (&addr, rt) in self
+
+        let mut running: Vec<_> = self
             .rts
             .iter_mut()
             .filter(|(_, rt)| rt.is_software_running())
-        {
-            let _span_guard = tracing::span!(Level::INFO, "node", name = &*rt.nodename).entered();
+            .collect();
+        if self.config.random_node_order {
+            running.shuffle(&mut self.world.borrow_mut().rng);
+        }
 
+        for (&addr, rt) in running {
+            let _span_guard = tracing::span!(Level::INFO, "node", name = &*rt.nodename,).entered();
             {
                 let mut world = self.world.borrow_mut();
                 // We need to move deliverable messages off the network and

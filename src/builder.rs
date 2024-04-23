@@ -170,6 +170,14 @@ impl Builder {
         self
     }
 
+    /// Enables running of nodes in random order. This allows exploration
+    /// of extra state space in multi-node simulations where rance conditions may arise
+    /// based on message send/receive order
+    pub fn enable_random_order(&mut self) -> &mut Self {
+        self.config.random_node_order = true;
+        self
+    }
+
     /// Build a simulation with the settings from the builder.
     ///
     /// This will use default rng with entropy from the device running.

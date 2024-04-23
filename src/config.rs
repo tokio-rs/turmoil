@@ -39,6 +39,10 @@ pub(crate) struct Config {
 
     /// Enables tokio IO driver
     pub(crate) enable_tokio_io: bool,
+
+    /// Enables running of host/client code in random order at each
+    /// simulation step
+    pub(crate) random_node_order: bool,
 }
 
 /// Configures link behavior.
@@ -91,6 +95,7 @@ impl Default for Config {
             tcp_capacity: 64,
             udp_capacity: 64,
             enable_tokio_io: false,
+            random_node_order: false,
         }
     }
 }
