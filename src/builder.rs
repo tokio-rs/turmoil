@@ -171,8 +171,8 @@ impl Builder {
     }
 
     /// Enables running of nodes in random order. This allows exploration
-    /// of extra state space in multi-node simulations where rance conditions may arise
-    /// based on message send/receive order
+    /// of extra state space in multi-node simulations where race conditions
+    /// may arise based on message send/receive order.
     pub fn enable_random_order(&mut self) -> &mut Self {
         self.config.random_node_order = true;
         self
