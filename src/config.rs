@@ -21,7 +21,7 @@ use std::{
 #[derive(Clone)]
 pub(crate) struct Config {
     /// How long the test should run for in simulated time.
-    pub(crate) duration: Duration,
+    pub(crate) duration: Option<Duration>,
 
     /// How much simulated time should elapse each tick
     pub(crate) tick: Duration,
@@ -88,7 +88,7 @@ pub(crate) struct MessageLoss {
 impl Default for Config {
     fn default() -> Config {
         Config {
-            duration: Duration::from_secs(10),
+            duration: Some(Duration::from_secs(10)),
             tick: Duration::from_millis(1),
             epoch: SystemTime::now(),
             ephemeral_ports: 49152..=65535,

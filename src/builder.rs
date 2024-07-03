@@ -25,7 +25,7 @@ use crate::*;
 /// use std::time::{Duration, SystemTime};
 ///
 /// let sim = turmoil::Builder::new()
-///     .simulation_duration(Duration::from_secs(60))
+///     .simulation_duration(Some(Duration::from_secs(60)))
 ///     .epoch(SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(946684800)).unwrap())
 ///     .fail_rate(0.05) // 5% failure rate
 ///     .build();
@@ -41,7 +41,7 @@ use crate::*;
 /// let mut builder = turmoil::Builder::new();
 ///
 /// // Apply a chain of options to that builder
-/// builder.simulation_duration(Duration::from_secs(45))
+/// builder.simulation_duration(Some(Duration::from_secs(45)))
 ///     .fail_rate(0.05);
 ///
 /// let sim_one = builder.build();
@@ -98,7 +98,7 @@ impl Builder {
     }
 
     /// How long the test should run for in simulated time
-    pub fn simulation_duration(&mut self, value: Duration) -> &mut Self {
+    pub fn simulation_duration(&mut self, value: Option<Duration>) -> &mut Self {
         self.config.duration = value;
         self
     }

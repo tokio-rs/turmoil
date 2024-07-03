@@ -89,7 +89,7 @@ fn ephemeral_port() -> Result {
 #[test]
 fn ephemeral_port_does_not_leak_on_server_shutdown() -> Result {
     let mut sim = Builder::new()
-        .simulation_duration(Duration::from_secs(60))
+        .simulation_duration(Some(Duration::from_secs(60)))
         .min_message_latency(Duration::from_millis(1))
         .max_message_latency(Duration::from_millis(1))
         .build();
@@ -118,7 +118,7 @@ fn ephemeral_port_does_not_leak_on_server_shutdown() -> Result {
 #[test]
 fn ephemeral_port_does_not_leak_on_client_shutdown() -> Result {
     let mut sim = Builder::new()
-        .simulation_duration(Duration::from_secs(60))
+        .simulation_duration(Some(Duration::from_secs(60)))
         .min_message_latency(Duration::from_millis(1))
         .max_message_latency(Duration::from_millis(1))
         .build();

@@ -10,8 +10,8 @@ use indexmap::IndexMap;
 use tokio::time::Duration;
 use tracing::Level;
 
-use crate::{Config, for_pairs, LinksIter, Result, Rt, ToIpAddr, ToIpAddrs, TRACING_TARGET, World};
 use crate::host::HostTimer;
+use crate::{for_pairs, Config, LinksIter, Result, Rt, ToIpAddr, ToIpAddrs, World, TRACING_TARGET};
 
 /// A handle for interacting with the simulation.
 pub struct Sim<'a> {
@@ -316,6 +316,9 @@ impl<'a> Sim<'a> {
     /// Executes a simple event loop that calls [step](#method.step) each iteration,
     /// returning early if any host software errors.
     pub fn run(&mut self) -> Result {
+        if self.config.duration.is_none() {
+            panic!("Simulation duration not specified.")
+        }
         loop {
             let is_finished = self.step()?;
 
@@ -394,11 +397,13 @@ impl<'a> Sim<'a> {
         self.elapsed += tick;
         self.steps += 1;
 
-        if self.elapsed > self.config.duration && !is_finished {
-            return Err(format!(
-                "Ran for duration: {:?} steps: {} without completing",
-                self.config.duration, self.steps,
-            ))?;
+        if let Some(simulation_duration) = self.config.duration {
+            if self.elapsed > simulation_duration && !is_finished {
+                return Err(format!(
+                    "Ran for duration: {:?} steps: {} without completing",
+                    simulation_duration, self.steps,
+                ))?;
+            }
         }
 
         Ok(is_finished)
@@ -408,15 +413,15 @@ impl<'a> Sim<'a> {
 #[cfg(test)]
 mod test {
     use std::{
+        future,
         net::{IpAddr, Ipv4Addr},
         rc::Rc,
         sync::{
-            Arc,
             atomic::{AtomicU64, Ordering},
+            Arc,
         },
         time::Duration,
     };
-    use std::future;
 
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
@@ -425,9 +430,9 @@ mod test {
     };
 
     use crate::{
-        Builder, elapsed,
-        hold,
-        net::{TcpListener, TcpStream}, Result, sim_elapsed, World,
+        elapsed, hold,
+        net::{TcpListener, TcpStream},
+        sim_elapsed, Builder, Result, World,
     };
 
     #[test]
@@ -442,7 +447,7 @@ mod test {
     #[test]
     fn timeout() {
         let mut sim = Builder::new()
-            .simulation_duration(Duration::from_millis(500))
+            .simulation_duration(Some(Duration::from_millis(500)))
             .build();
 
         sim.client("timeout", async {
