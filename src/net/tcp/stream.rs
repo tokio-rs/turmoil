@@ -93,6 +93,21 @@ impl TcpStream {
         Ok(TcpStream::new(pair, rx))
     }
 
+    /// Try to write a buffer to the stream, returning how many bytes were
+    /// written.
+    ///
+    /// The function will attempt to write the entire contents of `buf`, but
+    /// only part of the buffer may be written.
+    ///
+    /// # Return
+    ///
+    /// If data is successfully written, `Ok(n)` is returned, where `n` is the
+    /// number of bytes written. If the stream has been shut down
+    /// `Err(io::ErrorKind::BrokenPipe)` is returned.
+    pub fn try_write(&self, buf: &[u8]) -> Result<usize> {
+        self.write_half.try_write(buf)
+    }
+
     /// Returns the local address that this stream is bound to.
     pub fn local_addr(&self) -> Result<SocketAddr> {
         Ok(self.read_half.pair.local)
@@ -214,19 +229,16 @@ pub(crate) struct WriteHalf {
 }
 
 impl WriteHalf {
-    fn poll_write_priv(&self, _cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize>> {
+    fn try_write(&self, buf: &[u8]) -> Result<usize> {
         if buf.remaining() == 0 {
-            return Poll::Ready(Ok(0));
+            return Ok(0);
         }
 
         if self.is_shutdown {
-            return Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "Broken pipe",
-            )));
+            return Err(io::Error::new(io::ErrorKind::BrokenPipe, "Broken pipe"));
         }
 
-        let res = World::current(|world| {
+        World::current(|world| {
             let bytes = Bytes::copy_from_slice(buf);
             let len = bytes.len();
 
@@ -234,9 +246,11 @@ impl WriteHalf {
             self.send(world, Segment::Data(seq, bytes))?;
 
             Ok(len)
-        });
+        })
+    }
 
-        Poll::Ready(res)
+    fn poll_write_priv(&self, _cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize>> {
+        Poll::Ready(self.try_write(buf))
     }
 
     fn poll_shutdown_priv(&mut self) -> Poll<Result<()>> {
