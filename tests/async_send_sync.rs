@@ -1,31 +1,25 @@
 //! Copied over from:
 //! https://github.com/tokio-rs/tokio/blob/master/tokio/tests/async_send_sync.rs
+#![allow(dead_code)]
 
-#[allow(dead_code)]
 fn require_send<T: Send>(_t: &T) {}
-#[allow(dead_code)]
 fn require_sync<T: Sync>(_t: &T) {}
-#[allow(dead_code)]
 fn require_unpin<T: Unpin>(_t: &T) {}
 
-#[allow(dead_code)]
 struct Invalid;
 
-#[allow(dead_code)]
 trait AmbiguousIfSend<A> {
     fn some_item(&self) {}
 }
 impl<T: ?Sized> AmbiguousIfSend<()> for T {}
 impl<T: ?Sized + Send> AmbiguousIfSend<Invalid> for T {}
 
-#[allow(dead_code)]
 trait AmbiguousIfSync<A> {
     fn some_item(&self) {}
 }
 impl<T: ?Sized> AmbiguousIfSync<()> for T {}
 impl<T: ?Sized + Sync> AmbiguousIfSync<Invalid> for T {}
 
-#[allow(dead_code)]
 trait AmbiguousIfUnpin<A> {
     fn some_item(&self) {}
 }
