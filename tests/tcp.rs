@@ -1162,3 +1162,27 @@ fn exhaust_ephemeral_ports() {
 
     _ = sim.run()
 }
+
+#[test]
+fn try_write() -> Result {
+    let mut sim = Builder::new().build();
+    sim.client("client", async move {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 1234)).await?;
+
+        tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+
+            let written = socket.try_write(b"hello!").unwrap();
+            assert_eq!(written, 6);
+        });
+
+        let mut socket = TcpStream::connect((Ipv4Addr::LOCALHOST, 1234)).await?;
+        let mut buf: [u8; 6] = [0; 6];
+        socket.read_exact(&mut buf).await?;
+        assert_eq!(&buf, b"hello!");
+
+        Ok(())
+    });
+
+    sim.run()
+}
