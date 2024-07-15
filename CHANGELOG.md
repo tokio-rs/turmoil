@@ -1,3 +1,15 @@
+# 0.6.3 (July 15, 2024)
+
+### Added
+
+- Add try_write to TcpStream ([#176])
+- Add ability to run hosts in random order ([#173])
+- Add API parity stubs for UDP sockets/TCP streams ([#174])
+
+[#173]: https://github.com/tokio-rs/turmoil/pull/173
+[#174]: https://github.com/tokio-rs/turmoil/pull/174
+[#176]: https://github.com/tokio-rs/turmoil/pull/176
+
 # 0.6.2 (April 3, 2024)
 
 ### Added
