@@ -93,6 +93,23 @@ impl TcpStream {
         Ok(TcpStream::new(pair, rx))
     }
 
+    /// Try to write a buffer to the stream, returning how many bytes were
+    /// written.
+    ///
+    /// The function will attempt to write the entire contents of `buf`, but
+    /// only part of the buffer may be written.
+    ///
+    /// This function is usually paired with `writable()`.
+    ///
+    /// # Return
+    ///
+    /// If data is successfully written, `Ok(n)` is returned, where `n` is the
+    /// number of bytes written. If the stream is not ready to write data,
+    /// `Err(io::ErrorKind::WouldBlock)` is returned.
+    pub fn try_write(&self, buf: &[u8]) -> Result<usize> {
+        self.write_half.try_write(buf)
+    }
+
     /// Returns the local address that this stream is bound to.
     pub fn local_addr(&self) -> Result<SocketAddr> {
         Ok(self.read_half.pair.local)
@@ -108,6 +125,21 @@ impl TcpStream {
             read_half,
             write_half,
         }
+    }
+
+    /// Waits for the socket to become writable.
+    ///
+    /// This function is equivalent to `ready(Interest::WRITABLE)` and is usually
+    /// paired with `try_write()`.
+    ///
+    /// # Cancel safety
+    ///
+    /// This method is cancel safe. Once a readiness event occurs, the method
+    /// will continue to return immediately until the readiness event is
+    /// consumed by an attempt to write that fails with `WouldBlock` or
+    /// `Poll::Pending`.
+    pub async fn writable(&self) -> Result<()> {
+        Ok(())
     }
 
     /// Splits a `TcpStream` into a read half and a write half, which can be used
@@ -220,19 +252,16 @@ pub(crate) struct WriteHalf {
 }
 
 impl WriteHalf {
-    fn poll_write_priv(&self, _cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize>> {
+    fn try_write(&self, buf: &[u8]) -> Result<usize> {
         if buf.remaining() == 0 {
-            return Poll::Ready(Ok(0));
+            return Ok(0);
         }
 
         if self.is_shutdown {
-            return Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "Broken pipe",
-            )));
+            return Err(io::Error::new(io::ErrorKind::BrokenPipe, "Broken pipe"));
         }
 
-        let res = World::current(|world| {
+        World::current(|world| {
             let bytes = Bytes::copy_from_slice(buf);
             let len = bytes.len();
 
@@ -240,9 +269,11 @@ impl WriteHalf {
             self.send(world, Segment::Data(seq, bytes))?;
 
             Ok(len)
-        });
+        })
+    }
 
-        Poll::Ready(res)
+    fn poll_write_priv(&self, _cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize>> {
+        Poll::Ready(self.try_write(buf))
     }
 
     fn poll_shutdown_priv(&mut self) -> Poll<Result<()>> {

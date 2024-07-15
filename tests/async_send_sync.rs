@@ -1,14 +1,11 @@
 //! Copied over from:
 //! https://github.com/tokio-rs/tokio/blob/master/tokio/tests/async_send_sync.rs
+#![allow(dead_code)]
 
-#[allow(dead_code)]
 fn require_send<T: Send>(_t: &T) {}
-#[allow(dead_code)]
 fn require_sync<T: Sync>(_t: &T) {}
-#[allow(dead_code)]
 fn require_unpin<T: Unpin>(_t: &T) {}
 
-#[allow(dead_code)]
 struct Invalid;
 
 trait AmbiguousIfSend<A> {
