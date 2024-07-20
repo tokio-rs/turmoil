@@ -195,7 +195,11 @@ impl Builder {
 
         if self.config.tick.as_nanos() % Duration::from_millis(1).as_nanos() != 0  {
             // Tick duration is used for tokio::time::sleep, which requires millisecond resolution.
-            panic!("Tick duration resolution is in milliseconds, but value provided would require higher.")
+            panic!("Tick duration resolution is in milliseconds, but value provided would require higher: {:?}.", self.config.tick)
+        }
+
+        if self.config.tick.is_zero() {
+            panic!("Tick duration of zero is not supported.")
         }
 
         let world = World::new(
