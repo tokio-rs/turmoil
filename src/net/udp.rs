@@ -24,6 +24,14 @@ pub struct UdpSocket {
     rx: Mutex<Rx>,
 }
 
+impl std::fmt::Debug for UdpSocket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UdpSocket")
+            .field("local_addr", &self.local_addr)
+            .finish()
+    }
+}
+
 struct Rx {
     recv: mpsc::Receiver<(Datagram, SocketAddr)>,
     /// A buffered received message.
