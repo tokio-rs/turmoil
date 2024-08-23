@@ -42,3 +42,6 @@ tracing-subscriber = "0.3"
 [features]
 default = []
 regex = ["dep:regex"]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tokio_unstable)'] }
