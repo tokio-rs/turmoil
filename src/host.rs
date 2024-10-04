@@ -361,6 +361,10 @@ impl Tcp {
         rx
     }
 
+    pub(crate) fn stream_count(&self) -> usize {
+        self.sockets.len()
+    }
+
     pub(crate) fn accept(&mut self, addr: SocketAddr) -> Option<(Syn, SocketAddr)> {
         self.binds[&addr.port()].deque.pop_front()
     }
