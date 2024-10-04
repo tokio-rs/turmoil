@@ -4,21 +4,19 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
-
 [dependencies]
-tonic = "0.12"
-prost = "0.13"
-hyper = "1.4"
 async-stream = "0.3"
-turmoil = { path = "../.." }
+hyper = "1"
+hyper-util = { version = "0.1", features = ["tokio"] }
+prost = "0.13"
+tokio = "1"
+tonic = "0.12"
+tower = "0.4"
 tracing = "0.1"
 tracing-subscriber = "0.3"
-tokio = "1"
-tower = "0.5"
-hyper-util = "0.1"
+turmoil = { path = "../.." }
 
 [build-dependencies]
 tonic-build = "0.12"
+protox = "0.7"
 prost = "0.13"
-prost-build = "0.13"
-protox = "0.7.0"
