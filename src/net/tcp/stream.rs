@@ -160,7 +160,7 @@ impl TcpStream {
         )
     }
 
-    /// Has no effect in turmoil. API parity with 
+    /// Has no effect in turmoil. API parity with
     /// https://docs.rs/tokio/latest/tokio/net/struct.TcpStream.html#method.set_nodelay
     pub fn set_nodelay(&self, _nodelay: bool) -> Result<()> {
         Ok(())
