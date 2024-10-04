@@ -170,6 +170,18 @@ impl World {
         });
     }
 
+    pub(crate) fn est_tcp_streams(&mut self) -> usize {
+        self.current_host().tcp.stream_count()
+    }
+
+    pub(crate) fn est_tcp_streams_on(&mut self, addr: impl ToIpAddr) -> usize {
+        self.hosts
+            .get(&self.dns.lookup(addr))
+            .unwrap()
+            .tcp
+            .stream_count()
+    }
+
     /// Register a new host with the simulation.
     pub(crate) fn register(
         &mut self,

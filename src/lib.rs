@@ -246,3 +246,13 @@ pub fn partition(a: impl ToIpAddrs, b: impl ToIpAddrs) {
 pub fn repair(a: impl ToIpAddrs, b: impl ToIpAddrs) {
     World::current(|world| world.repair_many(a, b))
 }
+
+/// Return the number of established tcp streams on the current host.
+pub fn established_tcp_stream_count() -> usize {
+    World::current(|world| world.est_tcp_streams())
+}
+
+/// Return the number of established tcp streams on the given host.
+pub fn established_tcp_stream_count_on(addr: impl ToIpAddr) -> usize {
+    World::current(|world| world.est_tcp_streams_on(addr))
+}

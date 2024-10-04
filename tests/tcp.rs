@@ -548,8 +548,15 @@ fn hangup() -> Result {
     sim.client("client", async move {
         let s = TcpStream::connect(("server", PORT)).await?;
 
+        assert_eq!(1, turmoil::established_tcp_stream_count());
+        assert_eq!(1, turmoil::established_tcp_stream_count_on("server"));
+
         drop(s);
+        assert_eq!(0, turmoil::established_tcp_stream_count());
+        assert_eq!(1, turmoil::established_tcp_stream_count_on("server")); // server sleeps in its loop
+
         wait.notified().await;
+        assert_eq!(0, turmoil::established_tcp_stream_count_on("server"));
 
         Ok(())
     });
