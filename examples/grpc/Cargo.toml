@@ -18,4 +18,5 @@ turmoil = { path = "../.." }
 
 [build-dependencies]
 tonic-build = "0.12"
-protobuf-src = "2"
+protox = "0.7"
+prost = "0.13"
