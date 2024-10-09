@@ -239,12 +239,26 @@ pub fn partition(a: impl ToIpAddrs, b: impl ToIpAddrs) {
     World::current(|world| world.partition_many(a, b))
 }
 
+/// Partition two hosts, or sets of hosts, in one direction.
+///
+/// Must be called from within a Turmoil simulation.
+pub fn partition_oneway(from: impl ToIpAddrs, to: impl ToIpAddrs) {
+    World::current(|world| world.partition_oneway_many(from, to))
+}
+
 /// Repair the connection between two hosts, or sets of hosts, resulting in
 /// messages to be delivered.
 ///
 /// Must be called from within a Turmoil simulation.
 pub fn repair(a: impl ToIpAddrs, b: impl ToIpAddrs) {
     World::current(|world| world.repair_many(a, b))
+}
+
+/// Repair the connection between two hosts, or sets of hosts, in one direction.
+///
+/// Must be called from within a Turmoil simulation.
+pub fn repair_oneway(from: impl ToIpAddrs, to: impl ToIpAddrs) {
+    World::current(|world| world.repair_oneway_many(from, to))
 }
 
 /// Return the number of established tcp streams on the current host.
