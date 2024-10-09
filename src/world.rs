@@ -148,6 +148,10 @@ impl World {
         self.topology.partition(a, b);
     }
 
+    pub(crate) fn partition_oneway(&mut self, a: IpAddr, b: IpAddr) {
+        self.topology.partition_oneway(a, b);
+    }
+
     pub(crate) fn partition_many(&mut self, a: impl ToIpAddrs, b: impl ToIpAddrs) {
         let a = self.lookup_many(a);
         let b = self.lookup_many(b);
@@ -156,9 +160,19 @@ impl World {
             self.partition(a, b);
         });
     }
+    pub(crate) fn partition_oneway_many(&mut self, a: impl ToIpAddrs, b: impl ToIpAddrs) {
+        let a = self.lookup_many(a);
+        let b = self.lookup_many(b);
 
+        for_pairs(&a, &b, |a, b| {
+            self.partition_oneway(a, b);
+        });
+    }
     pub(crate) fn repair(&mut self, a: IpAddr, b: IpAddr) {
         self.topology.repair(a, b);
+    }
+    pub(crate) fn repair_oneway(&mut self, a: IpAddr, b: IpAddr) {
+        self.topology.repair_oneway(a, b);
     }
 
     pub(crate) fn repair_many(&mut self, a: impl ToIpAddrs, b: impl ToIpAddrs) {
@@ -167,6 +181,15 @@ impl World {
 
         for_pairs(&a, &b, |a, b| {
             self.repair(a, b);
+        });
+    }
+
+    pub(crate) fn repair_oneway_many(&mut self, a: impl ToIpAddrs, b: impl ToIpAddrs) {
+        let a = self.lookup_many(a);
+        let b = self.lookup_many(b);
+
+        for_pairs(&a, &b, |a, b| {
+            self.repair_oneway(a, b);
         });
     }
 
