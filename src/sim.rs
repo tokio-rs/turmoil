@@ -229,7 +229,7 @@ impl<'a> Sim<'a> {
     /// from 'from' to 'to', while not affecting the ability for them to be delivered
     /// in the other direction.
     ///
-    /// Partitioning first a->b, then b->a, will stop all messages, similarly to
+    /// Partitioning first from->to, then to->from, will stop all messages, similarly to
     /// a single call to [`Self::partition`].
     ///
     /// Combining this feature with [`Self::hold`] is presently not supported.
