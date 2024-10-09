@@ -1,3 +1,15 @@
+# 0.6.4 (October 9, 2024)
+
+### Added
+
+- Add established_tcp_stream_count{,_on} ([#188])
+- Allow one way partitionings ([#187])
+- Implement Debug for UdpSocket ([#179])
+
+[#179]: https://github.com/tokio-rs/turmoil/pull/179
+[#187]: https://github.com/tokio-rs/turmoil/pull/187
+[#188]: https://github.com/tokio-rs/turmoil/pull/188
+
 # 0.6.3 (July 15, 2024)
 
 ### Added
