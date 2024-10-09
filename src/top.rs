@@ -133,7 +133,14 @@ impl<'a> Iterator for LinkIter<'a> {
 
 /// A two-way link between two hosts on the network.
 struct Link {
-    state: State,
+    /// The state of the link from node 'a' to node 'b'.
+    /// Of the two nodes attached to a link, 'a' is the
+    /// one whose ip address sorts smallest.
+    state_a_b: State,
+    /// The state of the link from node 'b' to node 'a'.
+    /// Of the two nodes attached to a link, 'b' is the
+    /// one whose ip address sorts greatest.
+    state_b_a: State,
 
     /// Optional, per-link configuration.
     config: config::Link,
@@ -150,6 +157,7 @@ struct Link {
 }
 
 /// States that a link between two nodes can be in.
+#[derive(Clone, Copy)]
 enum State {
     /// The link is healthy.
     Healthy,
@@ -251,8 +259,18 @@ impl Topology {
         self.links[&Pair::new(a, b)].explicit_partition();
     }
 
+    pub(crate) fn partition_oneway(&mut self, a: IpAddr, b: IpAddr) {
+        let link = &mut self.links[&Pair::new(a, b)];
+        link.partition_oneway(a, b);
+    }
+
     pub(crate) fn repair(&mut self, a: IpAddr, b: IpAddr) {
         self.links[&Pair::new(a, b)].explicit_repair();
+    }
+
+    pub(crate) fn repair_oneway(&mut self, a: IpAddr, b: IpAddr) {
+        let link = &mut self.links[&Pair::new(a, b)];
+        link.repair_oneway(a, b);
     }
 
     pub(crate) fn tick_by(&mut self, duration: Duration) {
@@ -291,7 +309,8 @@ enum DeliveryStatus {
 impl Link {
     fn new(now: Instant) -> Link {
         Link {
-            state: State::Healthy,
+            state_a_b: State::Healthy,
+            state_b_a: State::Healthy,
             config: config::Link::default(),
             sent: VecDeque::new(),
             deliverable: IndexMap::new(),
@@ -314,6 +333,20 @@ impl Link {
         self.process_deliverables();
     }
 
+    fn get_state_for_message(&self, src: IpAddr, dst: IpAddr) -> State {
+        // Between each pair of ip-addresses there can exist a link.
+        // A link between two such pairs can be constructed as
+        // Pair::new(x,y) or Pair::new(y,x). These two expressions create
+        // the exact same link. We denote one of the ends of the link as 'a',
+        // and the other 'b'. 'a' is always the one that compares smaller, i.e,
+        // `a < b` holds.
+        if src < dst {
+            self.state_a_b
+        } else {
+            self.state_b_a
+        }
+    }
+
     // src -> link -> dst
     //        ^-- you are here!
     //
@@ -327,19 +360,19 @@ impl Link {
         dst: SocketAddr,
         message: Protocol,
     ) {
-        let status = match self.state {
+        let state = self.get_state_for_message(src.ip(), dst.ip());
+        let status = match state {
             State::Healthy => {
                 let delay = self.delay(global_config.latency(), rand);
                 DeliveryStatus::DeliverAfter(self.now + delay)
             }
+            // Only A->B is blocked, so B can send, so we can send if src is B
             State::Hold => {
                 tracing::trace!(target: TRACING_TARGET,?src, ?dst, protocol = %message, "Hold");
-
                 DeliveryStatus::Hold
             }
             _ => {
                 tracing::trace!(target: TRACING_TARGET,?src, ?dst, protocol = %message, "Drop");
-
                 return;
             }
         };
@@ -410,13 +443,15 @@ impl Link {
 
     // Randomly break or repair this link.
     fn rand_partition_or_repair(&mut self, global_config: &config::Link, rand: &mut dyn RngCore) {
-        match self.state {
-            State::Healthy => {
-                if self.rand_partition(global_config.message_loss(), rand) {
-                    self.state = State::RandPartition;
+        let do_rand = self.rand_partition(global_config.message_loss(), rand);
+        match (self.state_a_b, self.state_b_a) {
+            (State::Healthy, _) | (_, State::Healthy) => {
+                if do_rand {
+                    self.state_a_b = State::RandPartition;
+                    self.state_b_a = State::RandPartition;
                 }
             }
-            State::RandPartition => {
+            (State::RandPartition, _) | (_, State::RandPartition) => {
                 if self.rand_repair(global_config.message_loss(), rand) {
                     self.release();
                 }
@@ -426,12 +461,14 @@ impl Link {
     }
 
     fn hold(&mut self) {
-        self.state = State::Hold;
+        self.state_a_b = State::Hold;
+        self.state_b_a = State::Hold;
     }
 
     // This link becomes healthy, and any held messages are scheduled for delivery.
     fn release(&mut self) {
-        self.state = State::Healthy;
+        self.state_a_b = State::Healthy;
+        self.state_b_a = State::Healthy;
         for sent in &mut self.sent {
             if let DeliveryStatus::Hold = sent.status {
                 sent.deliver(self.now);
@@ -440,12 +477,30 @@ impl Link {
     }
 
     fn explicit_partition(&mut self) {
-        self.state = State::ExplicitPartition;
+        self.state_a_b = State::ExplicitPartition;
+        self.state_b_a = State::ExplicitPartition;
+    }
+
+    fn partition_oneway(&mut self, from: IpAddr, to: IpAddr) {
+        if from < to {
+            self.state_a_b = State::ExplicitPartition;
+        } else {
+            self.state_b_a = State::ExplicitPartition;
+        }
+    }
+
+    fn repair_oneway(&mut self, from: IpAddr, to: IpAddr) {
+        if from < to {
+            self.state_a_b = State::Healthy;
+        } else {
+            self.state_b_a = State::Healthy;
+        }
     }
 
     // Repair the link, without releasing any held messages.
     fn explicit_repair(&mut self) {
-        self.state = State::Healthy;
+        self.state_a_b = State::Healthy;
+        self.state_b_a = State::Healthy;
     }
 
     /// Should the link be randomly partitioned
