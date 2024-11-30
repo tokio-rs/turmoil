@@ -45,7 +45,7 @@ fn network_partitions_during_connect() -> Result {
         turmoil::partition("client", "server");
 
         let err = TcpStream::connect(("server", PORT)).await.unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::Other);
+        assert_eq!(err.kind(), io::ErrorKind::HostUnreachable);
         assert_eq!(err.to_string(), "host unreachable");
 
         turmoil::repair("client", "server");
@@ -220,7 +220,7 @@ fn network_partition_once_connected() -> Result {
         assert!(timeout(Duration::from_secs(1), s.read_u8()).await.is_err());
 
         let err = s.write_u8(1).await.unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::Other);
+        assert_eq!(err.kind(), io::ErrorKind::HostUnreachable);
         assert_eq!(err.to_string(), "host unreachable");
 
         Ok(())
@@ -232,7 +232,7 @@ fn network_partition_once_connected() -> Result {
         turmoil::partition("server", "client");
 
         let err = s.write_u8(1).await.unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::Other);
+        assert_eq!(err.kind(), io::ErrorKind::HostUnreachable);
         assert_eq!(err.to_string(), "host unreachable");
 
         Ok(())
@@ -1129,7 +1129,7 @@ fn socket_to_nonexistent_node() -> Result {
         );
 
         let err = sock.unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::Other);
+        assert_eq!(err.kind(), io::ErrorKind::HostUnreachable);
         assert_eq!(err.to_string(), "host unreachable");
 
         Ok(())
