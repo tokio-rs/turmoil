@@ -19,6 +19,9 @@ categories = ["asynchronous", "network-programming", "simulation"]
 [workspace]
 members = ["examples/*"]
 
+[workspace.package]
+rust-version = "1.83"
+
 [dependencies]
 bytes = "1.4"
 futures = "0.3"
