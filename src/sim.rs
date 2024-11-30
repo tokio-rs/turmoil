@@ -674,7 +674,7 @@ mod test {
         sim.client("client", async move {
             // Peers are partitioned. TCP setup should fail.
             let err = TcpStream::connect("server:1234").await.unwrap_err();
-            assert_eq!(err.kind(), io::ErrorKind::Other);
+            assert_eq!(err.kind(), io::ErrorKind::HostUnreachable);
             assert_eq!(err.to_string(), "host unreachable");
 
             Ok(())

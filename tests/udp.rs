@@ -235,7 +235,7 @@ fn network_partition() -> Result {
 
         let sock = bind().await?;
         let err = send_ping(&sock).await.unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::Other);
+        assert_eq!(err.kind(), ErrorKind::HostUnreachable);
         assert_eq!(err.to_string(), "host unreachable");
 
         Ok(())
@@ -562,7 +562,7 @@ fn loopback_localhost_public_v4() -> Result {
         let bind_addr = SocketAddr::new(bind_addr.ip(), 0);
         let socket = UdpSocket::bind(bind_addr).await?;
         let err = socket.send_to(&expected, connect_addr).await.unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::Other);
+        assert_eq!(err.kind(), ErrorKind::HostUnreachable);
         assert_eq!(err.to_string(), "host unreachable");
 
         Ok(())
@@ -614,7 +614,7 @@ fn loopback_localhost_public_v6() -> Result {
         let bind_addr = SocketAddr::new(bind_addr.ip(), 0);
         let socket = UdpSocket::bind(bind_addr).await?;
         let err = socket.send_to(&expected, connect_addr).await.unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::Other);
+        assert_eq!(err.kind(), ErrorKind::HostUnreachable);
         assert_eq!(err.to_string(), "host unreachable");
 
         Ok(())
@@ -723,7 +723,7 @@ fn socket_to_nonexistent_node() -> Result {
         );
 
         let err = send.unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::Other);
+        assert_eq!(err.kind(), ErrorKind::HostUnreachable);
         assert_eq!(err.to_string(), "host unreachable");
 
         Ok(())
