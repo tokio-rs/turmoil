@@ -6,11 +6,13 @@ use tracing::{info_span, Instrument};
 use turmoil::{net, Builder};
 
 fn main() {
-    if std::env::var("RUST_LOG").is_err() {
-        std::env::set_var("RUST_LOG", "info");
-    }
-
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::builder()
+                .with_default_directive(tracing::level_filters::LevelFilter::INFO.into())
+                .from_env_lossy(),
+        )
+        .init();
 
     let addr = (IpAddr::from(Ipv4Addr::UNSPECIFIED), 9999);
 
