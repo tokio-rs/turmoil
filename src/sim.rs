@@ -10,8 +10,8 @@ use indexmap::IndexMap;
 use tokio::time::Duration;
 use tracing::Level;
 
-use crate::{Config, for_pairs, LinksIter, Result, Rt, ToIpAddr, ToIpAddrs, TRACING_TARGET, World};
 use crate::host::HostTimer;
+use crate::{for_pairs, Config, LinksIter, Result, Rt, ToIpAddr, ToIpAddrs, World, TRACING_TARGET};
 
 /// A handle for interacting with the simulation.
 pub struct Sim<'a> {
@@ -430,17 +430,16 @@ impl<'a> Sim<'a> {
 #[cfg(test)]
 mod test {
     use rand::Rng;
+    use std::future;
     use std::{
         net::{IpAddr, Ipv4Addr},
         rc::Rc,
         sync::{
-            Mutex,
-            Arc,
             atomic::{AtomicU64, Ordering},
+            Arc, Mutex,
         },
         time::Duration,
     };
-    use std::future;
 
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
@@ -450,9 +449,9 @@ mod test {
 
     use crate::net::UdpSocket;
     use crate::{
-        Builder, elapsed,
-        hold,
-        net::{TcpListener, TcpStream}, Result, Sim, sim_elapsed, World,
+        elapsed, hold,
+        net::{TcpListener, TcpStream},
+        sim_elapsed, Builder, Result, Sim, World,
     };
 
     #[test]
@@ -686,7 +685,6 @@ mod test {
         Ok(())
     }
 
-
     struct Expectation {
         expect_a_receive: bool,
         expect_b_receive: bool,
@@ -848,40 +846,18 @@ mod test {
             Ok(())
         }
 
-        run_with_actions(&[
-            Action::PartitionOnewayAB,
-        ])?;
-        run_with_actions(&[
-            Action::PartitionOnewayBA,
-        ])?;
+        run_with_actions(&[Action::PartitionOnewayAB])?;
+        run_with_actions(&[Action::PartitionOnewayBA])?;
+        run_with_actions(&[Action::Partition, Action::RepairOnewayAB])?;
+        run_with_actions(&[Action::Partition, Action::RepairOnewayBA])?;
+        run_with_actions(&[Action::PartitionOnewayAB, Action::Repair])?;
+        run_with_actions(&[Action::PartitionOnewayBA, Action::Repair])?;
+        run_with_actions(&[Action::PartitionOnewayBA, Action::RepairOnewayAB])?;
+        run_with_actions(&[Action::PartitionOnewayAB, Action::PartitionOnewayBA])?;
         run_with_actions(&[
             Action::Partition,
             Action::RepairOnewayAB,
-        ])?;
-        run_with_actions(&[
-            Action::Partition,
             Action::RepairOnewayBA,
-        ])?;
-        run_with_actions(&[
-            Action::PartitionOnewayAB,
-            Action::Repair,
-        ])?;
-        run_with_actions(&[
-            Action::PartitionOnewayBA,
-            Action::Repair,
-        ])?;
-        run_with_actions(&[
-            Action::PartitionOnewayBA,
-            Action::RepairOnewayAB,
-        ])?;
-        run_with_actions(&[
-            Action::PartitionOnewayAB,
-            Action::PartitionOnewayBA,
-        ])?;
-        run_with_actions(&[
-            Action::Partition,
-            Action::RepairOnewayAB,
-            Action::RepairOnewayBA
         ])?;
 
         Ok(())
