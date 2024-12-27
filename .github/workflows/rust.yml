@@ -24,6 +24,15 @@ jobs:
       - name: Cargo Test
         run: cargo test --verbose --features "${{ matrix.features }}"
 
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --check
+
   clippy:
     name: Run Clippy
     runs-on: ${{ matrix.os }}
