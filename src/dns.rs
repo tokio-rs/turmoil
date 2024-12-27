@@ -63,7 +63,7 @@ impl ToIpAddr for String {
     }
 }
 
-impl<'a> ToIpAddr for &'a str {
+impl ToIpAddr for &str {
     fn to_ip_addr(&self, dns: &mut Dns) -> IpAddr {
         if let Ok(ipaddr) = self.parse() {
             return ipaddr;
@@ -121,7 +121,7 @@ impl ToSocketAddrs for (String, u16) {
     }
 }
 
-impl<'a> ToSocketAddrs for (&'a str, u16) {
+impl ToSocketAddrs for (&str, u16) {
     fn to_socket_addr(&self, dns: &Dns) -> SocketAddr {
         // When IP address is passed directly as a str.
         if let Ok(ip) = self.0.parse::<IpAddr>() {

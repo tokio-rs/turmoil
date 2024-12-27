@@ -58,7 +58,7 @@ pub struct LinkIter<'a> {
     iter: std::collections::vec_deque::IterMut<'a, Sent>,
 }
 
-impl<'a> LinkIter<'a> {
+impl LinkIter<'_> {
     /// The [`IpAddr`] pair for the link. Always ordered to uniquely identify
     /// the link.
     pub fn pair(&self) -> (IpAddr, IpAddr) {
@@ -83,7 +83,7 @@ pub struct SentRef<'a> {
     sent: &'a mut Sent,
 }
 
-impl<'a> SentRef<'a> {
+impl SentRef<'_> {
     /// The (src, dst) [`SocketAddr`] pair for the message.
     pub fn pair(&self) -> (SocketAddr, SocketAddr) {
         (self.src, self.dst)
