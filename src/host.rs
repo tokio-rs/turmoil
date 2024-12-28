@@ -213,7 +213,7 @@ impl Udp {
     }
 
     pub(crate) fn unbind(&mut self, addr: SocketAddr) {
-        let exists = self.binds.remove(&addr.port());
+        let exists = self.binds.swap_remove(&addr.port());
 
         assert!(exists.is_some(), "unknown bind {addr}");
 
@@ -306,7 +306,7 @@ impl StreamSocket {
         while self.buf.contains_key(&(self.recv_seq + 1)) {
             self.recv_seq += 1;
 
-            let segment = self.buf.remove(&self.recv_seq).unwrap();
+            let segment = self.buf.swap_remove(&self.recv_seq).unwrap();
             self.sender.try_send(segment).map_err(|e| match e {
                 Closed(_) => Protocol::Tcp(Segment::Rst),
                 Full(_) => panic!("{} socket buffer full", self.local_addr),
@@ -407,7 +407,9 @@ impl Tcp {
             },
             Segment::Rst => {
                 if self.sockets.get(&SocketPair::new(dst, src)).is_some() {
-                    self.sockets.remove(&SocketPair::new(dst, src)).unwrap();
+                    self.sockets
+                        .swap_remove(&SocketPair::new(dst, src))
+                        .unwrap();
                 }
             }
         };
@@ -422,13 +424,13 @@ impl Tcp {
             sock.ref_ct -= 1;
 
             if sock.ref_ct == 0 {
-                self.sockets.remove(&pair).unwrap();
+                self.sockets.swap_remove(&pair).unwrap();
             }
         }
     }
 
     pub(crate) fn unbind(&mut self, addr: SocketAddr) {
-        let exists = self.binds.remove(&addr.port());
+        let exists = self.binds.swap_remove(&addr.port());
 
         assert!(exists.is_some(), "unknown bind {addr}");
 
