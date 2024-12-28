@@ -239,6 +239,10 @@ fn init(enable_io: bool) -> (Runtime, LocalSet) {
 }
 
 fn new_local() -> LocalSet {
+    #[cfg(not(tokio_unstable))]
+    let local = LocalSet::new();
+
+    #[cfg(tokio_unstable)]
     let mut local = LocalSet::new();
 
     #[cfg(tokio_unstable)]
