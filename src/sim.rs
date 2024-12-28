@@ -1052,9 +1052,7 @@ mod test {
 
         let how_many = 3;
         for i in 0..how_many {
-            sim.host(format!("host-{i}"), || async {
-                futures::future::pending().await
-            })
+            sim.host(format!("host-{i}"), || async { future::pending().await })
         }
 
         let mut ips = sim.lookup_many(regex::Regex::new(".*")?);

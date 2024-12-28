@@ -1,8 +1,8 @@
+use std::future::Future;
 use std::mem;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use futures::Future;
 use tokio::runtime::Runtime;
 use tokio::task::JoinHandle;
 use tokio::task::LocalSet;
