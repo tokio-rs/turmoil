@@ -36,6 +36,19 @@ impl OwnedReadHalf {
     pub fn reunite(self, other: OwnedWriteHalf) -> Result<TcpStream, ReuniteError> {
         reunite(self, other)
     }
+
+    /// Attempt to receive data on the socket, without removing that data from the queue, registering the current task for wakeup if data is not yet available.
+    pub fn poll_peek(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf,
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_peek(cx, buf)
+    }
+
+    pub async fn peek(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.inner.peek(buf).await
+    }
 }
 
 /// Owned write half of a `TcpStream`, created by `into_split`.
