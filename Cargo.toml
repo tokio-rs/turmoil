@@ -21,7 +21,7 @@ members = ["examples/*"]
 
 [dependencies]
 bytes = "1.4"
-indexmap = "1.9"
+indexmap = "2"
 rand = { version = "0.8.5", features = ["small_rng"] }
 rand_distr = "0.4.3"
 regex = { version = "1", optional = true }
