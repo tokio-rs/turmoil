@@ -22,7 +22,7 @@ jobs:
       - name: Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
       - name: Cargo Test
-        run: cargo test --verbose --features "${{ matrix.features }}"
+        run: cargo test --workspace --verbose --features "${{ matrix.features }}"
 
   fmt:
     runs-on: ubuntu-latest

@@ -11,7 +11,7 @@ hyper-util = { version = "0.1.2", features = ["full"] }
 http-body-util = "0.1"
 turmoil = { path = "../.." }
 tracing = "0.1"
-tracing-subscriber = "0.3"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio = "1"
-tower = "0.4"
+tower = { version = "0.4", features = ["util"] }
 pin-project-lite = "0.2"
