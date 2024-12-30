@@ -8,3 +8,5 @@ $ cargo run -p grpc
 # To turn on logs
 $ RUST_LOG=debug cargo run -p grpc
 ```
+
+[`tonic`]: https://github.com/hyperium/tonic
