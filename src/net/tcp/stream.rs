@@ -1,3 +1,5 @@
+use bytes::{Buf, Bytes};
+use std::future::poll_fn;
 use std::{
     fmt::Debug,
     io::{self, Error, Result},
@@ -6,8 +8,6 @@ use std::{
     sync::Arc,
     task::{ready, Context, Poll},
 };
-
-use bytes::{Buf, Bytes};
 use tokio::{
     io::{AsyncRead, AsyncWrite, ReadBuf},
     runtime::Handle,
@@ -165,6 +165,16 @@ impl TcpStream {
     pub fn set_nodelay(&self, _nodelay: bool) -> Result<()> {
         Ok(())
     }
+
+    /// Receives data on the socket from the remote address to which it is connected,
+    /// without removing that data from the queue. On success, returns the number of bytes peeked.
+    pub async fn peek(&mut self, buf: &mut [u8]) -> Result<usize> {
+        self.read_half.peek(buf).await
+    }
+
+    pub fn poll_peek(&mut self, cx: &mut Context<'_>, buf: &mut ReadBuf) -> Poll<Result<usize>> {
+        self.read_half.poll_peek(cx, buf)
+    }
 }
 
 pub(crate) struct ReadHalf {
@@ -233,6 +243,48 @@ impl ReadHalf {
         } else {
             Some(avail)
         }
+    }
+
+    pub(crate) fn poll_peek(
+        &mut self,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf,
+    ) -> Poll<Result<usize>> {
+        if self.is_closed || buf.capacity() == 0 {
+            return Poll::Ready(Ok(0));
+        }
+
+        // If we have buffered data, peek from it
+        if let Some(bytes) = &self.rx.buffer {
+            let len = std::cmp::min(bytes.len(), buf.remaining());
+            buf.put_slice(&bytes[..len]);
+            return Poll::Ready(Ok(len));
+        }
+
+        match ready!(self.rx.recv.poll_recv(cx)) {
+            Some(seg) => match seg {
+                SequencedSegment::Data(bytes) => {
+                    let len = std::cmp::min(bytes.len(), buf.remaining());
+                    buf.put_slice(&bytes[..len]);
+                    self.rx.buffer = Some(bytes);
+
+                    Poll::Ready(Ok(len))
+                }
+                SequencedSegment::Fin => {
+                    self.is_closed = true;
+                    Poll::Ready(Ok(0))
+                }
+            },
+            None => Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::ConnectionReset,
+                "Connection reset",
+            ))),
+        }
+    }
+
+    pub(crate) async fn peek(&mut self, buf: &mut [u8]) -> Result<usize> {
+        let mut buf = ReadBuf::new(buf);
+        poll_fn(|cx| self.poll_peek(cx, &mut buf)).await
     }
 }
 
