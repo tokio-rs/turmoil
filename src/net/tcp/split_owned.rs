@@ -37,7 +37,9 @@ impl OwnedReadHalf {
         reunite(self, other)
     }
 
-    /// Attempt to receive data on the socket, without removing that data from the queue, registering the current task for wakeup if data is not yet available.
+    /// Attempts to receive data on the socket, without removing that data from
+    /// the queue, registering the current task for wakeup if data is not yet
+    /// available.
     pub fn poll_peek(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -46,6 +48,11 @@ impl OwnedReadHalf {
         Pin::new(&mut self.inner).poll_peek(cx, buf)
     }
 
+    /// Receives data on the socket from the remote address to which it is
+    /// connected, without removing that data from the queue. On success,
+    /// returns the number of bytes peeked.
+    ///
+    /// Successive calls return the same data.
     pub async fn peek(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         self.inner.peek(buf).await
     }
