@@ -10,11 +10,15 @@ use crate::{
     ToSocketAddrs, World, TRACING_TARGET,
 };
 
+use std::future::Future;
+use std::pin::pin;
+use std::task::{ready, Context, Poll};
 use std::{
     cmp,
     io::{self, Error, ErrorKind, Result},
     net::{Ipv6Addr, SocketAddr},
 };
+use tokio::io::ReadBuf;
 
 /// A simulated UDP socket.
 ///
@@ -58,6 +62,23 @@ impl Rx {
         buf[..limit].copy_from_slice(&bytes[..limit]);
 
         Ok((limit, datagram, origin))
+    }
+
+    /// Tries to receive from either the buffered message or the mpsc channel
+    pub fn poll_recv_from(
+        &mut self,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<Result<SocketAddr>> {
+        let (datagram, origin) = if let Some(datagram) = self.buffer.take() {
+            datagram
+        } else {
+            ready!(self.recv.poll_recv(cx)).expect("sender should never be dropped")
+        };
+        buf.clear();
+        let limit = cmp::min(buf.remaining(), datagram.0.len());
+        buf.put_slice(&datagram.0[..limit]);
+        Poll::Ready(Ok(origin))
     }
 
     /// Waits for the socket to become readable.
@@ -245,6 +266,21 @@ impl UdpSocket {
         tracing::trace!(target: TRACING_TARGET, src = ?origin, dst = ?self.local_addr, protocol = %datagram, "Recv");
 
         Ok((limit, origin))
+    }
+
+    /// Tries to receive a single datagram message on the socket. On success,
+    /// overwrites the contents of `buf` and returns the origin.
+    ///
+    /// If a message is too long to fit in the
+    /// supplied buffer, excess bytes may be discarded.
+    pub fn poll_recv_from(
+        &self,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<Result<SocketAddr>> {
+        let lock_future = pin!(self.rx.lock());
+        let mut rx = ready!(lock_future.poll(cx));
+        rx.poll_recv_from(cx, buf)
     }
 
     /// Waits for the socket to become readable.
