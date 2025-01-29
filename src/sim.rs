@@ -896,11 +896,11 @@ mod test {
             }
         });
 
-        sim.run()?;
+        sim.step()?;
         assert_eq!(tick_ms - 1, actual.load(Ordering::SeqCst));
 
         sim.bounce("host");
-        sim.run()?;
+        sim.step()?;
         assert_eq!((tick_ms * 2) - 1, actual.load(Ordering::SeqCst));
 
         Ok(())
@@ -914,7 +914,7 @@ mod test {
             Err("Host software finished unexpectedly")?
         });
 
-        assert!(sim.run().is_err());
+        assert!(sim.step().is_err());
     }
 
     #[test]
