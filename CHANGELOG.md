@@ -1,3 +1,15 @@
+# 0.6.5 (January 28, 2025)
+
+### Added
+
+- Add peek to TcpStream ([#206])
+
+### Fixed
+
+- Various clippy and dependency chores
+
+[#206]: https://github.com/tokio-rs/turmoil/pull/206
+
 # 0.6.4 (October 9, 2024)
 
 ### Added
