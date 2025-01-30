@@ -418,8 +418,8 @@ impl Tcp {
     }
 
     pub(crate) fn close_stream_half(&mut self, pair: SocketPair) {
-        // Receiving a RST removes the socket, so it's possible that has occured
-        // when halfs of the stream drop.
+        // Receiving a RST removes the socket, so it's possible that has occurred
+        // when halves of the stream drop.
         if let Some(sock) = self.sockets.get_mut(&pair) {
             sock.ref_ct -= 1;
 
