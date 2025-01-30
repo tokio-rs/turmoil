@@ -507,13 +507,13 @@ impl Link {
     fn rand_partition(&self, global: &config::MessageLoss, rand: &mut dyn RngCore) -> bool {
         let config = self.config.message_loss.as_ref().unwrap_or(global);
         let fail_rate = config.fail_rate;
-        fail_rate > 0.0 && rand.gen_bool(fail_rate)
+        fail_rate > 0.0 && rand.random_bool(fail_rate)
     }
 
     fn rand_repair(&self, global: &config::MessageLoss, rand: &mut dyn RngCore) -> bool {
         let config = self.config.message_loss.as_ref().unwrap_or(global);
         let repair_rate = config.repair_rate;
-        repair_rate > 0.0 && rand.gen_bool(repair_rate)
+        repair_rate > 0.0 && rand.random_bool(repair_rate)
     }
 
     fn delay(&self, global: &config::Latency, rand: &mut dyn RngCore) -> Duration {
