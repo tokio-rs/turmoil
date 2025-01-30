@@ -240,7 +240,7 @@ fn init(config: &mut Config) -> (Runtime, LocalSet) {
 
     #[cfg(tokio_unstable)]
     if let Some(rng) = &mut config.rng {
-        let bytes: [u8; 32] = rand::Rng::gen(rng);
+        let bytes: [u8; 32] = rand::Rng::random(rng);
         let seed = tokio::runtime::RngSeed::from_bytes(&bytes);
         tokio_builder.rng_seed(seed);
     }
