@@ -1099,10 +1099,10 @@ mod test {
             });
         }
 
-        sim.run()?;
+        sim.step()?;
         assert_eq!(count.load(Ordering::SeqCst), 3);
         sim.bounce(regex::Regex::new("host-[12]")?);
-        sim.run()?;
+        sim.step()?;
         assert_eq!(count.load(Ordering::SeqCst), 5);
 
         Ok(())
