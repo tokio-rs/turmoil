@@ -11,7 +11,9 @@ use tokio::time::Duration;
 use tracing::Level;
 
 use crate::host::HostTimer;
-use crate::{for_pairs, Config, LinksIter, Result, Rt, ToIpAddr, ToIpAddrs, World, TRACING_TARGET};
+use crate::{
+    for_pairs, rt, Config, LinksIter, Result, Rt, ToIpAddr, ToIpAddrs, World, TRACING_TARGET,
+};
 
 /// A handle for interacting with the simulation.
 pub struct Sim<'a> {
@@ -333,11 +335,21 @@ impl<'a> Sim<'a> {
         f(top.iter_mut())
     }
 
-    /// Run the simulation to completion.
+    /// Run the simulation until all client hosts have completed.
     ///
-    /// Executes a simple event loop that calls [step](#method.step) each iteration,
-    /// returning early if any host software errors.
+    /// Executes a simple event loop that calls [step](#method.step) each
+    /// iteration, returning early if any host software errors.
     pub fn run(&mut self) -> Result {
+        // check if we have any clients
+        if !self
+            .rts
+            .iter()
+            .any(|(_, rt)| matches!(rt.kind, rt::Kind::Client))
+        {
+            tracing::info!(target: TRACING_TARGET, "No client hosts registered, exiting simulation");
+            return Ok(());
+        }
+
         loop {
             let is_finished = self.step()?;
 
@@ -357,7 +369,7 @@ impl<'a> Sim<'a> {
     ///
     /// Returns whether or not all clients have completed.
     pub fn step(&mut self) -> Result<bool> {
-        tracing::trace!("step {}", self.steps);
+        tracing::trace!(target: TRACING_TARGET, "step {}", self.steps);
 
         let tick = self.config.tick;
         let mut is_finished = true;
@@ -884,11 +896,11 @@ mod test {
             }
         });
 
-        sim.run()?;
+        sim.step()?;
         assert_eq!(tick_ms - 1, actual.load(Ordering::SeqCst));
 
         sim.bounce("host");
-        sim.run()?;
+        sim.step()?;
         assert_eq!((tick_ms * 2) - 1, actual.load(Ordering::SeqCst));
 
         Ok(())
@@ -902,7 +914,7 @@ mod test {
             Err("Host software finished unexpectedly")?
         });
 
-        assert!(sim.run().is_err());
+        assert!(sim.step().is_err());
     }
 
     #[test]
@@ -1087,10 +1099,10 @@ mod test {
             });
         }
 
-        sim.run()?;
+        sim.step()?;
         assert_eq!(count.load(Ordering::SeqCst), 3);
         sim.bounce(regex::Regex::new("host-[12]")?);
-        sim.run()?;
+        sim.step()?;
         assert_eq!(count.load(Ordering::SeqCst), 5);
 
         Ok(())
