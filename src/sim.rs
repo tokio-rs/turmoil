@@ -383,11 +383,10 @@ impl<'a> Sim<'a> {
         // completes, extract the result and return early if an error is
         // encountered.
 
-        let mut running: Vec<_> = self
+        let (mut running, stopped): (Vec<_>, Vec<_>) = self
             .rts
             .iter_mut()
-            .filter(|(_, rt)| rt.is_software_running())
-            .collect();
+            .partition(|(_, rt)| rt.is_software_running());
         if self.config.random_node_order {
             running.shuffle(&mut self.world.borrow_mut().rng);
         }
@@ -422,6 +421,13 @@ impl<'a> Sim<'a> {
             let mut world = self.world.borrow_mut();
             world.current = None;
 
+            world.tick(addr, tick);
+        }
+
+        // Tick the nodes that are not actively running (i.e., crashed) to ensure their clock keeps up
+        // with the rest of the simulation when they are restarted (bounced).
+        for (&addr, _rt) in stopped {
+            let mut world = self.world.borrow_mut();
             world.tick(addr, tick);
         }
 
@@ -902,6 +908,41 @@ mod test {
         sim.bounce("host");
         sim.step()?;
         assert_eq!((tick_ms * 2) - 1, actual.load(Ordering::SeqCst));
+
+        Ok(())
+    }
+
+    #[test]
+    fn elapsed_time_across_crashes() -> Result {
+        let tick_ms = 5;
+        let mut sim = Builder::new()
+            .tick_duration(Duration::from_millis(tick_ms))
+            .build();
+
+        let clock_1 = Arc::new(AtomicU64::new(0));
+        let clock_1_moved = clock_1.clone();
+
+        sim.host("host1", move || {
+            let clock = clock_1_moved.clone();
+            async move {
+                loop {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                    clock.store(sim_elapsed().unwrap().as_millis() as u64, Ordering::SeqCst);
+                }
+            }
+        });
+
+        // Crashing host 1
+        sim.crash("host1");
+        sim.step()?;
+        // After bouncing host 1, host's clock must be synced.
+        sim.bounce("host1");
+        sim.step()?;
+        assert_eq!(
+            2 * tick_ms - 1,
+            clock_1.load(Ordering::SeqCst),
+            "Host 1 should have caught up"
+        );
 
         Ok(())
     }
