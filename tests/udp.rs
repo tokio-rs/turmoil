@@ -1,3 +1,6 @@
+use std::future::Future;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::{
     io::{self, ErrorKind},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
@@ -5,7 +8,8 @@ use std::{
     sync::{atomic::AtomicUsize, atomic::Ordering},
     time::Duration,
 };
-
+use tokio::io::ReadBuf;
+use tokio::time::sleep;
 use tokio::{sync::oneshot, time::timeout};
 use turmoil::{
     lookup,
@@ -154,6 +158,67 @@ fn try_ping_pong() -> Result {
 
         sock.readable().await?;
         try_recv_pong(&sock)
+    });
+
+    sim.run()
+}
+
+#[test]
+fn poll_recv() -> Result {
+    let mut sim = Builder::new().build();
+
+    sim.client("server", async {
+        struct TestFuture<F: FnMut(&mut Context)>(F);
+        impl<F: FnMut(&mut Context) + Unpin> Future for TestFuture<F> {
+            type Output = ();
+
+            fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+                Pin::into_inner(self).0(cx);
+                Poll::Ready(())
+            }
+        }
+
+        let expected_origin = lookup("client");
+        let sock = bind().await?;
+        let buffer = &mut [0u8; 64];
+        let mut read_buf = ReadBuf::new(buffer);
+
+        TestFuture(|cx| {
+            let received = sock.poll_recv_from(cx, &mut read_buf);
+            assert!(matches!(received, Poll::Pending));
+        })
+        .await;
+
+        // before client sends
+        sleep(Duration::from_millis(1000)).await;
+        // after client sends
+
+        TestFuture(|cx| {
+            let received = sock.poll_recv_from(cx, &mut read_buf);
+            assert!(matches!(received , Poll::Ready(Ok(x)) if x.ip() == expected_origin));
+        })
+        .await;
+        sock.readable().await?;
+        TestFuture(|cx| {
+            let received = sock.poll_recv_from(cx, &mut read_buf);
+            assert!(matches!(received , Poll::Ready(Ok(x)) if x.ip() == expected_origin));
+        })
+        .await;
+        TestFuture(|cx| {
+            let received = sock.poll_recv_from(cx, &mut read_buf);
+            assert!(matches!(received, Poll::Pending));
+        })
+        .await;
+        assert_eq!(read_buf.filled(), b"pingping");
+        Ok(())
+    });
+
+    sim.client("client", async {
+        let sock = bind().await.unwrap();
+        sleep(Duration::from_millis(500)).await;
+        try_send_ping(&sock)?;
+        try_send_ping(&sock)?;
+        Ok(())
     });
 
     sim.run()
