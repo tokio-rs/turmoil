@@ -64,7 +64,7 @@ impl Rx {
         Ok((limit, datagram, origin))
     }
 
-    /// Tries to receive from either the buffered message or the mpsc channel
+    /// Tries to receive from either the buffered message or the mpsc channel.
     fn poll_recv_from(
         &mut self,
         cx: &mut Context<'_>,
@@ -75,7 +75,6 @@ impl Rx {
         } else {
             ready!(self.recv.poll_recv(cx)).expect("sender should never be dropped")
         };
-        buf.clear();
         let limit = cmp::min(buf.remaining(), datagram.0.len());
         buf.put_slice(&datagram.0[..limit]);
         Poll::Ready(Ok(origin))
@@ -269,10 +268,10 @@ impl UdpSocket {
     }
 
     /// Tries to receive a single datagram message on the socket. On success,
-    /// overwrites the contents of `buf` and returns the origin.
+    /// appends to `buf` and returns the origin.
     ///
-    /// If a message is too long to fit in the
-    /// supplied buffer, excess bytes may be discarded.
+    /// If a message is too long to fit in the unfilled part of `buf` ,
+    /// excess bytes may be discarded.
     pub fn poll_recv_from(
         &self,
         cx: &mut Context<'_>,
