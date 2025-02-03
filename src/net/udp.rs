@@ -65,7 +65,7 @@ impl Rx {
     }
 
     /// Tries to receive from either the buffered message or the mpsc channel
-    pub fn poll_recv_from(
+    fn poll_recv_from(
         &mut self,
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
