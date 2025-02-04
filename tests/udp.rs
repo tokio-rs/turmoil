@@ -1,6 +1,5 @@
-use std::future::Future;
-use std::pin::Pin;
-use std::task::{Context, Poll};
+use std::future::poll_fn;
+use std::task::Poll;
 use std::{
     io::{self, ErrorKind},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
@@ -168,24 +167,15 @@ fn poll_recv() -> Result {
     let mut sim = Builder::new().build();
 
     sim.client("server", async {
-        struct TestFuture<F: FnMut(&mut Context)>(F);
-        impl<F: FnMut(&mut Context) + Unpin> Future for TestFuture<F> {
-            type Output = ();
-
-            fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-                Pin::into_inner(self).0(cx);
-                Poll::Ready(())
-            }
-        }
-
         let expected_origin = lookup("client");
         let sock = bind().await?;
         let buffer = &mut [0u8; 64];
         let mut read_buf = ReadBuf::new(buffer);
 
-        TestFuture(|cx| {
+        poll_fn(|cx| {
             let received = sock.poll_recv_from(cx, &mut read_buf);
             assert!(matches!(received, Poll::Pending));
+            Poll::Ready(())
         })
         .await;
 
@@ -193,20 +183,23 @@ fn poll_recv() -> Result {
         sleep(Duration::from_millis(1000)).await;
         // after client sends
 
-        TestFuture(|cx| {
+        poll_fn(|cx| {
             let received = sock.poll_recv_from(cx, &mut read_buf);
             assert!(matches!(received , Poll::Ready(Ok(x)) if x.ip() == expected_origin));
+            Poll::Ready(())
         })
         .await;
         sock.readable().await?;
-        TestFuture(|cx| {
+        poll_fn(|cx| {
             let received = sock.poll_recv_from(cx, &mut read_buf);
             assert!(matches!(received , Poll::Ready(Ok(x)) if x.ip() == expected_origin));
+            Poll::Ready(())
         })
         .await;
-        TestFuture(|cx| {
+        poll_fn(|cx| {
             let received = sock.poll_recv_from(cx, &mut read_buf);
             assert!(matches!(received, Poll::Pending));
+            Poll::Ready(())
         })
         .await;
         assert_eq!(read_buf.filled(), b"pingping");
