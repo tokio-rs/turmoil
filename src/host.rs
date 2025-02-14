@@ -19,6 +19,9 @@ use tokio::time::{Duration, Instant};
 ///
 /// Both modes may be used simultaneously.
 pub(crate) struct Host {
+    /// Host name.
+    pub(crate) nodename: String,
+
     /// Host ip address.
     pub(crate) addr: IpAddr,
 
@@ -37,6 +40,7 @@ pub(crate) struct Host {
 
 impl Host {
     pub(crate) fn new(
+        nodename: impl Into<String>,
         addr: IpAddr,
         timer: HostTimer,
         ephemeral_ports: RangeInclusive<u16>,
@@ -44,6 +48,7 @@ impl Host {
         udp_capacity: usize,
     ) -> Host {
         Host {
+            nodename: nodename.into(),
             addr,
             udp: Udp::new(udp_capacity),
             tcp: Tcp::new(tcp_capacity),
@@ -73,7 +78,7 @@ impl Host {
             return ret;
         }
 
-        panic!("Host ports exhausted")
+        panic!("Host: '{}' ports exhausted", self.nodename)
     }
 
     /// Receive the `envelope` from the network.
@@ -462,6 +467,7 @@ mod test {
     #[test]
     fn recycle_ports() -> Result {
         let mut host = Host::new(
+            "host",
             std::net::Ipv4Addr::UNSPECIFIED.into(),
             HostTimer::new(Duration::ZERO),
             49152..=49162,

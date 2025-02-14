@@ -229,6 +229,7 @@ impl World {
         self.hosts.insert(
             addr,
             Host::new(
+                nodename,
                 addr,
                 timer,
                 config.ephemeral_ports.clone(),
