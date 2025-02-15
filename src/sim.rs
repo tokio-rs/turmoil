@@ -777,7 +777,7 @@ mod test {
             })
         };
 
-        let construct_a_first = sim.world.borrow_mut().rng.gen_bool(0.5);
+        let construct_a_first = sim.world.borrow_mut().rng.random_bool(0.5);
         if construct_a_first {
             make_a(&mut sim);
             make_b(&mut sim);
