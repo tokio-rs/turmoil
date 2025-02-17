@@ -1,4 +1,3 @@
-use rand::seq::SliceRandom;
 use std::cell::RefCell;
 use std::future::Future;
 use std::net::IpAddr;
@@ -7,6 +6,7 @@ use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
 use indexmap::IndexMap;
+use rand::seq::SliceRandom;
 use tokio::time::Duration;
 use tracing::Level;
 
@@ -442,7 +442,7 @@ impl<'a> Sim<'a> {
 #[cfg(test)]
 mod test {
     use rand::Rng;
-    use std::future;
+    use std::{future, io};
     use std::{
         net::{IpAddr, Ipv4Addr},
         rc::Rc,
@@ -685,7 +685,9 @@ mod test {
 
         sim.client("client", async move {
             // Peers are partitioned. TCP setup should fail.
-            let _ = TcpStream::connect("server:1234").await.unwrap_err();
+            let err = TcpStream::connect("server:1234").await.unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::HostUnreachable);
+            assert_eq!(err.to_string(), "host unreachable");
 
             Ok(())
         });
@@ -733,10 +735,9 @@ mod test {
                 async move {
                     let udp_socket =
                         UdpSocket::bind((IpAddr::V4(Ipv4Addr::UNSPECIFIED), 1234)).await?;
-                    udp_socket
-                        .send_to(&[42], format!("{}:1234", host_b))
-                        .await
-                        .expect("sending packet should appear to work, even if partitioned");
+                    // If hosts are partitioned, this will return an unreachable
+                    // error.
+                    let _ = udp_socket.send_to(&[42], format!("{}:1234", host_b)).await;
 
                     *a_did_receive.lock().unwrap() = Some(matches!(
                         tokio::time::timeout(
@@ -758,10 +759,9 @@ mod test {
                 async move {
                     let udp_socket =
                         UdpSocket::bind((IpAddr::V4(Ipv4Addr::UNSPECIFIED), 1234)).await?;
-                    udp_socket
-                        .send_to(&[42], format!("{}:1234", host_a))
-                        .await
-                        .expect("sending packet should work");
+                    // If hosts are partitioned, this will return an unreachable
+                    // error.
+                    let _ = udp_socket.send_to(&[42], format!("{}:1234", host_a)).await;
 
                     *b_did_receive.lock().unwrap() = Some(matches!(
                         tokio::time::timeout(
