@@ -308,13 +308,13 @@ impl UdpSocket {
         Ok(())
     }
 
-    /// Has no effect in turmoil. API parity with 
+    /// Has no effect in turmoil. API parity with
     /// https://docs.rs/tokio/latest/tokio/net/struct.UdpSocket.html#method.set_multicast_loop_v6
     pub fn set_multicast_loop_v6(&self, _on: bool) -> Result<()> {
         Ok(())
     }
 
-    /// Has no effect in turmoil. API parity with 
+    /// Has no effect in turmoil. API parity with
     /// https://docs.rs/tokio/latest/tokio/net/struct.UdpSocket.html#method.join_multicast_v6
     pub fn join_multicast_v6(&self, _multiaddr: &Ipv6Addr, _interface: u32) -> Result<()> {
         Ok(())

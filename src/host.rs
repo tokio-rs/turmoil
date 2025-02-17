@@ -19,6 +19,9 @@ use tokio::time::{Duration, Instant};
 ///
 /// Both modes may be used simultaneously.
 pub(crate) struct Host {
+    /// Host name.
+    pub(crate) nodename: String,
+
     /// Host ip address.
     pub(crate) addr: IpAddr,
 
@@ -37,6 +40,7 @@ pub(crate) struct Host {
 
 impl Host {
     pub(crate) fn new(
+        nodename: impl Into<String>,
         addr: IpAddr,
         timer: HostTimer,
         ephemeral_ports: RangeInclusive<u16>,
@@ -44,6 +48,7 @@ impl Host {
         udp_capacity: usize,
     ) -> Host {
         Host {
+            nodename: nodename.into(),
             addr,
             udp: Udp::new(udp_capacity),
             tcp: Tcp::new(tcp_capacity),
@@ -73,7 +78,7 @@ impl Host {
             return ret;
         }
 
-        panic!("Host ports exhausted")
+        panic!("Host: '{}' ports exhausted", self.nodename)
     }
 
     /// Receive the `envelope` from the network.
@@ -213,7 +218,7 @@ impl Udp {
     }
 
     pub(crate) fn unbind(&mut self, addr: SocketAddr) {
-        let exists = self.binds.remove(&addr.port());
+        let exists = self.binds.swap_remove(&addr.port());
 
         assert!(exists.is_some(), "unknown bind {addr}");
 
@@ -306,7 +311,7 @@ impl StreamSocket {
         while self.buf.contains_key(&(self.recv_seq + 1)) {
             self.recv_seq += 1;
 
-            let segment = self.buf.remove(&self.recv_seq).unwrap();
+            let segment = self.buf.swap_remove(&self.recv_seq).unwrap();
             self.sender.try_send(segment).map_err(|e| match e {
                 Closed(_) => Protocol::Tcp(Segment::Rst),
                 Full(_) => panic!("{} socket buffer full", self.local_addr),
@@ -407,7 +412,9 @@ impl Tcp {
             },
             Segment::Rst => {
                 if self.sockets.get(&SocketPair::new(dst, src)).is_some() {
-                    self.sockets.remove(&SocketPair::new(dst, src)).unwrap();
+                    self.sockets
+                        .swap_remove(&SocketPair::new(dst, src))
+                        .unwrap();
                 }
             }
         };
@@ -416,19 +423,19 @@ impl Tcp {
     }
 
     pub(crate) fn close_stream_half(&mut self, pair: SocketPair) {
-        // Receiving a RST removes the socket, so it's possible that has occured
-        // when halfs of the stream drop.
+        // Receiving a RST removes the socket, so it's possible that has occurred
+        // when halves of the stream drop.
         if let Some(sock) = self.sockets.get_mut(&pair) {
             sock.ref_ct -= 1;
 
             if sock.ref_ct == 0 {
-                self.sockets.remove(&pair).unwrap();
+                self.sockets.swap_remove(&pair).unwrap();
             }
         }
     }
 
     pub(crate) fn unbind(&mut self, addr: SocketAddr) {
-        let exists = self.binds.remove(&addr.port());
+        let exists = self.binds.swap_remove(&addr.port());
 
         assert!(exists.is_some(), "unknown bind {addr}");
 
@@ -460,6 +467,7 @@ mod test {
     #[test]
     fn recycle_ports() -> Result {
         let mut host = Host::new(
+            "host",
             std::net::Ipv4Addr::UNSPECIFIED.into(),
             HostTimer::new(Duration::ZERO),
             49152..=49162,

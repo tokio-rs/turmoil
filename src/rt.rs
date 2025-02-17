@@ -1,12 +1,12 @@
+use std::future::Future;
 use std::mem;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use futures::Future;
 use tokio::runtime::Runtime;
 use tokio::task::JoinHandle;
 use tokio::task::LocalSet;
-use tokio::time::{Duration, Instant, sleep};
+use tokio::time::{sleep, Duration, Instant};
 
 use super::Result;
 
@@ -16,7 +16,7 @@ use super::Result;
 type Software<'a> = Box<dyn Fn() -> Pin<Box<dyn Future<Output = Result>>> + 'a>;
 
 /// Runtime kinds.
-enum Kind<'a> {
+pub enum Kind<'a> {
     /// A runtime for executing test code.
     Client,
 
@@ -33,8 +33,8 @@ enum Kind<'a> {
 /// The tokio runtime is paused (see [`Builder::start_paused`]), which gives us
 /// control over when and how to advance time. In particular, see [`Rt::tick`],
 /// which lets the runtime do a bit more work.
-pub(crate) struct Rt<'a> {
-    kind: Kind<'a>,
+pub struct Rt<'a> {
+    pub kind: Kind<'a>,
 
     /// Handle to the Tokio runtime driving this simulated host. Each runtime
     /// may have a different sense of "now" which simulates clock skew.
@@ -44,7 +44,7 @@ pub(crate) struct Rt<'a> {
     local: LocalSet,
 
     /// A user readable name to identify the node.
-    pub(crate) nodename: Arc<str>,
+    pub nodename: Arc<str>,
 
     /// Optional handle to a host's software. When software finishes, the handle is
     /// consumed to check for error, which is propagated up to fail the simulation.
@@ -239,6 +239,10 @@ fn init(enable_io: bool) -> (Runtime, LocalSet) {
 }
 
 fn new_local() -> LocalSet {
+    #[cfg(not(tokio_unstable))]
+    let local = LocalSet::new();
+
+    #[cfg(tokio_unstable)]
     let mut local = LocalSet::new();
 
     #[cfg(tokio_unstable)]

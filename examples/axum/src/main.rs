@@ -1,23 +1,25 @@
-use axum::{body::Body, extract::Path, http::Request, routing::get, Router};
+use axum::{body::Body, extract::Path, http::Request, routing::get, serve::Listener, Router};
 use http_body_util::BodyExt as _;
 use hyper_util::{client::legacy::Client, rt::TokioExecutor};
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use tracing::{info_span, Instrument};
 use turmoil::{net, Builder};
 
 fn main() {
-    if std::env::var("RUST_LOG").is_err() {
-        std::env::set_var("RUST_LOG", "info");
-    }
-
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::builder()
+                .with_default_directive(tracing::level_filters::LevelFilter::INFO.into())
+                .from_env_lossy(),
+        )
+        .init();
 
     let addr = (IpAddr::from(Ipv4Addr::UNSPECIFIED), 9999);
 
     let mut sim = Builder::new().build();
 
     let router = Router::new().route(
-        "/greet/:name",
+        "/greet/{name}",
         get(|Path(name): Path<String>| async move { format!("Hello {name}!") }),
     );
 
@@ -25,28 +27,9 @@ fn main() {
         let router = router.clone();
         async move {
             let listener = net::TcpListener::bind(addr).await?;
-            loop {
-                let (tcp_stream, _remote_addr) = listener.accept().await?;
-                let tcp_stream = hyper_util::rt::TokioIo::new(tcp_stream);
-
-                let hyper_service = hyper_util::service::TowerToHyperService::new(router.clone());
-
-                let result = hyper_util::server::conn::auto::Builder::new(
-                    hyper_util::rt::TokioExecutor::new(),
-                )
-                .serve_connection_with_upgrades(tcp_stream, hyper_service)
-                .await;
-                if result.is_err() {
-                    // This error only appears when the client doesn't send a request and
-                    // terminate the connection.
-                    //
-                    // If client sends one request then terminate connection whenever, it doesn't
-                    // appear.
-                    break;
-                }
-            }
-
-            Ok(())
+            axum::serve(TurmoilListener(listener), router)
+                .await
+                .map_err(Into::into)
         }
         .instrument(info_span!("server"))
     });
@@ -72,6 +55,22 @@ fn main() {
     );
 
     sim.run().unwrap();
+}
+
+struct TurmoilListener(net::TcpListener);
+
+impl Listener for TurmoilListener {
+    type Io = net::TcpStream;
+
+    type Addr = SocketAddr;
+
+    fn accept(&mut self) -> impl std::future::Future<Output = (Self::Io, Self::Addr)> + Send {
+        async move { self.0.accept().await.unwrap() }
+    }
+
+    fn local_addr(&self) -> tokio::io::Result<Self::Addr> {
+        self.0.local_addr()
+    }
 }
 
 mod connector {

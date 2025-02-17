@@ -744,6 +744,145 @@ fn split() -> Result {
     sim.run()
 }
 
+#[test]
+fn peek_empty_buffer() -> Result {
+    let mut sim = Builder::new().build();
+
+    sim.client("server", async move {
+        let listener = bind().await?;
+        let _ = listener.accept().await?;
+        Ok(())
+    });
+
+    sim.client("client", async move {
+        let mut s = TcpStream::connect(("server", PORT)).await?;
+
+        // no-op peek with empty buffer
+        let mut buf = [0; 0];
+        let n = s.peek(&mut buf).await?;
+        assert_eq!(0, n);
+
+        Ok(())
+    });
+
+    sim.run()
+}
+
+#[test]
+fn peek_then_read() -> Result {
+    let mut sim = Builder::new().build();
+
+    sim.client("server", async move {
+        let listener = bind().await?;
+        let (mut s, _) = listener.accept().await?;
+
+        s.write_u64(1234).await?;
+        Ok(())
+    });
+
+    sim.client("client", async move {
+        let mut s = TcpStream::connect(("server", PORT)).await?;
+
+        // peek full message
+        let mut peek_buf = [0; 8];
+        assert_eq!(8, s.peek(&mut peek_buf).await?);
+        assert_eq!(1234u64, u64::from_be_bytes(peek_buf));
+
+        // peek again should see same data
+        let mut peek_buf2 = [0; 8];
+        assert_eq!(8, s.peek(&mut peek_buf2).await?);
+        assert_eq!(1234u64, u64::from_be_bytes(peek_buf2));
+
+        // read should consume the data
+        assert_eq!(1234, s.read_u64().await?);
+        let mut buf = [0; 8];
+        assert!(matches!(s.read(&mut buf).await, Ok(0)));
+
+        Ok(())
+    });
+
+    sim.run()
+}
+
+#[test]
+fn peek_partial() -> Result {
+    let mut sim = Builder::new().build();
+
+    sim.client("server", async move {
+        let listener = bind().await?;
+        let (mut s, _) = listener.accept().await?;
+
+        s.write_all(&[0, 0, 1, 1]).await?;
+        Ok(())
+    });
+
+    sim.client("client", async move {
+        let mut s = TcpStream::connect(("server", PORT)).await?;
+
+        // peek with smaller buffer
+        let mut peek_buf = [0; 2];
+        assert_eq!(2, s.peek(&mut peek_buf).await?);
+        assert_eq!([0, 0], peek_buf);
+
+        // peek with larger buffer should still see all data
+        let mut peek_buf2 = [0; 4];
+        assert_eq!(4, s.peek(&mut peek_buf2).await?);
+        assert_eq!([0, 0, 1, 1], peek_buf2);
+
+        // read partial
+        let mut read_buf = [0; 2];
+        assert_eq!(2, s.read(&mut read_buf).await?);
+        assert_eq!([0, 0], read_buf);
+
+        // peek remaining
+        let mut peek_buf3 = [0; 2];
+        assert_eq!(2, s.peek(&mut peek_buf3).await?);
+        assert_eq!([1, 1], peek_buf3);
+
+        Ok(())
+    });
+
+    sim.run()
+}
+
+#[test]
+fn peek_multiple_messages() -> Result {
+    let mut sim = Builder::new().build();
+
+    sim.client("server", async move {
+        let listener = bind().await?;
+        let (mut s, _) = listener.accept().await?;
+
+        s.write_u64(1234).await?;
+        s.write_u64(5678).await?;
+        Ok(())
+    });
+
+    sim.client("client", async move {
+        let mut s = TcpStream::connect(("server", PORT)).await?;
+
+        // peek first message
+        let mut peek_buf = [0; 8];
+        assert_eq!(8, s.peek(&mut peek_buf).await?);
+        assert_eq!(1234u64, u64::from_be_bytes(peek_buf));
+
+        // read first message
+        assert_eq!(1234, s.read_u64().await?);
+
+        // peek second message
+        let mut peek_buf2 = [0; 8];
+        assert_eq!(8, s.peek(&mut peek_buf2).await?);
+        assert_eq!(5678u64, u64::from_be_bytes(peek_buf2));
+
+        // read second message
+        assert_eq!(5678, s.read_u64().await?);
+
+        Ok(())
+    });
+
+    sim.run()
+}
+
 // # IpVersion specific tests
 
 #[test]

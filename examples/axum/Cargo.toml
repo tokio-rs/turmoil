@@ -5,13 +5,13 @@ edition = "2021"
 publish = false
 
 [dependencies]
-axum = "0.7"
-hyper = { version = "1", features = ["full"] }
-hyper-util = { version = "0.1.2", features = ["full"] }
+axum = "0.8"
+hyper = "1"
+hyper-util = { version = "0.1.2", features = ["client-legacy"] }
 http-body-util = "0.1"
 turmoil = { path = "../.." }
 tracing = "0.1"
-tracing-subscriber = "0.3"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio = "1"
 tower = { version = "0.5", features = ["util"] }
 pin-project-lite = "0.2"
