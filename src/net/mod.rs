@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 pub mod tcp;
 pub use tcp::{listener::TcpListener, stream::TcpStream};
 
-mod udp;
+pub(crate) mod udp;
 pub use udp::UdpSocket;
 
 #[derive(Debug, Copy, Clone, Hash, Eq, PartialEq)]
