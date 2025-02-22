@@ -2,6 +2,7 @@ use crate::config::Config;
 use crate::envelope::Protocol;
 use crate::host::HostTimer;
 use crate::ip::IpVersionAddrIter;
+use crate::net::udp::MulticastGroups;
 use crate::{
     config, for_pairs, Dns, Host, Result as TurmoilResult, ToIpAddr, ToIpAddrs, Topology,
     TRACING_TARGET,
@@ -25,6 +26,9 @@ pub(crate) struct World {
 
     /// Maps hostnames to ip addresses.
     pub(crate) dns: Dns,
+
+    // Maps multicast groups to udp destination addresses.
+    pub(crate) multicast_groups: MulticastGroups,
 
     /// If set, this is the current host being executed.
     pub(crate) current: Option<IpAddr>,
@@ -52,6 +56,7 @@ impl World {
             hosts: IndexMap::new(),
             topology: Topology::new(link),
             dns: Dns::new(addrs),
+            multicast_groups: MulticastGroups::default(),
             current: None,
             rng,
             tick_duration,
