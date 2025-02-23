@@ -293,6 +293,48 @@ fn accept_front_of_line_blocking() -> Result {
 }
 
 #[test]
+fn accept_front_of_line_dropped() -> Result {
+    let wait = Rc::new(Notify::new());
+    let notify = wait.clone();
+
+    let mut sim = Builder::new()
+        .min_message_latency(Duration::ZERO)
+        .max_message_latency(Duration::ZERO)
+        .build();
+
+    sim.host("server", move || {
+        let wait = Rc::clone(&wait);
+        async move {
+            let listener = bind().await?;
+            wait.notified().await;
+
+            while let Ok((_, peer)) = listener.accept().await {
+                tracing::debug!("peer {}", peer);
+            }
+
+            Ok(())
+        }
+    });
+
+    sim.client("client", async move {
+        // Queue up a number of broken connections at the server.
+        for _ in 0..5 {
+            let connect = TcpStream::connect(("server", PORT));
+            assert!(timeout(Duration::from_secs(1), connect).await.is_err());
+        }
+
+        // After allowing the server to accept, the next connection attempt
+        // should succeed.
+        notify.notify_one();
+        let _ = TcpStream::connect(("server", PORT)).await?;
+
+        Ok(())
+    });
+
+    sim.run()
+}
+
+#[test]
 fn send_upon_accept() -> Result {
     let mut sim = Builder::new().build();
 
