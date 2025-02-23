@@ -64,10 +64,15 @@ impl TcpListener {
     /// established, the corresponding [`TcpStream`] and the remote peer’s
     /// address will be returned.
     pub async fn accept(&self) -> Result<(TcpStream, SocketAddr)> {
+        enum Retry {
+            Now,
+            Wait,
+        }
+
         loop {
-            let maybe_accept = World::current(|world| {
+            let accept_result = World::current(|world| {
                 let host = world.current_host_mut();
-                let (syn, origin) = host.tcp.accept(self.local_addr)?;
+                let (syn, origin) = host.tcp.accept(self.local_addr).ok_or(Retry::Wait)?;
 
                 tracing::trace!(target: TRACING_TARGET, src = ?origin, dst = ?self.local_addr, protocol = %"TCP SYN", "Recv");
 
@@ -77,7 +82,7 @@ impl TcpListener {
                 tracing::trace!(target: TRACING_TARGET, src = ?self.local_addr, dst = ?origin, protocol = %"TCP SYN-ACK", "Send");
 
                 if ack.is_err() {
-                    return None;
+                    return Err(Retry::Now);
                 }
 
                 let mut my_addr = self.local_addr;
@@ -91,14 +96,19 @@ impl TcpListener {
                 let pair = SocketPair::new(my_addr, origin);
                 let rx = host.tcp.new_stream(pair);
 
-                Some((TcpStream::new(pair, rx), origin))
+                tracing::trace!(target: TRACING_TARGET, src = ?self.local_addr, dst = ?origin, "Accepted");
+                Ok((TcpStream::new(pair, rx), origin))
             });
 
-            if let Some(accepted) = maybe_accept {
-                return Ok(accepted);
+            match accept_result {
+                Ok(accepted) => return Ok(accepted),
+                Err(Retry::Now) => (),
+                Err(Retry::Wait) => {
+                    tracing::trace!(target: TRACING_TARGET, src = ?self.local_addr, "Waiting for notify");
+                    self.notify.notified().await;
+                    tracing::trace!(target: TRACING_TARGET, src = ?self.local_addr, "Received notify");
+                }
             }
-
-            self.notify.notified().await;
         }
     }
 
