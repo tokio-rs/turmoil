@@ -18,7 +18,7 @@ pub enum Protocol {
 }
 
 /// UDP datagram.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Datagram(pub Bytes);
 
 /// This is a simplification of real TCP.
