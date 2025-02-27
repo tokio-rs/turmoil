@@ -1,7 +1,7 @@
+use crate::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use indexmap::IndexMap;
 #[cfg(feature = "regex")]
 use regex::Regex;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
 use crate::ip::IpVersionAddrIter;
 

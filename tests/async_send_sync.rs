@@ -43,7 +43,7 @@ macro_rules! async_assert_fn_send {
 }
 
 macro_rules! async_assert_fn_sync {
-    ($(!)?Send & Sync & $(!)?Unpin, $value:expr) => {
+    ($(!)?Send &Sync & $(!)?Unpin, $value:expr) => {
         require_sync(&$value);
     };
     ($(!)?Send & !Sync & $(!)?Unpin, $value:expr) => {
@@ -52,7 +52,7 @@ macro_rules! async_assert_fn_sync {
 }
 
 macro_rules! async_assert_fn_unpin {
-    ($(!)?Send & $(!)?Sync & Unpin, $value:expr) => {
+    ($(!)?Send & $(!)?Sync &Unpin, $value:expr) => {
         require_unpin(&$value);
     };
     ($(!)?Send & $(!)?Sync & !Unpin, $value:expr) => {

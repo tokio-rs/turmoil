@@ -1,16 +1,19 @@
+#![cfg(not(target_arch = "wasm32"))]
 use std::{
     io::{self, ErrorKind},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     rc::Rc,
-    sync::{atomic::AtomicUsize, atomic::Ordering},
+    sync::atomic::{AtomicUsize, Ordering},
     time::Duration,
 };
 
-use tokio::{sync::oneshot, time::timeout};
-use turmoil::{
-    lookup,
-    net::{self, UdpSocket},
-    Builder, IpVersion, Result,
+use {
+    tokio::{sync::oneshot, time::timeout},
+    turmoil::{
+        lookup,
+        net::{self, UdpSocket},
+        Builder, IpVersion, Result,
+    },
 };
 
 const PORT: u16 = 1738;

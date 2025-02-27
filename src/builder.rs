@@ -1,6 +1,7 @@
 use std::{ops::RangeInclusive, time::SystemTime};
 
 use rand::{RngCore, SeedableRng};
+use wasm_bindgen::prelude::*;
 
 use crate::*;
 
@@ -65,6 +66,7 @@ use crate::*;
 /// let rng = SmallRng::seed_from_u64(0);
 /// let sim = turmoil::Builder::new().build_with_rng(Box::new(rng));
 /// ```
+#[wasm_bindgen]
 pub struct Builder {
     config: Config,
 

@@ -1,10 +1,11 @@
-use crate::config::Config;
-use crate::envelope::Protocol;
-use crate::host::HostTimer;
-use crate::ip::IpVersionAddrIter;
 use crate::{
-    config, for_pairs, Dns, Host, Result as TurmoilResult, ToIpAddr, ToIpAddrs, Topology,
-    TRACING_TARGET,
+    config::{self, Config},
+    envelope::Protocol,
+    for_pairs,
+    host::HostTimer,
+    ip::IpVersionAddrIter,
+    net::{IpAddr, SocketAddr},
+    Dns, Host, Result as TurmoilResult, ToIpAddr, ToIpAddrs, Topology, TRACING_TARGET,
 };
 
 use indexmap::IndexMap;
@@ -12,7 +13,6 @@ use rand::RngCore;
 use scoped_tls::scoped_thread_local;
 use std::cell::RefCell;
 use std::io::Result;
-use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
 /// Tracks all the state for the simulated world.

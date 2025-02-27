@@ -1,15 +1,17 @@
 use std::{
     io::{Error, ErrorKind, Result},
-    net::SocketAddr,
     sync::Arc,
 };
+
+use crate::net::SocketAddr;
 
 use tokio::sync::Notify;
 
 use crate::{
     net::{SocketPair, TcpStream},
     world::World,
-    ToSocketAddrs, TRACING_TARGET,
+    ToSocketAddrs,
+    TRACING_TARGET,
 };
 
 /// A simulated TCP socket server, listening for connections.

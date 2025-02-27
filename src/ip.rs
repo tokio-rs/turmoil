@@ -1,4 +1,4 @@
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use crate::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 /// The kinds of networks that can be simulated in turmoil
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

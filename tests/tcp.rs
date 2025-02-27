@@ -1,3 +1,4 @@
+#![cfg(not(target_arch = "wasm32"))]
 use std::{
     assert_eq, assert_ne,
     io::{self, ErrorKind},
@@ -1207,7 +1208,7 @@ fn remote_dropped() -> Result {
         let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 1234)).await?;
         tokio::spawn(async move {
             loop {
-                let (_, _) = listener.accept().await.unwrap();
+                let (..) = listener.accept().await.unwrap();
             }
         });
 

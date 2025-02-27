@@ -1,13 +1,17 @@
-use bytes::{Buf, Bytes};
-use std::future::poll_fn;
-use std::{
-    fmt::Debug,
-    io::{self, Error, Result},
-    net::SocketAddr,
-    pin::Pin,
-    sync::Arc,
-    task::{ready, Context, Poll},
+use {
+    bytes::{Buf, Bytes},
+    std::{
+        fmt::Debug,
+        future::poll_fn,
+        io::{self, Error, Result},
+        pin::Pin,
+        sync::Arc,
+        task::{ready, Context, Poll},
+    },
 };
+
+use crate::net::SocketAddr;
+
 use tokio::{
     io::{AsyncRead, AsyncWrite, ReadBuf},
     runtime::Handle,
@@ -17,8 +21,7 @@ use tokio::{
 
 use crate::{
     envelope::{Envelope, Protocol, Segment, Syn},
-    host::is_same,
-    host::SequencedSegment,
+    host::{is_same, SequencedSegment},
     net::SocketPair,
     world::World,
     ToSocketAddrs, TRACING_TARGET,
@@ -75,6 +78,7 @@ impl TcpStream {
             let rx = host.tcp.new_stream(pair);
 
             let syn = Protocol::Tcp(Segment::Syn(Syn { ack }));
+            
             if !is_same(local_addr, dst) {
                 world.send_message(local_addr, dst, syn)?;
             } else {

@@ -1,5 +1,5 @@
 use crate::envelope::{hex, Datagram, Protocol, Segment, Syn};
-use crate::net::{SocketPair, TcpListener, UdpSocket};
+use crate::net::{IpAddr, SocketAddr, SocketPair, TcpListener, UdpSocket};
 use crate::{Envelope, TRACING_TARGET};
 
 use bytes::Bytes;
@@ -7,7 +7,6 @@ use indexmap::IndexMap;
 use std::collections::VecDeque;
 use std::fmt::Display;
 use std::io;
-use std::net::{IpAddr, SocketAddr};
 use std::ops::RangeInclusive;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Notify};

@@ -1,5 +1,4 @@
-use std::net::Ipv4Addr;
-use turmoil::*;
+use {std::net::Ipv4Addr, turmoil::*};
 
 // This test is not in src/dns.rs since it initalizes a tracing subscriber
 // which will persist, and effect other tests in the same file.

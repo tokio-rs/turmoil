@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Turmoil WASM Test Suite</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', sans-serif;
+      margin: 0;
+      padding: 20px;
+      background-color: #f8f9fa;
+      color: #333;
+    }
+    .container {
+      max-width: 900px;
+      margin: 0 auto;
+      padding: 20px;
+      background-color: white;
+      border-radius: 8px;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+    header {
+      padding-bottom: 20px;
+      margin-bottom: 20px;
+      border-bottom: 1px solid #eee;
+    }
+    h1 {
+      color: #2c3e50;
+      margin-top: 0;
+    }
+    .test-section {
+      margin-bottom: 30px;
+    }
+    .test-section h2 {
+      color: #3498db;
+      font-size: 1.5em;
+      margin-bottom: 15px;
+      padding-bottom: 5px;
+      border-bottom: 1px solid #eee;
+    }
+    .test-card {
+      margin-bottom: 15px;
+      padding: 15px;
+      border-radius: 6px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+      transition: transform 0.2s ease;
+    }
+    .test-card:hover {
+      transform: translateY(-2px);
+    }
+    .test-card h3 {
+      margin-top: 0;
+      font-size: 1.1em;
+    }
+    .test-card p {
+      margin-bottom: 0;
+    }
+    .result {
+      margin: 10px 0;
+      padding: 10px;
+      border-radius: 4px;
+      transition: all 0.3s ease;
+    }
+    .success {
+      background-color: #d4edda;
+      color: #155724;
+      border-left: 4px solid #28a745;
+    }
+    .failure {
+      background-color: #f8d7da;
+      color: #721c24;
+      border-left: 4px solid #dc3545;
+    }
+    .progress {
+      background-color: #e9ecef;
+      color: #495057;
+      border-left: 4px solid #6c757d;
+    }
+    .footer {
+      margin-top: 30px;
+      padding-top: 15px;
+      border-top: 1px solid #eee;
+      text-align: center;
+      font-size: 0.9em;
+      color: #6c757d;
+    }
+    .features-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+      gap: 15px;
+      margin-top: 15px;
+    }
+    #summary {
+      margin-top: 30px;
+      padding: 15px;
+      background-color: #f8f9fa;
+      border-radius: 6px;
+    }
+    button {
+      background-color: #3498db;
+      color: white;
+      border: none;
+      padding: 8px 16px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 14px;
+      margin-right: 8px;
+      transition: background-color 0.2s;
+    }
+    button:hover {
+      background-color: #2980b9;
+    }
+    .status-icon {
+      display: inline-block;
+      width: 20px;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Turmoil WASM Compatibility Test Suite</h1>
+      <p>This test suite verifies that Turmoil's core functionality works properly in WebAssembly environments.</p>
+      <div>
+        <button id="run-all-tests">Run All Tests</button>
+        <button id="reset-tests">Reset</button>
+      </div>
+    </header>
+
+    <div class="test-section">
+      <h2>Basic Data Types</h2>
+      <div class="features-grid">
+        <div class="test-card" id="std-ip-card">
+          <h3>Standard IP Address</h3>
+          <p>Tests functionality of std::net IP address types in WASM</p>
+          <button class="run-test" data-test="std_ip_addr">Run Test</button>
+          <div id="std-ip-result" class="result progress">
+            <span class="status-icon">⏱️</span> Not run yet
+          </div>
+        </div>
+        
+        <div class="test-card" id="turmoil-ip-card">
+          <h3>Turmoil IP Address</h3>
+          <p>Tests Turmoil's custom IP address implementation in WASM</p>
+          <button class="run-test" data-test="turmoil_ip_addr">Run Test</button>
+          <div id="turmoil-ip-result" class="result progress">
+            <span class="status-icon">⏱️</span> Not run yet
+          </div>
+        </div>
+        
+        <div class="test-card" id="socket-addr-card">
+          <h3>Socket Address</h3>
+          <p>Tests Turmoil's socket address functionality in WASM</p>
+          <button class="run-test" data-test="socket_addr">Run Test</button>
+          <div id="socket-addr-result" class="result progress">
+            <span class="status-icon">⏱️</span> Not run yet
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="test-section">
+      <h2>Network Transport</h2>
+      <div class="features-grid">
+        <div class="test-card" id="tcp-card">
+          <h3>TCP Functionality</h3>
+          <p>Tests basic TCP transport in the Turmoil simulation</p>
+          <button class="run-test" data-test="tcp">Run Test</button>
+          <div id="tcp-result" class="result progress">
+            <span class="status-icon">⏱️</span> Not run yet
+          </div>
+        </div>
+        
+        <div class="test-card" id="udp-card">
+          <h3>UDP Functionality</h3>
+          <p>Tests basic UDP transport in the Turmoil simulation</p>
+          <button class="run-test" data-test="udp">Run Test</button>
+          <div id="udp-result" class="result progress">
+            <span class="status-icon">⏱️</span> Not run yet
+          </div>
+        </div>
+        
+        <div class="test-card" id="dns-card">
+          <h3>DNS Resolution</h3>
+          <p>Tests hostname resolution in the Turmoil simulation</p>
+          <button class="run-test" data-test="dns">Run Test</button>
+          <div id="dns-result" class="result progress">
+            <span class="status-icon">⏱️</span> Not run yet
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="test-section">
+      <h2>Configuration</h2>
+      <div class="features-grid">
+        <div class="test-card" id="builder-card">
+          <h3>Builder Configuration</h3>
+          <p>Tests Turmoil simulation builder configuration</p>
+          <button class="run-test" data-test="builder">Run Test</button>
+          <div id="builder-result" class="result progress">
+            <span class="status-icon">⏱️</span> Not run yet
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="summary">
+      <h2>Test Summary</h2>
+      <p id="summary-text">No tests have been run yet.</p>
+    </div>
+
+    <div class="footer">
+      <p>Turmoil WASM Test Suite &copy; 2025</p>
+    </div>
+  </div>
+
+  <script type="module">
+    import init, { 
+      test_std_ip_addr_functionality,
+      test_turmoil_ip_addr,
+      test_turmoil_socket_addr,
+      test_tcp_functionality,
+      test_udp_functionality,
+      test_dns_functionality,
+      test_builder_config
+    } from './pkg/wasm_test.js';
+
+    // Test definitions
+    const tests = {
+      std_ip_addr: {
+        name: "Standard IP Address",
+        func: () => test_std_ip_addr_functionality(),
+        resultId: "std-ip-result",
+        booleanResult: true
+      },
+      turmoil_ip_addr: {
+        name: "Turmoil IP Address",
+        func: () => test_turmoil_ip_addr(),
+        resultId: "turmoil-ip-result",
+        booleanResult: true
+      },
+      socket_addr: {
+        name: "Socket Address",
+        func: () => test_turmoil_socket_addr(),
+        resultId: "socket-addr-result",
+        booleanResult: false
+      },
+      tcp: {
+        name: "TCP Functionality",
+        func: () => test_tcp_functionality(),
+        resultId: "tcp-result",
+        booleanResult: false
+      },
+      udp: {
+        name: "UDP Functionality",
+        func: () => test_udp_functionality(),
+        resultId: "udp-result",
+        booleanResult: false
+      },
+      dns: {
+        name: "DNS Resolution",
+        func: () => test_dns_functionality(),
+        resultId: "dns-result",
+        booleanResult: false
+      },
+      builder: {
+        name: "Builder Configuration",
+        func: () => test_builder_config(),
+        resultId: "builder-result",
+        booleanResult: false
+      }
+    };
+
+    // Initialize WASM module and set up event handlers
+    async function initialize() {
+      try {
+        await init();
+        console.log("WASM module initialized successfully");
+        
+        // Set up individual test buttons
+        document.querySelectorAll('.run-test').forEach(button => {
+          button.addEventListener('click', async () => {
+            const testId = button.getAttribute('data-test');
+            await runTest(testId);
+            updateSummary();
+          });
+        });
+        
+        // Set up "Run All Tests" button
+        document.getElementById('run-all-tests').addEventListener('click', async () => {
+          await runAllTests();
+          updateSummary();
+        });
+        
+        // Set up "Reset" button
+        document.getElementById('reset-tests').addEventListener('click', resetTests);
+        
+      } catch (error) {
+        console.error("Failed to initialize WASM module:", error);
+        document.body.innerHTML = `
+          <div class="container">
+            <div class="result failure">
+              <h2>WASM Initialization Failed</h2>
+              <p>Error: ${error.message}</p>
+            </div>
+          </div>
+        `;
+      }
+    }
+
+    // Run a single test
+    async function runTest(testId) {
+      const test = tests[testId];
+      if (!test) {
+        console.error(`Unknown test: ${testId}`);
+        return;
+      }
+      
+      const resultElement = document.getElementById(test.resultId);
+      resultElement.className = "result progress";
+      resultElement.innerHTML = '<span class="status-icon">⏳</span> Running...';
+      
+      try {
+        const result = test.func();
+        const passed = test.booleanResult ? result === true : result === "success";
+        
+        resultElement.className = `result ${passed ? 'success' : 'failure'}`;
+        
+        if (test.booleanResult) {
+          resultElement.innerHTML = `<span class="status-icon">${passed ? '✅' : '❌'}</span> ${passed ? 'PASSED' : 'FAILED'}`;
+        } else {
+          resultElement.innerHTML = `
+            <span class="status-icon">${passed ? '✅' : '❌'}</span> 
+            ${passed ? 'PASSED' : 'FAILED'}: ${result}
+          `;
+        }
+        
+        return passed;
+      } catch (error) {
+        resultElement.className = "result failure";
+        resultElement.innerHTML = `<span class="status-icon">❌</span> ERROR: ${error.message}`;
+        return false;
+      }
+    }
+
+    // Run all tests
+    async function runAllTests() {
+      const results = [];
+      
+      for (const testId in tests) {
+        const passed = await runTest(testId);
+        results.push({ testId, passed });
+      }
+      
+      return results;
+    }
+
+    // Reset all test results
+    function resetTests() {
+      for (const testId in tests) {
+        const resultElement = document.getElementById(tests[testId].resultId);
+        resultElement.className = "result progress";
+        resultElement.innerHTML = '<span class="status-icon">⏱️</span> Not run yet';
+      }
+      
+      updateSummary(true);
+    }
+
+    // Update the summary section
+    function updateSummary(reset = false) {
+      const summaryElement = document.getElementById('summary-text');
+      
+      if (reset) {
+        summaryElement.textContent = "No tests have been run yet.";
+        return;
+      }
+      
+      let totalTests = 0;
+      let passedTests = 0;
+      
+      for (const testId in tests) {
+        const resultElement = document.getElementById(tests[testId].resultId);
+        if (!resultElement.classList.contains('progress')) {
+          totalTests++;
+          if (resultElement.classList.contains('success')) {
+            passedTests++;
+          }
+        }
+      }
+      
+      if (totalTests === 0) {
+        summaryElement.textContent = "No tests have been run yet.";
+      } else {
+        const allPassed = passedTests === totalTests;
+        summaryElement.innerHTML = `
+          <strong>${passedTests}/${totalTests} tests passed</strong> (${Math.round(passedTests/totalTests*100)}%)
+          <div class="result ${allPassed ? 'success' : 'failure'}" style="margin-top: 10px;">
+            <span class="status-icon">${allPassed ? '✅' : '❌'}</span> 
+            ${allPassed ? 'ALL TESTS PASSED' : 'SOME TESTS FAILED'}
+          </div>
+        `;
+      }
+    }
+
+    // Initialize the application
+    initialize();
+  </script>
+</body>
+</html>

@@ -1,11 +1,17 @@
 use std::{
     error::Error,
-    fmt, io,
-    net::SocketAddr,
+    fmt,
+    io,
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
 };
+
+#[cfg(not(target_arch = "wasm32"))]
+use std::net::SocketAddr;
+
+#[cfg(target_arch = "wasm32")]
+use crate::net::SocketAddr;
 
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 

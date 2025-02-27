@@ -13,8 +13,11 @@ use crate::{
 use std::{
     cmp,
     io::{self, Error, ErrorKind, Result},
-    net::{Ipv6Addr, SocketAddr},
 };
+
+use crate::net::SocketAddr;
+
+use super::Ipv6Addr;
 
 /// A simulated UDP socket.
 ///
@@ -130,7 +133,11 @@ impl UdpSocket {
                 addr.set_port(host.assign_ephemeral_port());
             }
 
-            host.udp.bind(addr)
+            #[cfg(target_arch = "wasm32")]
+            let result = host.udp.bind(addr);
+            #[cfg(not(target_arch = "wasm32"))]
+            let result = host.udp.bind(addr);
+            result
         })
     }
 

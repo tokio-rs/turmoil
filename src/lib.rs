@@ -118,9 +118,11 @@ mod readme;
 
 mod builder;
 
-use std::{net::IpAddr, time::Duration};
+mod clock;
 
 pub use builder::Builder;
+
+use clock::{Clock, Duration, Instant};
 
 mod config;
 use config::Config;
@@ -145,6 +147,7 @@ pub use ip::IpVersion;
 pub mod net;
 
 mod rt;
+use net::IpAddr;
 use rt::Rt;
 
 mod sim;

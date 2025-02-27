@@ -1,3 +1,4 @@
+#![cfg(not(target_arch = "wasm32"))]
 use tokio::fs::remove_file;
 use tokio::net::UnixListener;
 use tokio_test::assert_err;

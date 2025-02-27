@@ -21,13 +21,28 @@ members = ["examples/*"]
 
 [dependencies]
 bytes = "1.4"
+cfg-if = "1.0.0"
 indexmap = "2"
 rand = { version = "0.8.5", features = ["small_rng"] }
 rand_distr = "0.4.3"
 regex = { version = "1", optional = true }
 scoped-tls = "1.0.1"
-tokio = { version = "1.25.0", features = ["full", "test-util"] }
 tracing = "0.1"
+
+
+
+# not wasm32 with target.cfg
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+getrandom = { version = "0.2.15", features = ["js"] }
+tokio = { workspace = true, features = ["rt", "sync", "time", "test-util"], default-features = false }
+web-time = "1.1.0"
+web-sys = { version = "0.3.77", features = ["Window"] }
+wasm-bindgen-futures = "0.4.50"
 
 [dev-dependencies]
 doc-comment = "0.3.3"
@@ -41,3 +56,6 @@ regex = ["dep:regex"]
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tokio_unstable)'] }
+
+[workspace.dependencies]
+tokio = "1.43.0"

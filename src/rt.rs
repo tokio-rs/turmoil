@@ -1,12 +1,12 @@
-use std::future::Future;
-use std::mem;
-use std::pin::Pin;
-use std::sync::Arc;
+use std::{future::Future, mem, pin::Pin, sync::Arc};
 
-use tokio::runtime::Runtime;
-use tokio::task::JoinHandle;
-use tokio::task::LocalSet;
-use tokio::time::{sleep, Duration, Instant};
+use tokio::{
+    runtime::Runtime,
+    task::{JoinHandle, LocalSet},
+    time::{sleep, Duration, Instant},
+};
+
+use crate::Clock;
 
 use super::Result;
 
@@ -52,6 +52,9 @@ pub struct Rt<'a> {
 
     /// Whether io is enabled on this runtime.
     enable_io: bool,
+
+    /// timer
+    timer: Clock,
 }
 
 impl<'a> Rt<'a> {
@@ -70,6 +73,7 @@ impl<'a> Rt<'a> {
             nodename,
             handle: Some(handle),
             enable_io,
+            timer: Clock::default(),
         }
     }
 
@@ -90,6 +94,7 @@ impl<'a> Rt<'a> {
             nodename,
             handle: Some(handle),
             enable_io,
+            timer: Clock::default(),
         }
     }
 
@@ -103,6 +108,7 @@ impl<'a> Rt<'a> {
             nodename: String::new().into(),
             handle: None,
             enable_io: false,
+            timer: Clock::default(),
         }
     }
 
@@ -149,7 +155,7 @@ impl<'a> Rt<'a> {
         self.tokio.block_on(async {
             self.local
                 .run_until(async {
-                    sleep(duration).await;
+                    self.timer.sleep(duration).await;
                 })
                 .await
         });
@@ -220,6 +226,7 @@ fn init(enable_io: bool) -> (Runtime, LocalSet) {
     #[cfg(tokio_unstable)]
     tokio_builder.unhandled_panic(tokio::runtime::UnhandledPanic::ShutdownRuntime);
 
+    #[cfg(not(target_arch = "wasm32"))]
     if enable_io {
         tokio_builder.enable_io();
     }

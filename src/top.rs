@@ -1,5 +1,6 @@
 use crate::envelope::{Envelope, Protocol};
 use crate::host::Host;
+use crate::net::{IpAddr, SocketAddr};
 use crate::rt::Rt;
 use crate::{config, TRACING_TARGET};
 
@@ -8,7 +9,6 @@ use rand::{Rng, RngCore};
 use rand_distr::{Distribution, Exp};
 use std::collections::VecDeque;
 use std::io::{Error, ErrorKind, Result};
-use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 use tokio::time::Instant;
 

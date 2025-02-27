@@ -1,4 +1,10 @@
-use std::{fmt::Display, net::SocketAddr};
+use std::fmt::Display;
+
+#[cfg(not(target_arch = "wasm32"))]
+use std::net::SocketAddr;
+
+#[cfg(target_arch = "wasm32")]
+use crate::net::SocketAddr;
 
 use bytes::Bytes;
 use tokio::sync::oneshot;

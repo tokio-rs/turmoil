@@ -1,7 +1,7 @@
+use crate::net::IpAddr;
 use rand::seq::SliceRandom;
 use std::cell::RefCell;
 use std::future::Future;
-use std::net::IpAddr;
 use std::ops::DerefMut;
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
@@ -447,16 +447,18 @@ impl<'a> Sim<'a> {
 
 #[cfg(test)]
 mod test {
-    use rand::Rng;
-    use std::future;
-    use std::{
-        net::{IpAddr, Ipv4Addr},
-        rc::Rc,
-        sync::{
-            atomic::{AtomicU64, Ordering},
-            Arc, Mutex,
+    use {
+        rand::Rng,
+        std::{
+            future,
+            net::{IpAddr, Ipv4Addr},
+            rc::Rc,
+            sync::{
+                atomic::{AtomicU64, Ordering},
+                Arc, Mutex,
+            },
+            time::Duration,
         },
-        time::Duration,
     };
 
     use tokio::{
@@ -465,10 +467,9 @@ mod test {
         time::Instant,
     };
 
-    use crate::net::UdpSocket;
     use crate::{
         elapsed, hold,
-        net::{TcpListener, TcpStream},
+        net::{TcpListener, TcpStream, UdpSocket},
         sim_elapsed, Builder, Result, Sim, World,
     };
 
