@@ -64,42 +64,48 @@ impl TcpListener {
     /// established, the corresponding [`TcpStream`] and the remote peer’s
     /// address will be returned.
     pub async fn accept(&self) -> Result<(TcpStream, SocketAddr)> {
-        loop {
+        let origin = loop {
             let maybe_accept = World::current(|world| {
                 let host = world.current_host_mut();
-                let (syn, origin) = host.tcp.accept(self.local_addr)?;
-
-                tracing::trace!(target: TRACING_TARGET, src = ?origin, dst = ?self.local_addr, protocol = %"TCP SYN", "Recv");
-
-                // Send SYN-ACK -> origin. If Ok we proceed (acts as the ACK),
-                // else we return early to avoid host mutations.
-                let ack = syn.ack.send(());
-                tracing::trace!(target: TRACING_TARGET, src = ?self.local_addr, dst = ?origin, protocol = %"TCP SYN-ACK", "Send");
-
-                if ack.is_err() {
-                    return None;
-                }
-
-                let mut my_addr = self.local_addr;
-                if origin.ip().is_loopback() {
-                    my_addr.set_ip(origin.ip());
-                }
-                if my_addr.ip().is_unspecified() {
-                    my_addr.set_ip(host.addr);
-                }
-
-                let pair = SocketPair::new(my_addr, origin);
-                let rx = host.tcp.new_stream(pair);
-
-                Some((TcpStream::new(pair, rx), origin))
+                host.tcp.accept(self.local_addr)
             });
 
-            if let Some(accepted) = maybe_accept {
-                return Ok(accepted);
+            let Some((syn, origin)) = maybe_accept else {
+                // Wait for a new incoming connection, then retry.
+                self.notify.notified().await;
+                continue;
+            };
+
+            tracing::trace!(target: TRACING_TARGET, src = ?origin, dst = ?self.local_addr, protocol = %"TCP SYN", "Recv");
+
+            // Send SYN-ACK -> origin. If Ok we proceed (acts as the ACK), else
+            // we retry.
+            let ack = syn.ack.send(());
+            tracing::trace!(target: TRACING_TARGET, src = ?self.local_addr, dst = ?origin, protocol = %"TCP SYN-ACK", "Send");
+
+            if ack.is_ok() {
+                break origin;
+            }
+        };
+
+        let stream = World::current(|world| {
+            let host = world.current_host_mut();
+
+            let mut my_addr = self.local_addr;
+            if origin.ip().is_loopback() {
+                my_addr.set_ip(origin.ip());
+            }
+            if my_addr.ip().is_unspecified() {
+                my_addr.set_ip(host.addr);
             }
 
-            self.notify.notified().await;
-        }
+            let pair = SocketPair::new(my_addr, origin);
+            let rx = host.tcp.new_stream(pair);
+            TcpStream::new(pair, rx)
+        });
+
+        tracing::trace!(target: TRACING_TARGET, src = ?self.local_addr, dst = ?origin, "Accepted");
+        Ok((stream, origin))
     }
 
     /// Returns the local address that this listener is bound to.
