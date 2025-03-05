@@ -1,3 +1,5 @@
+use std::future::poll_fn;
+use std::task::Poll;
 use std::{
     io::{self, ErrorKind},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
@@ -5,7 +7,8 @@ use std::{
     sync::{atomic::AtomicUsize, atomic::Ordering},
     time::Duration,
 };
-
+use tokio::io::ReadBuf;
+use tokio::time::sleep;
 use tokio::{sync::oneshot, time::timeout};
 use turmoil::{
     lookup,
@@ -244,6 +247,61 @@ fn try_ping_pong() -> Result {
 
         sock.readable().await?;
         try_recv_pong(&sock)
+    });
+
+    sim.run()
+}
+
+#[test]
+fn poll_recv() -> Result {
+    let mut sim = Builder::new().build();
+
+    sim.client("server", async {
+        let expected_origin = lookup("client");
+        let sock = bind().await?;
+        let buffer = &mut [0u8; 64];
+        let mut read_buf = ReadBuf::new(buffer);
+
+        poll_fn(|cx| {
+            let received = sock.poll_recv_from(cx, &mut read_buf);
+            assert!(matches!(received, Poll::Pending));
+            Poll::Ready(())
+        })
+        .await;
+
+        // before client sends
+        sleep(Duration::from_millis(1000)).await;
+        // after client sends
+
+        poll_fn(|cx| {
+            let received = sock.poll_recv_from(cx, &mut read_buf);
+            assert!(matches!(received , Poll::Ready(Ok(x)) if x.ip() == expected_origin));
+            Poll::Ready(())
+        })
+        .await;
+        sock.readable().await?;
+        poll_fn(|cx| {
+            let received = sock.poll_recv_from(cx, &mut read_buf);
+            assert!(matches!(received , Poll::Ready(Ok(x)) if x.ip() == expected_origin));
+            Poll::Ready(())
+        })
+        .await;
+        poll_fn(|cx| {
+            let received = sock.poll_recv_from(cx, &mut read_buf);
+            assert!(matches!(received, Poll::Pending));
+            Poll::Ready(())
+        })
+        .await;
+        assert_eq!(read_buf.filled(), b"pingping");
+        Ok(())
+    });
+
+    sim.client("client", async {
+        let sock = bind().await.unwrap();
+        sleep(Duration::from_millis(500)).await;
+        try_send_ping(&sock)?;
+        try_send_ping(&sock)?;
+        Ok(())
     });
 
     sim.run()
