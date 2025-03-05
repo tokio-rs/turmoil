@@ -96,6 +96,96 @@ fn try_recv_pong(sock: &net::UdpSocket) -> Result<()> {
 }
 
 #[test]
+fn udp_ipv4_multicast() -> Result {
+    let mut sim = Builder::new()
+        .tick_duration(Duration::from_millis(50))
+        .ip_version(IpVersion::V4)
+        .build();
+
+    let multicast_port = 9000;
+    let multicast_addr = "239.0.0.1".parse().unwrap();
+    for server_index in 0..3 {
+        sim.client(format!("server-{server_index}"), async move {
+            let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, multicast_port)).await?;
+            socket.join_multicast_v4(multicast_addr, Ipv4Addr::UNSPECIFIED)?;
+
+            let mut buf = [0; 1];
+            socket.recv_from(&mut buf).await?;
+            assert_eq!([1], buf);
+
+            socket.leave_multicast_v4(multicast_addr, Ipv4Addr::UNSPECIFIED)?;
+
+            let is_timed_out = timeout(Duration::from_secs(1), socket.recv_from(&mut buf))
+                .await
+                .is_err();
+            assert!(is_timed_out);
+
+            Ok(())
+        });
+    }
+    sim.client("client", async move {
+        let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await?;
+        let dst = (multicast_addr, multicast_port);
+
+        let _ = socket.send_to(&[1], dst).await?;
+
+        // Give ”server” time to leave the multicast group.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let _ = socket.send_to(&[2], dst).await?;
+
+        Ok(())
+    });
+
+    sim.run()
+}
+
+#[test]
+fn udp_ipv6_multicast() -> Result {
+    let mut sim = Builder::new()
+        .tick_duration(Duration::from_millis(50))
+        .ip_version(IpVersion::V6)
+        .build();
+
+    let multicast_port = 9000;
+    let multicast_addr = "ff08::1".parse().unwrap();
+    for server_index in 0..3 {
+        sim.client(format!("server-{server_index}"), async move {
+            let socket = UdpSocket::bind((Ipv6Addr::UNSPECIFIED, multicast_port)).await?;
+            socket.join_multicast_v6(&multicast_addr, 0)?;
+
+            let mut buf = [0; 1];
+            socket.recv_from(&mut buf).await?;
+            assert_eq!([1], buf);
+
+            socket.leave_multicast_v6(&multicast_addr, 0)?;
+
+            let is_timed_out = timeout(Duration::from_secs(1), socket.recv_from(&mut buf))
+                .await
+                .is_err();
+            assert!(is_timed_out);
+
+            Ok(())
+        });
+    }
+    sim.client("client", async move {
+        let socket = UdpSocket::bind((Ipv6Addr::UNSPECIFIED, 0)).await?;
+        let dst = (multicast_addr, multicast_port);
+
+        let _ = socket.send_to(&[1], dst).await?;
+
+        // Give ”server” time to leave the multicast group.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let _ = socket.send_to(&[2], dst).await?;
+
+        Ok(())
+    });
+
+    sim.run()
+}
+
+#[test]
 fn ping_pong() -> Result {
     let mut sim = Builder::new().build();
 
@@ -400,7 +490,7 @@ fn bind_ipv6_version_missmatch() {
 }
 
 #[test]
-fn non_zero_bind() -> Result {
+fn non_zero_ipv4_bind() -> Result {
     let mut sim = Builder::new().ip_version(IpVersion::V4).build();
     sim.client("client", async move {
         let sock = UdpSocket::bind("1.1.1.1:1").await;
@@ -408,7 +498,7 @@ fn non_zero_bind() -> Result {
         let Err(err) = sock else {
             panic!("socket creation should have failed")
         };
-        assert_eq!(err.to_string(), "1.1.1.1:1 is not supported");
+        assert_eq!(err.to_string(), "1.1.1.1 is not supported");
         Ok(())
     });
     sim.run()

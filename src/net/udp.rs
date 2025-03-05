@@ -1,4 +1,6 @@
 use bytes::Bytes;
+use indexmap::{IndexMap, IndexSet};
+use std::net::SocketAddr;
 use tokio::{
     sync::{mpsc, Mutex},
     time::sleep,
@@ -13,7 +15,7 @@ use crate::{
 use std::{
     cmp,
     io::{self, Error, ErrorKind, Result},
-    net::{Ipv6Addr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
 };
 
 /// A simulated UDP socket.
@@ -29,6 +31,60 @@ impl std::fmt::Debug for UdpSocket {
         f.debug_struct("UdpSocket")
             .field("local_addr", &self.local_addr)
             .finish()
+    }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct MulticastGroups(IndexMap<IpAddr, IndexSet<SocketAddr>>);
+
+impl MulticastGroups {
+    fn destination_addresses(&self, multiaddr: &IpAddr) -> IndexSet<SocketAddr> {
+        self.0.get(multiaddr).cloned().unwrap_or_default()
+    }
+
+    fn contains_destination_address(&self, multiaddr: &IpAddr, addr: &SocketAddr) -> bool {
+        self.0
+            .get(multiaddr)
+            .and_then(|group| group.get(addr))
+            .is_some()
+    }
+
+    fn join(&mut self, multiaddr: IpAddr, addr: SocketAddr) {
+        self.0
+            .entry(multiaddr)
+            .and_modify(|addrs| {
+                addrs.insert(addr);
+                tracing::info!(target: TRACING_TARGET, ?addr, group = ?multiaddr, protocol = %"UDP", "Join group");
+            })
+            .or_insert_with(|| IndexSet::from([addr]));
+    }
+
+    fn leave(&mut self, multiaddr: IpAddr, addr: &SocketAddr) {
+        let index = self
+            .0
+            .entry(multiaddr)
+            .and_modify(|group| {
+                group.swap_remove(addr);
+                tracing::info!(target: TRACING_TARGET, ?addr, group = ?multiaddr, protocol = %"UDP", "Leave group");
+            })
+            .index();
+
+        if self
+            .0
+            .get_index(index)
+            .map(|(_, group)| group.is_empty())
+            .unwrap_or(false)
+        {
+            self.0.swap_remove_index(index);
+        }
+    }
+
+    fn leave_all(&mut self, addr: &SocketAddr) {
+        for (multiaddr, group) in self.0.iter_mut() {
+            group.swap_remove(addr);
+            tracing::info!(target: TRACING_TARGET, ?addr, group = ?multiaddr, protocol = %"UDP", "Leave group");
+        }
+        self.0.retain(|_, group| !group.is_empty());
     }
 }
 
@@ -115,16 +171,7 @@ impl UdpSocket {
             let mut addr = addr.to_socket_addr(&world.dns);
             let host = world.current_host_mut();
 
-            if !addr.ip().is_unspecified() && !addr.ip().is_loopback() {
-                return Err(Error::new(
-                    ErrorKind::AddrNotAvailable,
-                    format!("{addr} is not supported"),
-                ));
-            }
-
-            if addr.is_ipv4() != host.addr.is_ipv4() {
-                panic!("ip version mismatch: {:?} host: {:?}", addr, host.addr)
-            }
+            verify_ipv4_bind_interface(addr.ip(), host.addr)?;
 
             if addr.port() == 0 {
                 addr.set_port(host.assign_ephemeral_port());
@@ -289,8 +336,6 @@ impl UdpSocket {
     }
 
     fn send(&self, world: &mut World, dst: SocketAddr, packet: Datagram) -> Result<()> {
-        let msg = Protocol::Udp(packet);
-
         let mut src = self.local_addr;
         if dst.ip().is_loopback() {
             src.set_ip(dst.ip());
@@ -299,10 +344,16 @@ impl UdpSocket {
             src.set_ip(world.current_host_mut().addr);
         }
 
-        if is_same(src, dst) {
-            send_loopback(src, dst, msg);
+        if dst.ip().is_multicast() {
+            world
+                .multicast_groups
+                .destination_addresses(&dst.ip())
+                .into_iter()
+                .try_for_each(|dst| world.send_message(src, dst, Protocol::Udp(packet.clone())))?
+        } else if is_same(src, dst) {
+            send_loopback(src, dst, Protocol::Udp(packet));
         } else {
-            world.send_message(src, dst, msg)?;
+            world.send_message(src, dst, Protocol::Udp(packet))?;
         }
 
         Ok(())
@@ -314,10 +365,122 @@ impl UdpSocket {
         Ok(())
     }
 
-    /// Has no effect in turmoil. API parity with
-    /// https://docs.rs/tokio/latest/tokio/net/struct.UdpSocket.html#method.join_multicast_v6
-    pub fn join_multicast_v6(&self, _multiaddr: &Ipv6Addr, _interface: u32) -> Result<()> {
-        Ok(())
+    /// Executes an operation of the `IP_ADD_MEMBERSHIP` type.
+    ///
+    /// This function specifies a new multicast group for this socket to join.
+    /// The address must be a valid multicast address, and `interface` is the
+    /// address of the local interface with which the system should join the
+    /// multicast group. If it's equal to `INADDR_ANY` then an appropriate
+    /// interface is chosen by the system.
+    ///
+    /// Currently, the `interface` argument only supports `127.0.0.1` and `0.0.0.0`.
+    pub fn join_multicast_v4(&self, multiaddr: Ipv4Addr, interface: Ipv4Addr) -> Result<()> {
+        if !multiaddr.is_multicast() {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "Invalid multicast address",
+            ));
+        }
+
+        World::current(|world| {
+            let dst = destination_address(world, self);
+            verify_ipv4_bind_interface(interface, dst.ip())?;
+
+            world.multicast_groups.join(IpAddr::V4(multiaddr), dst);
+
+            Ok(())
+        })
+    }
+
+    /// Executes an operation of the `IPV6_ADD_MEMBERSHIP` type.
+    ///
+    /// This function specifies a new multicast group for this socket to join.
+    /// The address must be a valid multicast address, and `interface` is the
+    /// index of the interface to join/leave (or 0 to indicate any interface).
+    ///
+    /// Currently, the `interface` argument only supports `0`.
+    pub fn join_multicast_v6(&self, multiaddr: &Ipv6Addr, interface: u32) -> Result<()> {
+        verify_ipv6_bind_interface(interface)?;
+        if !multiaddr.is_multicast() {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "Invalid multicast address",
+            ));
+        }
+
+        World::current(|world| {
+            let dst = destination_address(world, self);
+
+            world.multicast_groups.join(IpAddr::V6(*multiaddr), dst);
+
+            Ok(())
+        })
+    }
+
+    /// Executes an operation of the `IP_DROP_MEMBERSHIP` type.
+    ///
+    /// For more information about this option, see [`join_multicast_v4`].
+    ///
+    /// [`join_multicast_v4`]: method@Self::join_multicast_v4
+    pub fn leave_multicast_v4(&self, multiaddr: Ipv4Addr, interface: Ipv4Addr) -> io::Result<()> {
+        if !multiaddr.is_multicast() {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "Invalid multicast address",
+            ));
+        }
+
+        World::current(|world| {
+            let dst = destination_address(world, self);
+            verify_ipv4_bind_interface(interface, dst.ip())?;
+
+            if !world
+                .multicast_groups
+                .contains_destination_address(&IpAddr::V4(multiaddr), &dst)
+            {
+                return Err(Error::new(
+                    ErrorKind::AddrNotAvailable,
+                    "Leaving a multicast group that has not been previously joined",
+                ));
+            }
+
+            world.multicast_groups.leave(IpAddr::V4(multiaddr), &dst);
+
+            Ok(())
+        })
+    }
+
+    /// Executes an operation of the `IPV6_DROP_MEMBERSHIP` type.
+    ///
+    /// For more information about this option, see [`join_multicast_v6`].
+    ///
+    /// [`join_multicast_v6`]: method@Self::join_multicast_v6
+    pub fn leave_multicast_v6(&self, multiaddr: &Ipv6Addr, interface: u32) -> io::Result<()> {
+        verify_ipv6_bind_interface(interface)?;
+        if !multiaddr.is_multicast() {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "Invalid multicast address",
+            ));
+        }
+
+        World::current(|world| {
+            let dst = destination_address(world, self);
+
+            if !world
+                .multicast_groups
+                .contains_destination_address(&IpAddr::V6(*multiaddr), &dst)
+            {
+                return Err(Error::new(
+                    ErrorKind::AddrNotAvailable,
+                    "Leaving a multicast group that has not been previously joined",
+                ));
+            }
+
+            world.multicast_groups.leave(IpAddr::V6(*multiaddr), &dst);
+
+            Ok(())
+        })
     }
 }
 
@@ -338,8 +501,112 @@ fn send_loopback(src: SocketAddr, dst: SocketAddr, message: Protocol) {
     });
 }
 
+fn verify_ipv4_bind_interface<A>(interface: A, addr: IpAddr) -> Result<()>
+where
+    A: Into<IpAddr>,
+{
+    let interface = interface.into();
+
+    if !interface.is_unspecified() && !interface.is_loopback() {
+        return Err(Error::new(
+            ErrorKind::AddrNotAvailable,
+            format!("{interface} is not supported"),
+        ));
+    }
+
+    if interface.is_ipv4() != addr.is_ipv4() {
+        panic!("ip version mismatch: {:?} host: {:?}", interface, addr)
+    }
+
+    Ok(())
+}
+
+fn verify_ipv6_bind_interface(interface: u32) -> Result<()> {
+    if interface != 0 {
+        return Err(Error::new(
+            ErrorKind::AddrNotAvailable,
+            format!("interface {interface} is not supported"),
+        ));
+    }
+
+    Ok(())
+}
+
+fn destination_address(world: &World, socket: &UdpSocket) -> SocketAddr {
+    let local_port = socket
+        .local_addr()
+        .expect("local_addr is always present in simulation")
+        .port();
+    let host_addr = world.current_host().addr;
+    SocketAddr::from((host_addr, local_port))
+}
+
 impl Drop for UdpSocket {
     fn drop(&mut self) {
-        World::current_if_set(|world| world.current_host_mut().udp.unbind(self.local_addr));
+        World::current_if_set(|world| {
+            world
+                .multicast_groups
+                .leave_all(&destination_address(world, self));
+            world.current_host_mut().udp.unbind(self.local_addr);
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    mod multicast_group {
+        use super::*;
+
+        #[test]
+        fn joining_does_not_produce_duplicate_addresses() {
+            let addr = "[fe80::1]:9000".parse().unwrap();
+            let multiaddr = "ff08::1".parse().unwrap();
+            let mut groups = MulticastGroups::default();
+            groups.join(multiaddr, addr);
+            groups.join(multiaddr, addr);
+
+            let addrs = groups.0.values().flatten().collect::<Vec<_>>();
+            assert_eq!(addrs.as_slice(), &[&addr]);
+        }
+
+        #[test]
+        fn leaving_does_not_remove_entire_group() {
+            let addr1 = "[fe80::1]:9000".parse().unwrap();
+            let addr2 = "[fe80::2]:9000".parse().unwrap();
+            let multiaddr = "ff08::1".parse().unwrap();
+            let mut groups = MulticastGroups::default();
+            groups.join(multiaddr, addr1);
+            groups.join(multiaddr, addr2);
+            groups.leave(multiaddr, &addr2);
+
+            let addrs = groups.0.values().flatten().collect::<Vec<_>>();
+            assert_eq!(addrs.as_slice(), &[&addr1]);
+        }
+
+        #[test]
+        fn leaving_removes_empty_group() {
+            let addr = "[fe80::1]:9000".parse().unwrap();
+            let multiaddr = "ff08::1".parse().unwrap();
+            let mut groups = MulticastGroups::default();
+            groups.join(multiaddr, addr);
+            groups.leave(multiaddr, &addr);
+
+            assert_eq!(groups.0.len(), 0);
+        }
+
+        #[test]
+        fn leaving_removes_empty_groups() {
+            let addr = "[fe80::1]:9000".parse().unwrap();
+            let multiaddr1 = "ff08::1".parse().unwrap();
+            let multiaddr2 = "ff08::2".parse().unwrap();
+            let mut groups = MulticastGroups::default();
+            groups.join(multiaddr1, addr);
+            groups.join(multiaddr2, addr);
+            groups.leave_all(&addr);
+
+            assert_eq!(groups.0.len(), 0);
+        }
     }
 }
