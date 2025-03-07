@@ -212,6 +212,110 @@ fn udp_ipv6_multicast() -> Result {
 }
 
 #[test]
+fn udp_ipv4_multicast_loop() -> Result {
+    let mut sim = Builder::new().ip_version(IpVersion::V4).build();
+
+    let multicast_port = 9000;
+    let multicast_addr = "239.0.0.1".parse().unwrap();
+    sim.client("client-server", async move {
+        let dst = (multicast_addr, multicast_port);
+        let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, multicast_port)).await?;
+
+        // Multicast loop is enabled by default.
+        socket.join_multicast_v4(multicast_addr, Ipv4Addr::UNSPECIFIED)?;
+
+        let _ = socket.send_to(&[1], dst).await?;
+        let mut buf = [0; 1];
+        socket.recv_from(&mut buf).await?;
+        assert_eq!([1], buf);
+
+        // Enable multicast loop.
+        socket.join_multicast_v4(multicast_addr, Ipv4Addr::UNSPECIFIED)?;
+        socket.set_multicast_loop_v4(true)?;
+
+        let _ = socket.send_to(&[2], dst).await?;
+        let mut buf = [0; 1];
+        socket.recv_from(&mut buf).await?;
+        assert_eq!([2], buf);
+
+        // Disable multicast loop.
+        socket.set_multicast_loop_v4(false)?;
+
+        let _ = socket.send_to(&[3], dst).await?;
+        let is_timed_out = timeout(Duration::from_secs(1), socket.recv_from(&mut buf))
+            .await
+            .is_err();
+        assert!(is_timed_out);
+
+        // Enable multicast loop, but leave the multicast group.
+        socket.set_multicast_loop_v4(true)?;
+        socket.leave_multicast_v4(multicast_addr, Ipv4Addr::UNSPECIFIED)?;
+
+        let _ = socket.send_to(&[4], dst).await?;
+        let is_timed_out = timeout(Duration::from_secs(1), socket.recv_from(&mut buf))
+            .await
+            .is_err();
+        assert!(is_timed_out);
+
+        Ok(())
+    });
+
+    sim.run()
+}
+
+#[test]
+fn udp_ipv6_multicast_loop() -> Result {
+    let mut sim = Builder::new().ip_version(IpVersion::V6).build();
+
+    let multicast_port = 9000;
+    let multicast_addr = "ff08::1".parse().unwrap();
+    sim.client("client-server", async move {
+        let dst = (multicast_addr, multicast_port);
+        let socket = UdpSocket::bind((Ipv6Addr::UNSPECIFIED, multicast_port)).await?;
+
+        // Multicast loop is enabled by default.
+        socket.join_multicast_v6(&multicast_addr, 0)?;
+
+        let _ = socket.send_to(&[1], dst).await?;
+        let mut buf = [0; 1];
+        socket.recv_from(&mut buf).await?;
+        assert_eq!([1], buf);
+
+        // Enable multicast loop.
+        socket.join_multicast_v6(&multicast_addr, 0)?;
+        socket.set_multicast_loop_v6(true)?;
+
+        let _ = socket.send_to(&[2], dst).await?;
+        let mut buf = [0; 1];
+        socket.recv_from(&mut buf).await?;
+        assert_eq!([2], buf);
+
+        // Disable multicast loop.
+        socket.set_multicast_loop_v6(false)?;
+
+        let _ = socket.send_to(&[3], dst).await?;
+        let is_timed_out = timeout(Duration::from_secs(1), socket.recv_from(&mut buf))
+            .await
+            .is_err();
+        assert!(is_timed_out);
+
+        // Enable multicast loop, but leave the multicast group.
+        socket.set_multicast_loop_v6(true)?;
+        socket.leave_multicast_v6(&multicast_addr, 0)?;
+
+        let _ = socket.send_to(&[4], dst).await?;
+        let is_timed_out = timeout(Duration::from_secs(1), socket.recv_from(&mut buf))
+            .await
+            .is_err();
+        assert!(is_timed_out);
+
+        Ok(())
+    });
+
+    sim.run()
+}
+
+#[test]
 fn ping_pong() -> Result {
     let mut sim = Builder::new().build();
 
