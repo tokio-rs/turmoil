@@ -343,25 +343,98 @@ impl UdpSocket {
             src.set_ip(world.current_host_mut().addr);
         }
 
-        if dst.ip().is_multicast() {
-            world
+        match dst {
+            dst if dst.ip().is_multicast() => world
                 .multicast_groups
                 .destination_addresses(dst)
                 .into_iter()
-                .try_for_each(|dst| world.send_message(src, dst, Protocol::Udp(packet.clone())))?
-        } else if is_same(src, dst) {
-            send_loopback(src, dst, Protocol::Udp(packet));
-        } else {
-            world.send_message(src, dst, Protocol::Udp(packet))?;
+                .try_for_each(|dst| match dst {
+                    dst if src.ip() == dst.ip() => {
+                        let host = world.current_host();
+                        if host.udp.is_multicast_loop_enabled(dst.port()) {
+                            send_loopback(src, dst, Protocol::Udp(packet.clone()));
+                        }
+                        Ok(())
+                    }
+                    dst => world.send_message(src, dst, Protocol::Udp(packet.clone())),
+                })?,
+            dst if is_same(src, dst) => send_loopback(src, dst, Protocol::Udp(packet)),
+            _ => world.send_message(src, dst, Protocol::Udp(packet))?,
         }
 
         Ok(())
     }
 
-    /// Has no effect in turmoil. API parity with
-    /// https://docs.rs/tokio/latest/tokio/net/struct.UdpSocket.html#method.set_multicast_loop_v6
-    pub fn set_multicast_loop_v6(&self, _on: bool) -> Result<()> {
-        Ok(())
+    /// Gets the value of the `IP_MULTICAST_LOOP` option for this socket.
+    ///
+    /// For more information about this option, see [`set_multicast_loop_v4`].
+    ///
+    /// [`set_multicast_loop_v4`]: method@Self::set_multicast_loop_v4
+    pub fn multicast_loop_v4(&self) -> io::Result<bool> {
+        let local_port = self.local_addr.port();
+        World::current(|world| {
+            Ok(world
+                .current_host()
+                .udp
+                .is_multicast_loop_enabled(local_port))
+        })
+    }
+
+    /// Sets the value of the `IP_MULTICAST_LOOP` option for this socket.
+    ///
+    /// If enabled, multicast packets will be looped back to the local socket.
+    ///
+    /// # Note
+    ///
+    /// This may not have any affect on IPv6 sockets.
+    pub fn set_multicast_loop_v4(&self, on: bool) -> io::Result<()> {
+        let local_port = match self.local_addr {
+            SocketAddr::V4(addr) => addr.port(),
+            _ => return Ok(()),
+        };
+        World::current(|world| {
+            world
+                .current_host_mut()
+                .udp
+                .set_multicast_loop(local_port, on);
+            Ok(())
+        })
+    }
+
+    /// Gets the value of the `IPV6_MULTICAST_LOOP` option for this socket.
+    ///
+    /// For more information about this option, see [`set_multicast_loop_v6`].
+    ///
+    /// [`set_multicast_loop_v6`]: method@Self::set_multicast_loop_v6
+    pub fn multicast_loop_v6(&self) -> io::Result<bool> {
+        let local_port = self.local_addr.port();
+        World::current(|world| {
+            Ok(world
+                .current_host()
+                .udp
+                .is_multicast_loop_enabled(local_port))
+        })
+    }
+
+    /// Sets the value of the `IPV6_MULTICAST_LOOP` option for this socket.
+    ///
+    /// Controls whether this socket sees the multicast packets it sends itself.
+    ///
+    /// # Note
+    ///
+    /// This may not have any affect on IPv4 sockets.
+    pub fn set_multicast_loop_v6(&self, on: bool) -> Result<()> {
+        let local_port = match self.local_addr {
+            SocketAddr::V6(addr) => addr.port(),
+            _ => return Ok(()),
+        };
+        World::current(|world| {
+            world
+                .current_host_mut()
+                .udp
+                .set_multicast_loop(local_port, on);
+            Ok(())
+        })
     }
 
     /// Executes an operation of the `IP_ADD_MEMBERSHIP` type.
