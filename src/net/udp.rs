@@ -1,6 +1,5 @@
 use bytes::Bytes;
 use indexmap::{IndexMap, IndexSet};
-use std::net::SocketAddr;
 use tokio::{
     sync::{mpsc, Mutex},
     time::sleep,
@@ -15,7 +14,7 @@ use crate::{
 use std::{
     cmp,
     io::{self, Error, ErrorKind, Result},
-    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
 };
 
 /// A simulated UDP socket.
@@ -35,56 +34,56 @@ impl std::fmt::Debug for UdpSocket {
 }
 
 #[derive(Debug, Default)]
-pub(crate) struct MulticastGroups(IndexMap<IpAddr, IndexSet<SocketAddr>>);
+pub(crate) struct MulticastGroups(IndexMap<SocketAddr, IndexSet<SocketAddr>>);
 
 impl MulticastGroups {
-    fn destination_addresses(&self, multiaddr: &IpAddr) -> IndexSet<SocketAddr> {
-        self.0.get(multiaddr).cloned().unwrap_or_default()
+    fn destination_addresses(&self, group: SocketAddr) -> IndexSet<SocketAddr> {
+        self.0.get(&group).cloned().unwrap_or_default()
     }
 
-    fn contains_destination_address(&self, multiaddr: &IpAddr, addr: &SocketAddr) -> bool {
+    fn contains_destination_address(&self, group: IpAddr, member: SocketAddr) -> bool {
         self.0
-            .get(multiaddr)
-            .and_then(|group| group.get(addr))
+            .get(&SocketAddr::new(group, member.port()))
+            .and_then(|members| members.get(&member))
             .is_some()
     }
 
-    fn join(&mut self, multiaddr: IpAddr, addr: SocketAddr) {
+    fn join(&mut self, group: IpAddr, member: SocketAddr) {
         self.0
-            .entry(multiaddr)
-            .and_modify(|addrs| {
-                addrs.insert(addr);
-                tracing::info!(target: TRACING_TARGET, ?addr, group = ?multiaddr, protocol = %"UDP", "Join group");
+            .entry(SocketAddr::new(group, member.port()))
+            .and_modify(|members| {
+                members.insert(member);
+                tracing::info!(target: TRACING_TARGET, ?member, group = ?group, protocol = %"UDP", "Join multicast group");
             })
-            .or_insert_with(|| IndexSet::from([addr]));
+            .or_insert_with(|| IndexSet::from([member]));
     }
 
-    fn leave(&mut self, multiaddr: IpAddr, addr: &SocketAddr) {
+    fn leave(&mut self, group: IpAddr, member: SocketAddr) {
         let index = self
             .0
-            .entry(multiaddr)
-            .and_modify(|group| {
-                group.swap_remove(addr);
-                tracing::info!(target: TRACING_TARGET, ?addr, group = ?multiaddr, protocol = %"UDP", "Leave group");
+            .entry(SocketAddr::new(group, member.port()))
+            .and_modify(|members| {
+                members.swap_remove(&member);
+                tracing::info!(target: TRACING_TARGET, ?member, group = ?group, protocol = %"UDP", "Leave multicast group");
             })
             .index();
 
         if self
             .0
             .get_index(index)
-            .map(|(_, group)| group.is_empty())
+            .map(|(_, members)| members.is_empty())
             .unwrap_or(false)
         {
             self.0.swap_remove_index(index);
         }
     }
 
-    fn leave_all(&mut self, addr: &SocketAddr) {
-        for (multiaddr, group) in self.0.iter_mut() {
-            group.swap_remove(addr);
-            tracing::info!(target: TRACING_TARGET, ?addr, group = ?multiaddr, protocol = %"UDP", "Leave group");
+    fn leave_all(&mut self, member: SocketAddr) {
+        for (group, members) in self.0.iter_mut() {
+            members.swap_remove(&member);
+            tracing::info!(target: TRACING_TARGET, ?member, group = ?group, protocol = %"UDP", "Leave multicast group");
         }
-        self.0.retain(|_, group| !group.is_empty());
+        self.0.retain(|_, members| !members.is_empty());
     }
 }
 
@@ -347,7 +346,7 @@ impl UdpSocket {
         if dst.ip().is_multicast() {
             world
                 .multicast_groups
-                .destination_addresses(&dst.ip())
+                .destination_addresses(dst)
                 .into_iter()
                 .try_for_each(|dst| world.send_message(src, dst, Protocol::Udp(packet.clone())))?
         } else if is_same(src, dst) {
@@ -436,7 +435,7 @@ impl UdpSocket {
 
             if !world
                 .multicast_groups
-                .contains_destination_address(&IpAddr::V4(multiaddr), &dst)
+                .contains_destination_address(IpAddr::V4(multiaddr), dst)
             {
                 return Err(Error::new(
                     ErrorKind::AddrNotAvailable,
@@ -444,7 +443,7 @@ impl UdpSocket {
                 ));
             }
 
-            world.multicast_groups.leave(IpAddr::V4(multiaddr), &dst);
+            world.multicast_groups.leave(IpAddr::V4(multiaddr), dst);
 
             Ok(())
         })
@@ -469,7 +468,7 @@ impl UdpSocket {
 
             if !world
                 .multicast_groups
-                .contains_destination_address(&IpAddr::V6(*multiaddr), &dst)
+                .contains_destination_address(IpAddr::V6(*multiaddr), dst)
             {
                 return Err(Error::new(
                     ErrorKind::AddrNotAvailable,
@@ -477,7 +476,7 @@ impl UdpSocket {
                 ));
             }
 
-            world.multicast_groups.leave(IpAddr::V6(*multiaddr), &dst);
+            world.multicast_groups.leave(IpAddr::V6(*multiaddr), dst);
 
             Ok(())
         })
@@ -546,7 +545,7 @@ impl Drop for UdpSocket {
         World::current_if_set(|world| {
             world
                 .multicast_groups
-                .leave_all(&destination_address(world, self));
+                .leave_all(destination_address(world, self));
             world.current_host_mut().udp.unbind(self.local_addr);
         });
     }
@@ -561,50 +560,50 @@ mod tests {
 
         #[test]
         fn joining_does_not_produce_duplicate_addresses() {
-            let addr = "[fe80::1]:9000".parse().unwrap();
-            let multiaddr = "ff08::1".parse().unwrap();
+            let member = "[fe80::1]:9000".parse().unwrap();
+            let group = "ff08::1".parse().unwrap();
             let mut groups = MulticastGroups::default();
-            groups.join(multiaddr, addr);
-            groups.join(multiaddr, addr);
+            groups.join(group, member);
+            groups.join(group, member);
 
             let addrs = groups.0.values().flatten().collect::<Vec<_>>();
-            assert_eq!(addrs.as_slice(), &[&addr]);
+            assert_eq!(addrs.as_slice(), &[&member]);
         }
 
         #[test]
         fn leaving_does_not_remove_entire_group() {
-            let addr1 = "[fe80::1]:9000".parse().unwrap();
-            let addr2 = "[fe80::2]:9000".parse().unwrap();
-            let multiaddr = "ff08::1".parse().unwrap();
+            let member1 = "[fe80::1]:9000".parse().unwrap();
+            let memeber2 = "[fe80::2]:9000".parse().unwrap();
+            let group = "ff08::1".parse().unwrap();
             let mut groups = MulticastGroups::default();
-            groups.join(multiaddr, addr1);
-            groups.join(multiaddr, addr2);
-            groups.leave(multiaddr, &addr2);
+            groups.join(group, member1);
+            groups.join(group, memeber2);
+            groups.leave(group, memeber2);
 
             let addrs = groups.0.values().flatten().collect::<Vec<_>>();
-            assert_eq!(addrs.as_slice(), &[&addr1]);
+            assert_eq!(addrs.as_slice(), &[&member1]);
         }
 
         #[test]
         fn leaving_removes_empty_group() {
-            let addr = "[fe80::1]:9000".parse().unwrap();
-            let multiaddr = "ff08::1".parse().unwrap();
+            let member = "[fe80::1]:9000".parse().unwrap();
+            let group = "ff08::1".parse().unwrap();
             let mut groups = MulticastGroups::default();
-            groups.join(multiaddr, addr);
-            groups.leave(multiaddr, &addr);
+            groups.join(group, member);
+            groups.leave(group, member);
 
             assert_eq!(groups.0.len(), 0);
         }
 
         #[test]
         fn leaving_removes_empty_groups() {
-            let addr = "[fe80::1]:9000".parse().unwrap();
-            let multiaddr1 = "ff08::1".parse().unwrap();
-            let multiaddr2 = "ff08::2".parse().unwrap();
+            let member = "[fe80::1]:9000".parse().unwrap();
+            let group1 = "ff08::1".parse().unwrap();
+            let group2 = "ff08::2".parse().unwrap();
             let mut groups = MulticastGroups::default();
-            groups.join(multiaddr1, addr);
-            groups.join(multiaddr2, addr);
-            groups.leave_all(&addr);
+            groups.join(group1, member);
+            groups.join(group2, member);
+            groups.leave_all(member);
 
             assert_eq!(groups.0.len(), 0);
         }
