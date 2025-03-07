@@ -344,6 +344,29 @@ impl UdpSocket {
         }
 
         match dst {
+            SocketAddr::V4(dst) if dst.ip().is_broadcast() => {
+                let host = world.current_host();
+                match host.udp.is_broadcast_enabled(src.port()) {
+                    true => world
+                        .hosts
+                        .iter()
+                        .filter(|(_, host)| host.udp.is_port_assigned(dst.port()))
+                        .map(|(addr, _)| SocketAddr::new(*addr, dst.port()))
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .try_for_each(|dst| match dst {
+                            dst if src.ip() == dst.ip() => {
+                                send_loopback(src, dst, Protocol::Udp(packet.clone()));
+                                Ok(())
+                            }
+                            dst => world.send_message(src, dst, Protocol::Udp(packet.clone())),
+                        }),
+                    false => Err(Error::new(
+                        ErrorKind::PermissionDenied,
+                        "Broadcast is not enabled",
+                    )),
+                }
+            }
             dst if dst.ip().is_multicast() => world
                 .multicast_groups
                 .destination_addresses(dst)
@@ -357,12 +380,38 @@ impl UdpSocket {
                         Ok(())
                     }
                     dst => world.send_message(src, dst, Protocol::Udp(packet.clone())),
-                })?,
-            dst if is_same(src, dst) => send_loopback(src, dst, Protocol::Udp(packet)),
-            _ => world.send_message(src, dst, Protocol::Udp(packet))?,
+                }),
+            dst if is_same(src, dst) => {
+                send_loopback(src, dst, Protocol::Udp(packet));
+                Ok(())
+            }
+            _ => world.send_message(src, dst, Protocol::Udp(packet)),
         }
+    }
 
-        Ok(())
+    /// Gets the value of the `SO_BROADCAST` option for this socket.
+    ///
+    /// For more information about this option, see [`set_broadcast`].
+    ///
+    /// [`set_broadcast`]: method@Self::set_broadcast
+    pub fn broadcast(&self) -> io::Result<bool> {
+        let local_port = self.local_addr.port();
+        World::current(|world| Ok(world.current_host().udp.is_broadcast_enabled(local_port)))
+    }
+
+    /// Sets the value of the `SO_BROADCAST` option for this socket.
+    ///
+    /// When enabled, this socket is allowed to send packets to a broadcast
+    /// address.
+    pub fn set_broadcast(&self, on: bool) -> io::Result<()> {
+        let local_port = match self.local_addr {
+            SocketAddr::V4(addr) => addr.port(),
+            _ => return Ok(()),
+        };
+        World::current(|world| {
+            world.current_host_mut().udp.set_broadcast(local_port, on);
+            Ok(())
+        })
     }
 
     /// Gets the value of the `IP_MULTICAST_LOOP` option for this socket.
