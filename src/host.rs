@@ -13,6 +13,9 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, Notify};
 use tokio::time::{Duration, Instant};
 
+const DEFAULT_BROADCAST: bool = true;
+const DEFAULT_MULTICAST_LOOP: bool = true;
+
 /// A host in the simulated network.
 ///
 /// Hosts have [`Udp`] and [`Tcp`] software available for networking.
@@ -163,6 +166,8 @@ pub(crate) struct Udp {
 
 struct UdpBind {
     bind_addr: SocketAddr,
+    broadcast: bool,
+    multicast_loop: bool,
     queue: mpsc::Sender<(Datagram, SocketAddr)>,
 }
 
@@ -174,14 +179,42 @@ impl Udp {
         }
     }
 
-    fn is_port_assigned(&self, port: u16) -> bool {
+    pub(crate) fn is_port_assigned(&self, port: u16) -> bool {
         self.binds.keys().any(|p| *p == port)
+    }
+
+    pub(crate) fn is_broadcast_enabled(&self, port: u16) -> bool {
+        self.binds
+            .get(&port)
+            .map(|bind| bind.broadcast)
+            .unwrap_or(DEFAULT_BROADCAST)
+    }
+
+    pub(crate) fn is_multicast_loop_enabled(&self, port: u16) -> bool {
+        self.binds
+            .get(&port)
+            .map(|bind| bind.multicast_loop)
+            .unwrap_or(DEFAULT_MULTICAST_LOOP)
+    }
+
+    pub(crate) fn set_broadcast(&mut self, port: u16, on: bool) {
+        self.binds
+            .entry(port)
+            .and_modify(|bind| bind.broadcast = on);
+    }
+
+    pub(crate) fn set_multicast_loop(&mut self, port: u16, on: bool) {
+        self.binds
+            .entry(port)
+            .and_modify(|bind| bind.multicast_loop = on);
     }
 
     pub(crate) fn bind(&mut self, addr: SocketAddr) -> io::Result<UdpSocket> {
         let (tx, rx) = mpsc::channel(self.capacity);
         let bind = UdpBind {
             bind_addr: addr,
+            broadcast: DEFAULT_BROADCAST,
+            multicast_loop: DEFAULT_MULTICAST_LOOP,
             queue: tx,
         };
 
