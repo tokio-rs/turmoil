@@ -1,3 +1,29 @@
+# 0.6.5 (March 10, 2025)
+
+### Added
+
+- Add UDP multicast, broadcast simulation ([#224], [#226])
+- Improve host ports exhausted panic message ([#218])
+- Add explicit tracing output when runtime shuts down due to no clients ([#213])
+- Update Axum example to `0.8` ([#221])
+
+
+[#226]: https://github.com/tokio-rs/turmoil/pull/226
+[#224]: https://github.com/tokio-rs/turmoil/pull/224
+[#221]: https://github.com/tokio-rs/turmoil/pull/221
+[#218]: https://github.com/tokio-rs/turmoil/pull/218
+[#213]: https://github.com/tokio-rs/turmoil/pull/213
+
+### Fixed
+
+- TcpListener: fix a race condition where a peer going away causes the next connection to hang ([#224])
+- `sim_elapsed()`: Synchronize host clock against global clock following restart ([#216])
+- Small typo fixes ([#214])
+
+[#224]: https://github.com/tokio-rs/turmoil/pull/224
+[#216]: https://github.com/tokio-rs/turmoil/pull/216
+[#214]: https://github.com/tokio-rs/turmoil/pull/214
+
 # 0.6.5 (January 28, 2025)
 
 ### Added
