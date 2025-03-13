@@ -1,17 +1,13 @@
-use std::{
-    io::{self, ErrorKind},
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
-    rc::Rc,
-    sync::{atomic::AtomicUsize, atomic::Ordering},
-    time::Duration,
-};
+use std::io::{self, ErrorKind};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::rc::Rc;
+use std::sync::{atomic::AtomicUsize, atomic::Ordering};
+use std::time::Duration;
 
 use tokio::{sync::oneshot, time::timeout};
-use turmoil::{
-    lookup,
-    net::{self, UdpSocket},
-    Builder, IpVersion, Result,
-};
+use turmoil::lookup;
+use turmoil::net::{self, UdpSocket};
+use turmoil::{Builder, IpVersion, Result};
 
 const PORT: u16 = 1738;
 
@@ -31,10 +27,8 @@ async fn bind_to_v6(port: u16) -> std::result::Result<net::UdpSocket, std::io::E
     net::UdpSocket::bind((IpAddr::from(Ipv6Addr::UNSPECIFIED), port)).await
 }
 
-async fn send_ping(sock: &net::UdpSocket) -> Result<()> {
-    sock.send_to(b"ping", (lookup("server"), 1738)).await?;
-
-    Ok(())
+async fn send_ping(sock: &net::UdpSocket) -> io::Result<usize> {
+    sock.send_to(b"ping", (lookup("server"), 1738)).await
 }
 
 fn try_send_ping(sock: &net::UdpSocket) -> Result<()> {
@@ -511,11 +505,9 @@ fn network_partition() -> Result {
         turmoil::partition("client", "server");
 
         let sock = bind().await?;
-        send_ping(&sock).await?;
-
-        assert!(timeout(Duration::from_secs(1), recv_pong(&sock))
-            .await
-            .is_err());
+        let err = send_ping(&sock).await.unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::HostUnreachable);
+        assert_eq!(err.to_string(), "host unreachable");
 
         Ok(())
     });
@@ -840,8 +832,9 @@ fn loopback_localhost_public_v4() -> Result {
 
         let bind_addr = SocketAddr::new(bind_addr.ip(), 0);
         let socket = UdpSocket::bind(bind_addr).await?;
-        let res = socket.send_to(&expected, connect_addr).await;
-        assert_error_kind(res, io::ErrorKind::ConnectionRefused);
+        let err = socket.send_to(&expected, connect_addr).await.unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::HostUnreachable);
+        assert_eq!(err.to_string(), "host unreachable");
 
         Ok(())
     });
@@ -891,8 +884,9 @@ fn loopback_localhost_public_v6() -> Result {
 
         let bind_addr = SocketAddr::new(bind_addr.ip(), 0);
         let socket = UdpSocket::bind(bind_addr).await?;
-        let res = socket.send_to(&expected, connect_addr).await;
-        assert_error_kind(res, io::ErrorKind::ConnectionRefused);
+        let err = socket.send_to(&expected, connect_addr).await.unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::HostUnreachable);
+        assert_eq!(err.to_string(), "host unreachable");
 
         Ok(())
     });
@@ -1000,8 +994,8 @@ fn socket_to_nonexistent_node() -> Result {
         );
 
         let err = send.unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::ConnectionRefused);
-        assert_eq!(err.to_string(), "Connection refused");
+        assert_eq!(err.kind(), ErrorKind::HostUnreachable);
+        assert_eq!(err.to_string(), "host unreachable");
 
         Ok(())
     });
