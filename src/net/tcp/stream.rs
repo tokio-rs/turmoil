@@ -67,7 +67,7 @@ impl TcpStream {
 
             let host = world.current_host_mut();
             let mut local_addr = SocketAddr::new(host.addr, host.assign_ephemeral_port());
-            if dst.ip().is_loopback() {
+            if dst.ip().is_loopback() || dst.ip().is_unspecified() {
                 local_addr.set_ip(dst.ip());
             }
 

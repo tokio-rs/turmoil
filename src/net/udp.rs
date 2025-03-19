@@ -336,7 +336,7 @@ impl UdpSocket {
 
     fn send(&self, world: &mut World, dst: SocketAddr, packet: Datagram) -> Result<()> {
         let mut src = self.local_addr;
-        if dst.ip().is_loopback() {
+        if dst.ip().is_loopback() || dst.ip().is_unspecified() {
             src.set_ip(dst.ip());
         }
         if src.ip().is_unspecified() {
