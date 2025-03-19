@@ -1374,3 +1374,42 @@ fn try_write() -> Result {
 
     sim.run()
 }
+
+#[test]
+fn connect_0000() -> Result {
+    init_tracing();
+
+    let mut sim = Builder::new().build();
+    sim.client("client", async move {
+        let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 1234))
+            .await
+            .unwrap();
+
+        tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+
+            let written = socket.try_write(b"hello!").unwrap();
+            assert_eq!(written, 6);
+        });
+
+        let mut socket = TcpStream::connect((Ipv4Addr::UNSPECIFIED, 1234))
+            .await
+            .unwrap();
+        let mut buf: [u8; 6] = [0; 6];
+        socket.read_exact(&mut buf).await?;
+        assert_eq!(&buf, b"hello!");
+
+        Ok(())
+    });
+
+    sim.run()
+}
+
+fn init_tracing() {
+    use tracing_subscriber::filter::EnvFilter;
+
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .with_test_writer()
+        .try_init();
+}
