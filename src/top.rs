@@ -1,5 +1,6 @@
 use crate::envelope::{Envelope, Protocol};
 use crate::host::Host;
+use crate::partition_logger::PartitionLogger;
 use crate::rt::Rt;
 use crate::{config, TRACING_TARGET};
 
@@ -23,6 +24,9 @@ pub(crate) struct Topology {
     /// forward in the same way we do it elsewhere. We'd like to represent
     /// network state with async in the future.
     rt: Rt<'static>,
+    
+    /// Logger for tracking and reporting on partitioned connections
+    partition_logger: PartitionLogger,
 }
 
 /// This type is used as the key in the [`Topology::links`] map. See [`new`]
@@ -174,11 +178,20 @@ enum State {
 
 impl Topology {
     pub(crate) fn new(config: config::Link) -> Topology {
+        // Default to 1 second as the threshold for slow connections
+        let slow_connection_threshold = Duration::from_secs(1);
+        
         Topology {
             config,
             links: IndexMap::new(),
             rt: Rt::no_software(),
+            partition_logger: PartitionLogger::new(slow_connection_threshold),
         }
+    }
+    
+    /// Set the threshold for detecting slow connections
+    pub(crate) fn set_slow_connection_threshold(&mut self, threshold: Duration) {
+        self.partition_logger = PartitionLogger::new(threshold);
     }
 
     /// Register a link between two hosts
@@ -257,26 +270,46 @@ impl Topology {
 
     pub(crate) fn partition(&mut self, a: IpAddr, b: IpAddr) {
         self.links[&Pair::new(a, b)].explicit_partition();
+        self.partition_logger.log_partition(a, b, "ExplicitPartition");
     }
 
     pub(crate) fn partition_oneway(&mut self, a: IpAddr, b: IpAddr) {
         let link = &mut self.links[&Pair::new(a, b)];
         link.partition_oneway(a, b);
+        self.partition_logger.log_partition(a, b, "ExplicitPartitionOneway");
     }
 
     pub(crate) fn repair(&mut self, a: IpAddr, b: IpAddr) {
         self.links[&Pair::new(a, b)].explicit_repair();
+        self.partition_logger.log_repair(a, b);
     }
 
     pub(crate) fn repair_oneway(&mut self, a: IpAddr, b: IpAddr) {
         let link = &mut self.links[&Pair::new(a, b)];
         link.repair_oneway(a, b);
+        self.partition_logger.log_repair(a, b);
     }
 
     pub(crate) fn tick_by(&mut self, duration: Duration) {
         let _ = self.rt.tick(duration);
         for link in self.links.values_mut() {
             link.tick(self.rt.now());
+        }
+        
+        // Check for random partitions
+        self.check_random_partitions();
+        
+        // Check for slow connections after ticking
+        self.partition_logger.check_slow_connections();
+    }
+    
+    // Check for random partitions across all links and log them
+    fn check_random_partitions(&mut self) {
+        for (pair, link) in &self.links {
+            // Check for RandPartition state
+            if matches!(link.state_a_b, State::RandPartition) || matches!(link.state_b_a, State::RandPartition) {
+                self.partition_logger.log_partition(pair.0, pair.1, "RandPartition");
+            }
         }
     }
 
@@ -449,6 +482,9 @@ impl Link {
                 if do_rand {
                     self.state_a_b = State::RandPartition;
                     self.state_b_a = State::RandPartition;
+                    
+                    // We don't have access to the IP addresses here, so this will be handled
+                    // by the Topology struct at a higher level when tick_by is called
                 }
             }
             (State::RandPartition, _) | (_, State::RandPartition) => {
