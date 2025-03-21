@@ -1,5 +1,6 @@
 use std::{
     assert_eq, assert_ne,
+    cell::RefCell,
     io::{self, ErrorKind},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     rc::Rc,
@@ -1373,4 +1374,74 @@ fn try_write() -> Result {
     });
 
     sim.run()
+}
+
+#[test]
+fn tcp_echo() {
+    let sim = Builder::new().build();
+    let sim = Rc::new(RefCell::new(sim));
+
+    sim.borrow_mut().host("server", echo_server);
+
+    let sim1 = sim.clone();
+    sim.borrow_mut().client("client", async move {
+        println!("first client");
+
+        echo_client("server:8080").await.unwrap();
+
+        println!("crashing");
+
+        sim1.borrow_mut().crash("server");
+
+        echo_client("server:8080").await.unwrap_err();
+
+        Ok(())
+    });
+
+    sim.borrow_mut().run().unwrap();
+}
+
+async fn echo_server() -> Result<()> {
+    let addr = "0.0.0.0:8080";
+
+    let listener = TcpListener::bind(&addr).await?;
+    tracing::info!("Listening on: {addr}");
+
+    loop {
+        let (mut socket, _) = listener.accept().await?;
+
+        tokio::spawn(async move {
+            let mut buf = vec![0; 1024];
+
+            // In a loop, read data from the socket and write the data back.
+            loop {
+                let n = socket
+                    .read(&mut buf)
+                    .await
+                    .expect("failed to read data from socket");
+
+                if n == 0 {
+                    return;
+                }
+
+                socket
+                    .write_all(&buf[0..n])
+                    .await
+                    .expect("failed to write data to socket");
+            }
+        });
+    }
+}
+
+async fn echo_client(addr: impl AsRef<str>) -> Result<()> {
+    let mut s = TcpStream::connect(addr.as_ref()).await?;
+
+    let how_many = 3;
+    s.write_u8(how_many).await?;
+
+    // for i in 0..how_many {
+    //     assert_eq!(i, s.read_u8().await?);
+    // }
+
+    Ok(())
 }
