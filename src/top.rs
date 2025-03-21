@@ -22,7 +22,7 @@ pub(crate) struct Topology {
     /// We don't use a Rt for async. Right now, we just use it to tick time
     /// forward in the same way we do it elsewhere. We'd like to represent
     /// network state with async in the future.
-    rt: Rt<'static>,
+    rt: Rt,
 }
 
 /// This type is used as the key in the [`Topology::links`] map. See [`new`]

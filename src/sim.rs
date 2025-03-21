@@ -16,7 +16,7 @@ use crate::{
 };
 
 /// A handle for interacting with the simulation.
-pub struct Sim<'a> {
+pub struct Sim {
     /// Simulation configuration
     config: Config,
 
@@ -26,7 +26,7 @@ pub struct Sim<'a> {
     world: RefCell<World>,
 
     /// Per simulated host runtimes
-    rts: IndexMap<IpAddr, Rt<'a>>,
+    rts: IndexMap<IpAddr, Rt>,
 
     /// Simulation duration since unix epoch. Set when the simulation is
     /// created.
@@ -38,7 +38,7 @@ pub struct Sim<'a> {
     steps: usize,
 }
 
-impl<'a> Sim<'a> {
+impl Sim {
     pub(crate) fn new(config: Config, world: World) -> Self {
         let since_epoch = config
             .epoch
@@ -106,7 +106,7 @@ impl<'a> Sim<'a> {
     /// multiple times.
     pub fn host<F, Fut>(&mut self, addr: impl ToIpAddr, host: F)
     where
-        F: Fn() -> Fut + 'a,
+        F: Fn() -> Fut + 'static,
         Fut: Future<Output = Result> + 'static,
     {
         let addr = self.lookup(addr);
@@ -540,10 +540,12 @@ mod test {
 
         let mut sim = Builder::new().build();
 
-        sim.host("host", || {
-            let ct = ct.clone();
+        let ct1 = ct.clone();
+        sim.host("host", move || {
+            let ct = ct1.clone();
 
             async move {
+                let ct = ct.clone();
                 tokio::spawn(async move {
                     let _into_task = ct;
                     future::pending::<()>().await;

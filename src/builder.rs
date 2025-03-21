@@ -181,14 +181,14 @@ impl Builder {
     /// Build a simulation with the settings from the builder.
     ///
     /// This will use default rng with entropy from the device running.
-    pub fn build<'a>(&self) -> Sim<'a> {
+    pub fn build(&self) -> Sim {
         self.build_with_rng(Box::new(rand::rngs::SmallRng::from_entropy()))
     }
 
     /// Build a sim with a provided `rng`.
     ///
     /// This allows setting the random number generator used to fuzz
-    pub fn build_with_rng<'a>(&self, rng: Box<dyn RngCore>) -> Sim<'a> {
+    pub fn build_with_rng(&self, rng: Box<dyn RngCore>) -> Sim {
         if self.link.latency().max_message_latency < self.link.latency().min_message_latency {
             panic!("Maximum message latency must be greater than minimum.");
         }

@@ -531,8 +531,9 @@ fn bounce() -> Result {
 
     let mut sim = Builder::new().build();
 
-    sim.host("server", || {
-        let publish = reqs.clone();
+    let reqs1 = reqs.clone();
+    sim.host("server", move || {
+        let publish = reqs1.clone();
         let mut reqs = 0;
         async move {
             let sock = bind().await?;

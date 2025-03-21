@@ -443,7 +443,7 @@ fn drop_listener() -> Result {
 
     let mut sim = Builder::new().build();
 
-    sim.host("server", || {
+    sim.host("server", move || {
         let notify = notify.clone();
 
         async move {
@@ -507,7 +507,7 @@ fn drop_listener_with_non_empty_queue() -> Result {
     let tick = Duration::from_millis(10);
     let mut sim = Builder::new().tick_duration(tick).build();
 
-    sim.host("server", || {
+    sim.host("server", move || {
         let wait = wait.clone();
 
         async move {

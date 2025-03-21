@@ -13,15 +13,15 @@ use super::Result;
 // To support re-creation, we need to store a factory of the future that
 // represents the software. This is somewhat annoying in that it requires
 // boxxing to avoid generics.
-type Software<'a> = Box<dyn Fn() -> Pin<Box<dyn Future<Output = Result>>> + 'a>;
+type Software = Box<dyn Fn() -> Pin<Box<dyn Future<Output = Result>>> + 'static>;
 
 /// Runtime kinds.
-pub enum Kind<'a> {
+pub enum Kind {
     /// A runtime for executing test code.
     Client,
 
     /// A runtime that is running simulated host software.
-    Host { software: Software<'a> },
+    Host { software: Software },
 
     /// A runtime without any software. The network topology uses this for
     /// time tracking and message delivery.
@@ -33,8 +33,8 @@ pub enum Kind<'a> {
 /// The tokio runtime is paused (see [`Builder::start_paused`]), which gives us
 /// control over when and how to advance time. In particular, see [`Rt::tick`],
 /// which lets the runtime do a bit more work.
-pub struct Rt<'a> {
-    pub kind: Kind<'a>,
+pub struct Rt {
+    pub kind: Kind,
 
     /// Handle to the Tokio runtime driving this simulated host. Each runtime
     /// may have a different sense of "now" which simulates clock skew.
@@ -54,7 +54,7 @@ pub struct Rt<'a> {
     enable_io: bool,
 }
 
-impl<'a> Rt<'a> {
+impl Rt {
     pub(crate) fn client<F>(nodename: Arc<str>, client: F, enable_io: bool) -> Self
     where
         F: Future<Output = Result> + 'static,
@@ -75,7 +75,7 @@ impl<'a> Rt<'a> {
 
     pub(crate) fn host<F, Fut>(nodename: Arc<str>, software: F, enable_io: bool) -> Self
     where
-        F: Fn() -> Fut + 'a,
+        F: Fn() -> Fut + 'static,
         Fut: Future<Output = Result> + 'static,
     {
         let (tokio, local) = init(enable_io);
