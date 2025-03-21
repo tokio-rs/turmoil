@@ -5,6 +5,8 @@ use std::{future::Future, pin::Pin};
 use crate::Sim;
 
 pub trait Workload {
+    fn name(&self) -> &str;
+
     async fn setup(&mut self);
     async fn run(&mut self);
     async fn verify(&mut self);
@@ -37,7 +39,7 @@ impl CompoundWorkload {
         for workload in &self.workloads {
             let mut wk = workload.build();
 
-            sim.client("fooclient", async move {
+            sim.client(wk.name().to_string(), async move {
                 wk.setup().await;
                 wk.run().await;
                 wk.verify().await;
@@ -51,6 +53,8 @@ impl CompoundWorkload {
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 
 pub trait WorkloadObj {
+    fn name(&self) -> &str;
+
     fn setup(&mut self) -> BoxFuture<'_, ()>;
     fn run(&mut self) -> BoxFuture<'_, ()>;
     fn verify(&mut self) -> BoxFuture<'_, ()>;
@@ -60,6 +64,10 @@ impl<T> WorkloadObj for T
 where
     T: Workload,
 {
+    fn name(&self) -> &str {
+        Workload::name(self)
+    }
+
     fn setup(&mut self) -> BoxFuture<'_, ()> {
         Box::pin(Workload::setup(self))
     }
@@ -147,8 +155,9 @@ macro_rules! workload {
         }
 
         impl Workload for $impl_name:ident {
+            fn name(& $name_self:ident) -> &str $name_block:block
             async fn setup(&mut $setup_self:ident) $setup_block:block
-            async fn run(&mut $run_self:ident, $sim_param:ident: &mut Sim<'_>) $run_block:block
+            async fn run(&mut $run_self:ident) $run_block:block
             async fn verify(&mut $verify_self:ident) $verify_block:block
         }
     ) => {
@@ -170,6 +179,7 @@ macro_rules! workload {
             }
 
             impl turmoil::workload::Workload for Inner {
+                fn name(&$name_self) -> &str $name_block
                 async fn setup(&mut $setup_self) $setup_block
                 async fn run(&mut $run_self) $run_block
                 async fn verify(&mut $verify_self) $verify_block
