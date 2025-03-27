@@ -1,0 +1,13 @@
+[package]
+name = "cluster"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+turmoil = { path = "../.." }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing = "0.1"
+tokio = "1"
+rand = "0.8"
+getrandom = "0.3"
