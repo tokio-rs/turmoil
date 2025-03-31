@@ -1,5 +1,6 @@
 use std::{
     assert_eq, assert_ne,
+    cell::RefCell,
     io::{self, ErrorKind},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     rc::Rc,
@@ -68,6 +69,92 @@ fn network_partitions_during_connect() -> Result {
     });
 
     sim.run()
+}
+
+#[test]
+fn read_resets_during_crash() -> Result {
+    let mut sim = Builder::new().build();
+
+    sim.host("server", || async {
+        let listener = bind().await?;
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+
+            tokio::spawn(async move {
+                let mut buf = vec![0; 1024];
+
+                // In a loop, read data from the socket and write the data back.
+                loop {
+                    let n = socket
+                        .read(&mut buf)
+                        .await
+                        .expect("failed to read data from socket");
+
+                    if n == 0 {
+                        return;
+                    }
+
+                    socket
+                        .write_all(&buf[0..n])
+                        .await
+                        .expect("failed to write data to socket");
+                }
+            });
+        }
+    });
+
+    let should_crash = Rc::new(RefCell::new(false));
+
+    let should_crash2 = should_crash.clone();
+    sim.client("client", async move {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let mut stream = TcpStream::connect(format!("server:{}", PORT))
+            .await
+            .unwrap();
+
+        let msg = b"hello world";
+        stream
+            .write_all(msg)
+            .await
+            .map_err(|e| format!("write: {}", e))?;
+
+        let mut buf = vec![0; msg.len()];
+        let _n = stream
+            .read_exact(&mut buf)
+            .await
+            .map_err(|e| format!("read: {}", e))?;
+        assert_eq!(buf, msg);
+
+        *should_crash2.borrow_mut() = true;
+
+        tokio::task::yield_now().await;
+
+        let msg = b"hello world";
+        stream
+            .write_all(msg)
+            .await
+            .map_err(|e| format!("write: {}", e))?;
+
+        let mut buf = vec![0; msg.len()];
+        let _n = stream
+            .read_exact(&mut buf)
+            .await
+            .map_err(|e| format!("read: {}", e))?;
+        assert_eq!(buf, msg);
+
+        Ok(())
+    });
+
+    while !sim.step().unwrap() {
+        if *should_crash.borrow() {
+            sim.crash("server");
+
+            *should_crash.borrow_mut() = false;
+        }
+    }
+
+    Ok(())
 }
 
 #[test]
