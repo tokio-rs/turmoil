@@ -87,6 +87,25 @@ fn ephemeral_port() -> Result {
 }
 
 #[test]
+fn release_bind_on_drop() -> Result {
+    let mut sim = Builder::new().build();
+
+    sim.client("client", async {
+        let sock = bind_to_v4(4555).await.unwrap();
+
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        drop(sock);
+
+        let _sock = bind_to_v4(4555).await.unwrap();
+
+        Ok(())
+    });
+
+    sim.run()
+}
+
+#[test]
 fn ephemeral_port_does_not_leak_on_server_shutdown() -> Result {
     let mut sim = Builder::new()
         .simulation_duration(Duration::from_secs(60))
