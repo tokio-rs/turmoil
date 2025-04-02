@@ -154,6 +154,9 @@ mod top;
 use top::Topology;
 pub use top::{LinkIter, LinksIter, SentRef};
 
+mod partition_logger;
+pub use partition_logger::PartitionLogger;
+
 mod world;
 use world::World;
 
