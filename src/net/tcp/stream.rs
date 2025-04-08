@@ -1,30 +1,24 @@
-use bytes::{Buf, Bytes};
+use std::fmt::Debug;
 use std::future::poll_fn;
-use std::{
-    fmt::Debug,
-    io::{self, Error, Result},
-    net::SocketAddr,
-    pin::Pin,
-    sync::Arc,
-    task::{ready, Context, Poll},
-};
-use tokio::{
-    io::{AsyncRead, AsyncWrite, ReadBuf},
-    runtime::Handle,
-    sync::{mpsc, oneshot},
-    time::sleep,
-};
+use std::io::{self, Error, Result};
+use std::net::SocketAddr;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{ready, Context, Poll};
 
-use crate::{
-    envelope::{Envelope, Protocol, Segment, Syn},
-    host::is_same,
-    host::SequencedSegment,
-    net::SocketPair,
-    world::World,
-    ToSocketAddrs, TRACING_TARGET,
-};
+use bytes::{Buf, Bytes};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::runtime::Handle;
+use tokio::sync::{mpsc, oneshot};
+use tokio::time::sleep;
 
 use super::split_owned::{OwnedReadHalf, OwnedWriteHalf};
+use crate::envelope::{Envelope, Protocol, Segment, Syn};
+use crate::host::is_same;
+use crate::host::SequencedSegment;
+use crate::net::SocketPair;
+use crate::world::World;
+use crate::{ToSocketAddrs, TRACING_TARGET};
 
 /// A simulated TCP stream between a local and a remote socket.
 ///
