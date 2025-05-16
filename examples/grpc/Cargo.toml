@@ -19,4 +19,3 @@ turmoil = { path = "../.." }
 [build-dependencies]
 tonic-build = "0.12.3"
 protox = "0.8"
-prost = "0.13"
