@@ -11,7 +11,7 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 prost = "0.13"
 tokio = "1"
 tonic = "0.12"
-tower = "0.4"
+tower = "0.5"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 turmoil = { path = "../.." }
