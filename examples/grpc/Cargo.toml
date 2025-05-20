@@ -10,12 +10,12 @@ hyper = "1"
 hyper-util = { version = "0.1", features = ["tokio"] }
 prost = "0.13"
 tokio = "1"
-tonic = "0.12"
+tonic = "0.13"
 tower = "0.5"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 turmoil = { path = "../.." }
 
 [build-dependencies]
-tonic-build = "0.12.3"
+tonic-build = "0.13"
 protox = "0.8"
