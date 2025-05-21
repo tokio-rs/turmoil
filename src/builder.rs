@@ -177,6 +177,13 @@ impl Builder {
         self.config.random_node_order = true;
         self
     }
+    
+    /// Sets the threshold for when a partitioned connection should be considered "slow"
+    /// and trigger a warning. Default is 1 second.
+    pub fn slow_connection_threshold(&mut self, value: Duration) -> &mut Self {
+        self.config.slow_connection_threshold = Some(value);
+        self
+    }
 
     /// Build a simulation with the settings from the builder.
     ///
@@ -193,12 +200,17 @@ impl Builder {
             panic!("Maximum message latency must be greater than minimum.");
         }
 
-        let world = World::new(
+        let mut world = World::new(
             self.link.clone(),
             rng,
             self.ip_version.iter(),
             self.config.tick,
         );
+        
+        // Configure the slow connection threshold if provided
+        if let Some(threshold) = self.config.slow_connection_threshold {
+            world.topology.set_slow_connection_threshold(threshold);
+        }
 
         Sim::new(self.config.clone(), world)
     }
