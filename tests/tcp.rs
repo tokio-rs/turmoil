@@ -1,22 +1,16 @@
-use std::{
-    assert_eq, assert_ne,
-    io::{self, ErrorKind},
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
-    rc::Rc,
-    time::Duration,
-};
-
 use std::future;
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    sync::{oneshot, Notify},
-    time::timeout,
-};
-use turmoil::{
-    lookup,
-    net::{TcpListener, TcpStream},
-    Builder, IpVersion, Result,
-};
+use std::io;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::rc::Rc;
+use std::time::Duration;
+use std::{assert_eq, assert_ne};
+
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::{oneshot, Notify};
+use tokio::time::timeout;
+use turmoil::lookup;
+use turmoil::net::{TcpListener, TcpStream};
+use turmoil::{Builder, IpVersion, Result};
 
 const PORT: u16 = 1738;
 
@@ -50,10 +44,9 @@ fn network_partitions_during_connect() -> Result {
     sim.client("client", async {
         turmoil::partition("client", "server");
 
-        assert_error_kind(
-            TcpStream::connect(("server", PORT)).await,
-            io::ErrorKind::ConnectionRefused,
-        );
+        let err = TcpStream::connect(("server", PORT)).await.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::HostUnreachable);
+        assert_eq!(err.to_string(), "host unreachable");
 
         turmoil::repair("client", "server");
         turmoil::hold("client", "server");
@@ -245,7 +238,9 @@ fn network_partition_once_connected() -> Result {
 
         assert!(timeout(Duration::from_secs(1), s.read_u8()).await.is_err());
 
-        s.write_u8(1).await?;
+        let err = s.write_u8(1).await.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::HostUnreachable);
+        assert_eq!(err.to_string(), "host unreachable");
 
         Ok(())
     });
@@ -255,9 +250,9 @@ fn network_partition_once_connected() -> Result {
 
         turmoil::partition("server", "client");
 
-        s.write_u8(1).await?;
-
-        assert!(timeout(Duration::from_secs(1), s.read_u8()).await.is_err());
+        let err = s.write_u8(1).await.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::HostUnreachable);
+        assert_eq!(err.to_string(), "host unreachable");
 
         Ok(())
     });
@@ -1334,8 +1329,8 @@ fn socket_to_nonexistent_node() -> Result {
         );
 
         let err = sock.unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::ConnectionRefused);
-        assert_eq!(err.to_string(), "Connection refused");
+        assert_eq!(err.kind(), io::ErrorKind::HostUnreachable);
+        assert_eq!(err.to_string(), "host unreachable");
 
         Ok(())
     });

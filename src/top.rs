@@ -1,16 +1,17 @@
-use crate::envelope::{Envelope, Protocol};
-use crate::host::Host;
-use crate::rt::Rt;
-use crate::{config, TRACING_TARGET};
-
-use indexmap::IndexMap;
-use rand::{Rng, RngCore};
-use rand_distr::{Distribution, Exp};
 use std::collections::VecDeque;
 use std::io::{Error, ErrorKind, Result};
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
+
+use indexmap::IndexMap;
+use rand::{Rng, RngCore};
+use rand_distr::{Distribution, Exp};
 use tokio::time::Instant;
+
+use crate::envelope::{Envelope, Protocol};
+use crate::host::Host;
+use crate::rt::Rt;
+use crate::{config, TRACING_TARGET};
 
 /// Describes the network topology.
 pub(crate) struct Topology {
@@ -184,7 +185,10 @@ impl Topology {
     /// Register a link between two hosts
     pub(crate) fn register(&mut self, a: IpAddr, b: IpAddr) {
         let pair = Pair::new(a, b);
-        assert!(self.links.insert(pair, Link::new(self.rt.now())).is_none());
+        assert!(self
+            .links
+            .insert(pair, Link::new(self.rt.now(), self.config.clone()))
+            .is_none());
     }
 
     pub(crate) fn set_max_message_latency(&mut self, value: Duration) {
@@ -227,14 +231,19 @@ impl Topology {
         dst: SocketAddr,
         message: Protocol,
     ) -> Result<()> {
-        if let Some(link) = self.links.get_mut(&Pair::new(src.ip(), dst.ip())) {
+        if let Some(link) = self
+            .links
+            .get_mut(&Pair::new(src.ip(), dst.ip()))
+            // Treat partitions as unlinked hosts
+            .and_then(|l| match l.get_state_for_message(src.ip(), dst.ip()) {
+                State::Healthy | State::Hold => Some(l),
+                State::ExplicitPartition | State::RandPartition => None,
+            })
+        {
             link.enqueue_message(&self.config, rand, src, dst, message);
             Ok(())
         } else {
-            Err(Error::new(
-                ErrorKind::ConnectionRefused,
-                "Connection refused",
-            ))
+            Err(Error::new(ErrorKind::HostUnreachable, "host unreachable"))
         }
     }
 
@@ -307,11 +316,11 @@ enum DeliveryStatus {
 }
 
 impl Link {
-    fn new(now: Instant) -> Link {
+    fn new(now: Instant, config: config::Link) -> Link {
         Link {
             state_a_b: State::Healthy,
             state_b_a: State::Healthy,
-            config: config::Link::default(),
+            config,
             sent: VecDeque::new(),
             deliverable: IndexMap::new(),
             now,
@@ -442,13 +451,14 @@ impl Link {
     }
 
     // Randomly break or repair this link.
+    //
+    // FIXME: pull this operation up to the topology level. A link shouldn't be
+    // responsible for determining its own random failure.
     fn rand_partition_or_repair(&mut self, global_config: &config::Link, rand: &mut dyn RngCore) {
-        let do_rand = self.rand_partition(global_config.message_loss(), rand);
         match (self.state_a_b, self.state_b_a) {
             (State::Healthy, _) | (_, State::Healthy) => {
-                if do_rand {
-                    self.state_a_b = State::RandPartition;
-                    self.state_b_a = State::RandPartition;
+                if self.rand_fail(global_config.message_loss(), rand) {
+                    self.rand_partition();
                 }
             }
             (State::RandPartition, _) | (_, State::RandPartition) => {
@@ -458,6 +468,20 @@ impl Link {
             }
             _ => {}
         }
+    }
+
+    /// With some chance `config.fail_rate`, randomly partition this link.
+    fn rand_fail(&self, global: &config::MessageLoss, rand: &mut dyn RngCore) -> bool {
+        let config = self.config.message_loss.as_ref().unwrap_or(global);
+        let fail_rate = config.fail_rate;
+        fail_rate > 0.0 && rand.gen_bool(fail_rate)
+    }
+
+    /// With some chance `config.repair_rate`, randomly repair this link.
+    fn rand_repair(&self, global: &config::MessageLoss, rand: &mut dyn RngCore) -> bool {
+        let config = self.config.message_loss.as_ref().unwrap_or(global);
+        let repair_rate = config.repair_rate;
+        repair_rate > 0.0 && rand.gen_bool(repair_rate)
     }
 
     fn hold(&mut self) {
@@ -474,6 +498,11 @@ impl Link {
                 sent.deliver(self.now);
             }
         }
+    }
+
+    fn rand_partition(&mut self) {
+        self.state_a_b = State::RandPartition;
+        self.state_b_a = State::RandPartition;
     }
 
     fn explicit_partition(&mut self) {
@@ -501,19 +530,6 @@ impl Link {
     fn explicit_repair(&mut self) {
         self.state_a_b = State::Healthy;
         self.state_b_a = State::Healthy;
-    }
-
-    /// Should the link be randomly partitioned
-    fn rand_partition(&self, global: &config::MessageLoss, rand: &mut dyn RngCore) -> bool {
-        let config = self.config.message_loss.as_ref().unwrap_or(global);
-        let fail_rate = config.fail_rate;
-        fail_rate > 0.0 && rand.gen_bool(fail_rate)
-    }
-
-    fn rand_repair(&self, global: &config::MessageLoss, rand: &mut dyn RngCore) -> bool {
-        let config = self.config.message_loss.as_ref().unwrap_or(global);
-        let repair_rate = config.repair_rate;
-        repair_rate > 0.0 && rand.gen_bool(repair_rate)
     }
 
     fn delay(&self, global: &config::Latency, rand: &mut dyn RngCore) -> Duration {
