@@ -740,7 +740,7 @@ mod test {
                     let udp_socket =
                         UdpSocket::bind((IpAddr::V4(Ipv4Addr::UNSPECIFIED), 1234)).await?;
                     udp_socket
-                        .send_to(&[42], format!("{}:1234", host_b))
+                        .send_to(&[42], format!("{host_b}:1234"))
                         .await
                         .expect("sending packet should appear to work, even if partitioned");
 
@@ -765,7 +765,7 @@ mod test {
                     let udp_socket =
                         UdpSocket::bind((IpAddr::V4(Ipv4Addr::UNSPECIFIED), 1234)).await?;
                     udp_socket
-                        .send_to(&[42], format!("{}:1234", host_a))
+                        .send_to(&[42], format!("{host_a}:1234"))
                         .await
                         .expect("sending packet should work");
 

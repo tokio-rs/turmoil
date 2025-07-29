@@ -426,7 +426,7 @@ impl Tcp {
                 // connection refused on the client.
                 if let Some(b) = self.binds.get_mut(&dst.port()) {
                     if b.deque.len() == self.server_socket_capacity {
-                        panic!("{} server socket buffer full", dst);
+                        panic!("{dst} server socket buffer full");
                     }
 
                     if matches(b.bind_addr, dst) {

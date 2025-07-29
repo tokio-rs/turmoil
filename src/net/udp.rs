@@ -636,7 +636,7 @@ where
     }
 
     if interface.is_ipv4() != addr.is_ipv4() {
-        panic!("ip version mismatch: {:?} host: {:?}", interface, addr)
+        panic!("ip version mismatch: {interface:?} host: {addr:?}")
     }
 
     Ok(())
