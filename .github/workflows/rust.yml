@@ -18,7 +18,7 @@ jobs:
         os: [ubuntu-latest]
     steps:
       - name: Git Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       - name: Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
       - name: Cargo Test
@@ -27,7 +27,7 @@ jobs:
   fmt:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -40,7 +40,7 @@ jobs:
       matrix :
         os: [ubuntu-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
       - name: Run cargo clippy
@@ -50,7 +50,7 @@ jobs:
     name: semver
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Check semver
         uses: obi1kenobi/cargo-semver-checks-action@v2
         with:
