@@ -280,7 +280,7 @@ impl Topology {
         }
     }
 
-    pub(crate) fn iter_mut(&mut self) -> LinksIter {
+    pub(crate) fn iter_mut(&mut self) -> LinksIter<'_> {
         LinksIter {
             iter: self.links.iter_mut(),
         }
