@@ -193,6 +193,15 @@ impl Builder {
             panic!("Maximum message latency must be greater than minimum.");
         }
 
+        if self.config.tick.as_nanos() % Duration::from_millis(1).as_nanos() != 0  {
+            // Tick duration is used for tokio::time::sleep, which requires millisecond resolution.
+            panic!("Tick duration resolution is in milliseconds, but value provided would require higher: {:?}.", self.config.tick)
+        }
+
+        if self.config.tick.is_zero() {
+            panic!("Tick duration of zero is not supported.")
+        }
+
         let world = World::new(
             self.link.clone(),
             rng,
@@ -216,6 +225,14 @@ mod tests {
         let _sim = Builder::new()
             .min_message_latency(Duration::from_millis(100))
             .max_message_latency(Duration::from_millis(50))
+            .build();
+    }
+
+    #[test]
+    #[should_panic]
+    fn invalid_tick_duration() {
+        let _sum = Builder::new()
+            .tick_duration(Duration::from_micros(500))
             .build();
     }
 }
