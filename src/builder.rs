@@ -182,7 +182,7 @@ impl Builder {
     ///
     /// This will use default rng with entropy from the device running.
     pub fn build<'a>(&self) -> Sim<'a> {
-        self.build_with_rng(Box::new(rand::rngs::SmallRng::from_entropy()))
+        self.build_with_rng(Box::new(rand::rngs::SmallRng::from_os_rng()))
     }
 
     /// Build a sim with a provided `rng`.
