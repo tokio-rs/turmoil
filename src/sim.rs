@@ -91,9 +91,11 @@ impl<'a> Sim<'a> {
             world.register(addr, &nodename, HostTimer::new(self.elapsed), &self.config);
         }
 
-        let rt = World::enter(&self.world, || {
-            Rt::client(nodename, client, self.config.enable_tokio_io)
-        });
+        let config = rt::Config {
+            enable_io: self.config.enable_tokio_io,
+        };
+
+        let rt = World::enter(&self.world, || Rt::client(nodename, client, config));
 
         self.rts.insert(addr, rt);
     }
@@ -126,9 +128,11 @@ impl<'a> Sim<'a> {
             world.register(addr, &nodename, HostTimer::new(self.elapsed), &self.config);
         }
 
-        let rt = World::enter(&self.world, || {
-            Rt::host(nodename, host, self.config.enable_tokio_io)
-        });
+        let config = rt::Config {
+            enable_io: self.config.enable_tokio_io,
+        };
+
+        let rt = World::enter(&self.world, || Rt::host(nodename, host, config));
 
         self.rts.insert(addr, rt);
     }
