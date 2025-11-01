@@ -3,6 +3,7 @@ use std::mem;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use rand::rngs::SmallRng;
 use tokio::runtime::Runtime;
 use tokio::task::JoinHandle;
 use tokio::task::LocalSet;
@@ -33,6 +34,11 @@ pub enum Kind<'a> {
 pub struct Config {
     /// Whether io is enabled on the runtime.
     pub enable_io: bool,
+
+    /// Rng used to seed the tokio runtime.
+    ///
+    /// Only used if the `tokio_unstable` cfg flag is set.
+    pub rng: Option<SmallRng>,
 }
 
 /// Per host simulated runtime.
@@ -62,11 +68,11 @@ pub struct Rt<'a> {
 }
 
 impl<'a> Rt<'a> {
-    pub(crate) fn client<F>(nodename: Arc<str>, client: F, config: Config) -> Self
+    pub(crate) fn client<F>(nodename: Arc<str>, client: F, mut config: Config) -> Self
     where
         F: Future<Output = Result> + 'static,
     {
-        let (tokio, local) = init(&config);
+        let (tokio, local) = init(&mut config);
 
         let handle = with(&tokio, &local, || tokio::task::spawn_local(client));
 
@@ -80,12 +86,12 @@ impl<'a> Rt<'a> {
         }
     }
 
-    pub(crate) fn host<F, Fut>(nodename: Arc<str>, software: F, config: Config) -> Self
+    pub(crate) fn host<F, Fut>(nodename: Arc<str>, software: F, mut config: Config) -> Self
     where
         F: Fn() -> Fut + 'a,
         Fut: Future<Output = Result> + 'static,
     {
-        let (tokio, local) = init(&config);
+        let (tokio, local) = init(&mut config);
 
         let software: Software = Box::new(move || Box::pin(software()));
         let handle = with(&tokio, &local, || tokio::task::spawn_local(software()));
@@ -101,8 +107,8 @@ impl<'a> Rt<'a> {
     }
 
     pub(crate) fn no_software() -> Self {
-        let config = Config::default();
-        let (tokio, local) = init(&config);
+        let mut config = Config::default();
+        let (tokio, local) = init(&mut config);
 
         Self {
             kind: Kind::NoSoftware,
@@ -215,14 +221,14 @@ impl<'a> Rt<'a> {
     ///
     /// Both the [`Runtime`] and [`LocalSet`] are replaced with new instances.
     fn cancel_tasks(&mut self) {
-        let (tokio, local) = init(&self.config);
+        let (tokio, local) = init(&mut self.config);
 
         _ = mem::replace(&mut self.tokio, tokio);
         drop(mem::replace(&mut self.local, local));
     }
 }
 
-fn init(config: &Config) -> (Runtime, LocalSet) {
+fn init(config: &mut Config) -> (Runtime, LocalSet) {
     let mut tokio_builder = tokio::runtime::Builder::new_current_thread();
 
     #[cfg(tokio_unstable)]
@@ -230,6 +236,13 @@ fn init(config: &Config) -> (Runtime, LocalSet) {
 
     if config.enable_io {
         tokio_builder.enable_io();
+    }
+
+    #[cfg(tokio_unstable)]
+    if let Some(rng) = &mut config.rng {
+        let bytes: [u8; 32] = rand::Rng::gen(rng);
+        let seed = tokio::runtime::RngSeed::from_bytes(&bytes);
+        tokio_builder.rng_seed(seed);
     }
 
     let tokio = tokio_builder

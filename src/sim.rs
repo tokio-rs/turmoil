@@ -1,4 +1,4 @@
-use rand::seq::SliceRandom;
+use rand::{rngs::SmallRng, seq::SliceRandom, Rng, SeedableRng};
 use std::cell::RefCell;
 use std::future::Future;
 use std::net::IpAddr;
@@ -91,8 +91,11 @@ impl<'a> Sim<'a> {
             world.register(addr, &nodename, HostTimer::new(self.elapsed), &self.config);
         }
 
+        let seed = self.world.borrow_mut().rng.gen();
+        let rng = SmallRng::from_seed(seed);
         let config = rt::Config {
             enable_io: self.config.enable_tokio_io,
+            rng: Some(rng),
         };
 
         let rt = World::enter(&self.world, || Rt::client(nodename, client, config));
@@ -128,8 +131,11 @@ impl<'a> Sim<'a> {
             world.register(addr, &nodename, HostTimer::new(self.elapsed), &self.config);
         }
 
+        let seed = self.world.borrow_mut().rng.gen();
+        let rng = SmallRng::from_seed(seed);
         let config = rt::Config {
             enable_io: self.config.enable_tokio_io,
+            rng: Some(rng),
         };
 
         let rt = World::enter(&self.world, || Rt::host(nodename, host, config));
