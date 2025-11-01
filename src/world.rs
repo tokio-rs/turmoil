@@ -34,7 +34,7 @@ pub(crate) struct World {
     pub(crate) current: Option<IpAddr>,
 
     /// Random number generator used for all decisions. To make execution
-    /// determinstic, reuse the same seed.
+    /// deterministic, reuse the same seed.
     pub(crate) rng: Box<dyn RngCore>,
 
     /// Run duration for each host on every step.
