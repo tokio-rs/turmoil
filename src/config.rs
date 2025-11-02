@@ -43,6 +43,9 @@ pub(crate) struct Config {
     /// Enables running of host/client code in random order at each
     /// simulation step
     pub(crate) random_node_order: bool,
+    
+    /// Threshold for when a partitioned connection should be considered "slow"
+    pub(crate) slow_connection_threshold: Option<Duration>,
 }
 
 /// Configures link behavior.
@@ -96,6 +99,7 @@ impl Default for Config {
             udp_capacity: 64,
             enable_tokio_io: false,
             random_node_order: false,
+            slow_connection_threshold: None,
         }
     }
 }
