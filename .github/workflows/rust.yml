@@ -55,4 +55,3 @@ jobs:
         uses: obi1kenobi/cargo-semver-checks-action@v2
         with:
           uses: dtolnay/rust-toolchain@stable
-          release-type: minor
