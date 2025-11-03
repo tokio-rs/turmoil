@@ -29,7 +29,7 @@ Add this to your `Cargo.toml`.
 
 ```toml
 [dev-dependencies]
-turmoil = "0.6"
+turmoil = "0.7"
 ```
 
 See crate documentation for simulation setup instructions.

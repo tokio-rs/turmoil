@@ -1,3 +1,35 @@
+# 0.7.0 (November 3, 2025)
+
+### Added
+
+- Add a basic cluster simulation example ([#233])
+- Seed tokio with the world rng ([#245])
+- Update deps ([#236], [#237], [#239], [#241])
+- Add bind drop test ([#235])
+
+[#233]: https://github.com/tokio-rs/turmoil/pull/233
+[#235]: https://github.com/tokio-rs/turmoil/pull/235
+[#236]: https://github.com/tokio-rs/turmoil/pull/236
+[#237]: https://github.com/tokio-rs/turmoil/pull/237
+[#239]: https://github.com/tokio-rs/turmoil/pull/239
+[#241]: https://github.com/tokio-rs/turmoil/pull/241
+[#245]: https://github.com/tokio-rs/turmoil/pull/245
+
+### Fixed
+
+- Fix clippy lint violations ([#242], [#244])
+- Remove prost from build-dependencies ([#238])
+
+[#238]: https://github.com/tokio-rs/turmoil/pull/238
+[#242]: https://github.com/tokio-rs/turmoil/pull/242
+[#244]: https://github.com/tokio-rs/turmoil/pull/244
+
+### Breaking
+
+- Change `Builder` to accept an rng seed ([#246])
+
+[#246]: https://github.com/tokio-rs/turmoil/pull/246
+
 # 0.6.6 (March 10, 2025)
 
 ### Added
