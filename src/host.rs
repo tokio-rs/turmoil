@@ -116,14 +116,19 @@ pub(crate) struct HostTimer {
     /// Time from the start of the simulation until this host was initialized.
     /// Used to calculate total simulation time below.
     start_offset: Duration,
+
+    /// Simulation duration since unix epoch. Set when the simulation is
+    /// created.
+    since_epoch: Duration,
 }
 
 impl HostTimer {
-    pub(crate) fn new(start_offset: Duration) -> Self {
+    pub(crate) fn new(start_offset: Duration, since_epoch: Duration) -> Self {
         Self {
             elapsed: Duration::ZERO,
             now: None,
             start_offset,
+            since_epoch,
         }
     }
 
@@ -152,6 +157,15 @@ impl HostTimer {
     /// some time before this host was registered then sim_elapsed > elapsed.
     pub(crate) fn sim_elapsed(&self) -> Duration {
         self.start_offset + self.elapsed()
+    }
+
+    /// The logical duration from [`UNIX_EPOCH`] until now.
+    ///
+    /// On creation the simulation picks a `SystemTime` and calculates the
+    /// duration since the epoch. Each `run()` invocation moves logical time
+    /// forward the configured tick duration.
+    pub(crate) fn since_epoch(&self) -> Duration {
+        self.since_epoch + self.sim_elapsed()
     }
 }
 
@@ -502,7 +516,7 @@ mod test {
         let mut host = Host::new(
             "host",
             std::net::Ipv4Addr::UNSPECIFIED.into(),
-            HostTimer::new(Duration::ZERO),
+            HostTimer::new(Duration::ZERO, Duration::ZERO),
             49152..=49162,
             1,
             1,
