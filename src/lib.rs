@@ -195,6 +195,25 @@ pub fn sim_elapsed() -> Option<Duration> {
     .flatten()
 }
 
+/// The logical duration from [`UNIX_EPOCH`] until now.
+///
+/// On creation the simulation picks a `SystemTime` and calculates the
+/// duration since the epoch. Each `run()` invocation moves logical time
+/// forward the configured tick duration.
+///
+/// Will return None if the duration is not available, typically because
+/// there is no currently executing host or world.
+pub fn since_epoch() -> Option<Duration> {
+    World::try_current(|world| {
+        world
+            .try_current_host()
+            .map(|host| host.timer.since_epoch())
+            .ok()
+    })
+    .ok()
+    .flatten()
+}
+
 /// Lookup an IP address by host name.
 ///
 /// Must be called from within a Turmoil simulation.

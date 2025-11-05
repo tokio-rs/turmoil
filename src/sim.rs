@@ -88,7 +88,12 @@ impl<'a> Sim<'a> {
             let world = RefCell::get_mut(&mut self.world);
 
             // Register host state with the world
-            world.register(addr, &nodename, HostTimer::new(self.elapsed), &self.config);
+            world.register(
+                addr,
+                &nodename,
+                HostTimer::new(self.elapsed, self.since_epoch),
+                &self.config,
+            );
         }
 
         let seed = self.world.borrow_mut().rng.gen();
@@ -128,7 +133,12 @@ impl<'a> Sim<'a> {
             let world = RefCell::get_mut(&mut self.world);
 
             // Register host state with the world
-            world.register(addr, &nodename, HostTimer::new(self.elapsed), &self.config);
+            world.register(
+                addr,
+                &nodename,
+                HostTimer::new(self.elapsed, self.since_epoch),
+                &self.config,
+            );
         }
 
         let seed = self.world.borrow_mut().rng.gen();
@@ -479,7 +489,7 @@ mod test {
     use crate::{
         elapsed, hold,
         net::{TcpListener, TcpStream},
-        sim_elapsed, Builder, Result, Sim, World,
+        sim_elapsed, since_epoch, Builder, Result, Sim, World,
     };
 
     #[test]
@@ -576,6 +586,7 @@ mod test {
     fn elapsed_time() -> Result {
         let tick = Duration::from_millis(5);
         let mut sim = Builder::new().tick_duration(tick).build();
+        let start_epoch = sim.since_epoch();
 
         let duration = Duration::from_millis(500);
 
@@ -586,6 +597,9 @@ mod test {
             // `elapsed` and `sim_elapsed` time will be identical.
             assert_eq!(duration, sim_elapsed().unwrap());
 
+            // Logical epoch time should move forward at the same rate the sim
+            assert_eq!(start_epoch + duration, since_epoch().unwrap());
+
             Ok(())
         });
 
@@ -593,6 +607,7 @@ mod test {
             tokio::time::sleep(duration).await;
             assert_eq!(duration, elapsed());
             assert_eq!(duration, sim_elapsed().unwrap());
+            assert_eq!(start_epoch + duration, since_epoch().unwrap());
 
             Ok(())
         });
@@ -608,9 +623,14 @@ mod test {
             // Note that sim_elapsed is total simulation time while elapsed is
             // still zero for this newly created host.
             assert_eq!(duration + tick, sim_elapsed().unwrap());
+            assert_eq!(start_epoch + duration + tick, since_epoch().unwrap());
             tokio::time::sleep(duration).await;
             assert_eq!(duration, elapsed());
             assert_eq!(duration + tick + duration, sim_elapsed().unwrap());
+            assert_eq!(
+                start_epoch + duration + tick + duration,
+                since_epoch().unwrap()
+            );
 
             Ok(())
         });
@@ -634,6 +654,21 @@ mod test {
         let sim = Builder::new().build();
         // Safe to call while there is no current host set
         World::enter(&sim.world, || assert!(sim_elapsed().is_none()));
+
+        Ok(())
+    }
+
+    /// This is a regression test to ensure it is safe to call since_epoch
+    /// if current world of host is not set.
+    #[test]
+    fn since_epoch_regression() -> Result {
+        // Safe to call outside of simution while there
+        // is no current world set
+        assert!(since_epoch().is_none());
+
+        let sim = Builder::new().build();
+        // Safe to call while there is no current host set
+        World::enter(&sim.world, || assert!(since_epoch().is_none()));
 
         Ok(())
     }
