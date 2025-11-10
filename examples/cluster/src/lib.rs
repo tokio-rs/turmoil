@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use rand::{rngs::SmallRng, seq::SliceRandom, Rng, SeedableRng};
+use rand::{rngs::SmallRng, seq::IndexedRandom, Rng, SeedableRng};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     task::JoinSet,
@@ -257,7 +257,7 @@ impl Client {
             attempt += 1;
 
             let backoff = std::cmp::max(init_backoff * 2u64.pow(attempt), 3600);
-            let jitter = self.cluster.rng().gen_range(0..backoff);
+            let jitter = self.cluster.rng().random_range(0..backoff);
 
             tokio::time::sleep(Duration::from_millis(jitter)).await;
         }

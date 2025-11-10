@@ -181,7 +181,7 @@ impl Builder {
 
         let rng = match self.rng_seed {
             Some(seed) => SmallRng::seed_from_u64(seed),
-            None => SmallRng::from_entropy(),
+            None => SmallRng::from_os_rng(),
         };
 
         let world = World::new(
