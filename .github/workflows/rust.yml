@@ -55,3 +55,17 @@ jobs:
         uses: obi1kenobi/cargo-semver-checks-action@v2
         with:
           uses: dtolnay/rust-toolchain@stable
+
+  external-types:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2025-08-06
+      - name: Install cargo-check-external-types
+        uses: taiki-e/cache-cargo-install-action@v2
+        with:
+          tool: cargo-check-external-types@0.3.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check-external-types --all-features

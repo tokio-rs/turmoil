@@ -41,3 +41,9 @@ regex = ["dep:regex"]
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tokio_unstable)'] }
+
+[package.metadata.cargo_check_external_types]
+allowed_external_types = [
+  "bytes::*",
+  "tokio::*",
+]
