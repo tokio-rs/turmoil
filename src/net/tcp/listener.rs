@@ -92,11 +92,8 @@ impl TcpListener {
             let host = world.current_host_mut();
 
             let mut my_addr = self.local_addr;
-            if origin.ip().is_loopback() {
+            if origin.ip().is_loopback() || origin.ip().is_unspecified() {
                 my_addr.set_ip(origin.ip());
-            }
-            if my_addr.ip().is_unspecified() {
-                my_addr.set_ip(host.addr);
             }
 
             let pair = SocketPair::new(my_addr, origin);
