@@ -449,6 +449,8 @@ impl Link {
                 if do_rand {
                     self.state_a_b = State::RandPartition;
                     self.state_b_a = State::RandPartition;
+
+                    self.sent.clear();
                 }
             }
             (State::RandPartition, _) | (_, State::RandPartition) => {
@@ -463,6 +465,10 @@ impl Link {
     fn hold(&mut self) {
         self.state_a_b = State::Hold;
         self.state_b_a = State::Hold;
+
+        for sent in &mut self.sent {
+            sent.status = DeliveryStatus::Hold;
+        }
     }
 
     // This link becomes healthy, and any held messages are scheduled for delivery.
@@ -479,6 +485,8 @@ impl Link {
     fn explicit_partition(&mut self) {
         self.state_a_b = State::ExplicitPartition;
         self.state_b_a = State::ExplicitPartition;
+
+        self.sent.clear();
     }
 
     fn partition_oneway(&mut self, from: IpAddr, to: IpAddr) {
@@ -487,6 +495,8 @@ impl Link {
         } else {
             self.state_b_a = State::ExplicitPartition;
         }
+
+        self.sent.retain(|sent| sent.src.ip() != from);
     }
 
     fn repair_oneway(&mut self, from: IpAddr, to: IpAddr) {
