@@ -57,6 +57,66 @@
 //!   available for introspection using [`Sim`]'s `links` method.
 //! * [`release`], which releases all "in flight" messages between hosts
 //!
+//! # Filesystem (unstable)
+//!
+//! *Requires the `unstable-fs` feature.*
+//!
+//! Simulated filesystem types that mirror `std::fs` and `std::os::unix::fs` are
+//! included in the [`fs::shim`] module. This enables crash-consistency testing
+//! for storage systems.
+//!
+//! ```ignore
+//! use turmoil::fs::shim::std::fs::OpenOptions;
+//! use std::os::unix::fs::FileExt;  // Real trait, works with our File
+//!
+//! # fn example() -> std::io::Result<()> {
+//! let file = OpenOptions::new()
+//!     .read(true)
+//!     .write(true)
+//!     .create(true)
+//!     .open("/data/db")?;
+//!
+//! file.write_all_at(b"data", 0)?;
+//! file.sync_all()?;  // Data now durable, survives crash
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! Key features:
+//!
+//! * **Per-host isolation**: Each host has its own filesystem namespace
+//! * **Durability model**: Writes go to a pending buffer and become durable on
+//!   `sync_all()` or randomly based on [`FsConfig::sync_probability`]
+//! * **Crash behavior**: [`Sim::crash`] discards pending writes; synced data
+//!   survives [`Sim::bounce`]
+//!
+//! # Barriers (unstable)
+//!
+//! *Requires the `unstable-barriers` feature.*
+//!
+//! Barriers allow tests to observe and control source code execution by
+//! injecting hooks at specific points. This enables deterministic testing
+//! of complex scenarios without relying on timing or network manipulation.
+//!
+//! ```ignore
+//! use turmoil::barriers::{Barrier, Reaction, trigger};
+//!
+//! // In source code (conditionally compiled)
+//! trigger(MyEvent::PrepareAckReceived(tx_id)).await;
+//!
+//! // In test code
+//! let mut barrier = Barrier::build(Reaction::Suspend, |e: &MyEvent| {
+//!     matches!(e, MyEvent::PrepareAckReceived(_))
+//! });
+//!
+//! // Run simulation until barrier triggers
+//! let triggered = barrier.wait().await.unwrap();
+//! // Source code is now suspended
+//!
+//! // Resume by dropping the handle
+//! drop(triggered);
+//! ```
+//!
 //! # Tracing
 //!
 //! The `tracing` crate is used to emit important events during the lifetime of
@@ -141,6 +201,14 @@ use host::Host;
 
 mod ip;
 pub use ip::IpVersion;
+
+#[cfg(feature = "unstable-fs")]
+pub mod fs;
+#[cfg(feature = "unstable-fs")]
+pub use fs::FsConfig;
+
+#[cfg(feature = "unstable-barriers")]
+pub mod barriers;
 
 pub mod net;
 

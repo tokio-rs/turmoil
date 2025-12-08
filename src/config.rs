@@ -4,6 +4,9 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+#[cfg(feature = "unstable-fs")]
+use crate::fs::FsConfig;
+
 /// Configuration for a simulation.
 ///
 /// This configuration allows you to define different aspects of how the
@@ -43,6 +46,10 @@ pub(crate) struct Config {
     /// Enables running of host/client code in random order at each
     /// simulation step
     pub(crate) random_node_order: bool,
+
+    /// Filesystem configuration
+    #[cfg(feature = "unstable-fs")]
+    pub(crate) fs: FsConfig,
 }
 
 /// Configures link behavior.
@@ -96,6 +103,8 @@ impl Default for Config {
             udp_capacity: 64,
             enable_tokio_io: false,
             random_node_order: false,
+            #[cfg(feature = "unstable-fs")]
+            fs: FsConfig::default(),
         }
     }
 }
