@@ -156,12 +156,34 @@ impl<'a> Sim<'a> {
     /// Crashes the resolved hosts. Nothing will be running on the matched hosts
     /// after this method. You can use [`Sim::bounce`] to start the hosts up
     /// again.
+    ///
+    /// For filesystem simulation (requires `unstable-fs` feature), this
+    /// discards any pending (unsynced) writes. Data that was synced via
+    /// `sync_all()` survives the crash.
     pub fn crash(&mut self, addrs: impl ToIpAddrs) {
-        self.run_with_hosts(addrs, |addr, rt| {
-            rt.crash();
+        let hosts = self.world.borrow_mut().lookup_many(addrs);
+        for h in hosts {
+            let rt = self.rts.get_mut(&h).expect("missing host");
 
-            tracing::trace!(target: TRACING_TARGET, addr = ?addr, "Crash");
-        });
+            self.world.borrow_mut().current = Some(h);
+
+            World::enter(&self.world, || {
+                rt.crash();
+
+                // Discard pending filesystem operations
+                #[cfg(feature = "unstable-fs")]
+                World::current(|world| {
+                    let addr = world.current.expect("current host missing");
+                    let World { hosts, rng, .. } = world;
+                    let host = hosts.get_mut(&addr).unwrap();
+                    host.fs.lock().unwrap().discard_pending(&mut **rng);
+                });
+
+                tracing::trace!(target: TRACING_TARGET, addr = ?h, "Crash");
+            });
+        }
+
+        self.world.borrow_mut().current = None;
     }
 
     /// Bounces the resolved hosts. The software is restarted.

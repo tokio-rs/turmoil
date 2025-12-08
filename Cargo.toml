@@ -28,16 +28,20 @@ regex = { version = "1", optional = true }
 scoped-tls = "1.0.1"
 tokio = { version = "1.25.0", features = ["full", "test-util"] }
 tracing = "0.1"
+uuid = { version = "1", features = ["v4"], optional = true }
 
 [dev-dependencies]
 doc-comment = "0.3.3"
 regex = "1"
+test-case = "3"
 tokio-test = "0.4.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [features]
 default = []
 regex = ["dep:regex"]
+unstable-fs = []
+unstable-barriers = ["dep:uuid"]
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tokio_unstable)'] }

@@ -7,7 +7,7 @@ Add hardship to your tests.
 Turmoil is a framework for testing distributed systems. It provides
 deterministic execution by running multiple concurrent hosts within a single
 thread. It introduces "hardship" into the system via changes in the simulated
-network. The network can be controlled manually or with a seeded rng.
+network and filesystem. Both can be controlled manually or with a seeded rng.
 
 [![Crates.io][crates-badge]][crates-url]
 [![Documentation][docs-badge]][docs-url]
@@ -36,10 +36,38 @@ See crate documentation for simulation setup instructions.
 
 ### Examples
 
-- [/tests](https://github.com/tokio-rs/turmoil/tree/main/tests) for TCP and UDP.
+- [/tests](https://github.com/tokio-rs/turmoil/tree/main/tests) for TCP, UDP, and filesystem.
 - [`gRPC`](https://github.com/tokio-rs/turmoil/tree/main/examples/grpc) using
     `tonic` and `hyper`.
 - [`axum`](https://github.com/tokio-rs/turmoil/tree/main/examples/axum)
+
+### Filesystem Simulation (unstable)
+
+*Requires the `unstable-fs` feature.*
+
+```toml
+[dev-dependencies]
+turmoil = { version = "0.7", features = ["unstable-fs"] }
+```
+
+Turmoil provides simulated filesystem types for crash-consistency testing:
+
+```rust,ignore
+use turmoil::fs::shim::std::fs::OpenOptions;
+use turmoil::fs::shim::std::os::unix::fs::FileExt;
+
+let file = OpenOptions::new()
+    .read(true)
+    .write(true)
+    .create(true)
+    .open("/data/db")?;
+
+file.write_all_at(b"data", 0)?;
+file.sync_all()?;  // Data now durable, survives sim.crash()
+```
+
+Each host has isolated filesystem state. Use `Builder::fs_sync_probability()` to
+configure random sync behavior for testing crash recovery.
 
 
 ## License

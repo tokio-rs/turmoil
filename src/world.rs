@@ -231,6 +231,20 @@ impl World {
         }
 
         // Initialize host state
+        #[cfg(feature = "unstable-fs")]
+        self.hosts.insert(
+            addr,
+            Host::new(
+                nodename,
+                addr,
+                timer,
+                config.ephemeral_ports.clone(),
+                config.tcp_capacity,
+                config.udp_capacity,
+                config.fs.clone(),
+            ),
+        );
+        #[cfg(not(feature = "unstable-fs"))]
         self.hosts.insert(
             addr,
             Host::new(

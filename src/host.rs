@@ -1,4 +1,6 @@
 use crate::envelope::{hex, Datagram, Protocol, Segment, Syn};
+#[cfg(feature = "unstable-fs")]
+use crate::fs::{Fs, FsConfig};
 use crate::net::{SocketPair, TcpListener, UdpSocket};
 use crate::{Envelope, TRACING_TARGET};
 
@@ -9,7 +11,10 @@ use std::fmt::Display;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::ops::RangeInclusive;
+#[cfg(not(feature = "unstable-fs"))]
 use std::sync::Arc;
+#[cfg(feature = "unstable-fs")]
+use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, Notify};
 use tokio::time::{Duration, Instant};
 
@@ -37,11 +42,38 @@ pub(crate) struct Host {
     /// L4 Transmission Control Protocol (TCP).
     pub(crate) tcp: Tcp,
 
+    /// Simulated filesystem.
+    #[cfg(feature = "unstable-fs")]
+    pub(crate) fs: Arc<Mutex<Fs>>,
+
     next_ephemeral_port: u16,
     ephemeral_ports: RangeInclusive<u16>,
 }
 
 impl Host {
+    #[cfg(feature = "unstable-fs")]
+    pub(crate) fn new(
+        nodename: impl Into<String>,
+        addr: IpAddr,
+        timer: HostTimer,
+        ephemeral_ports: RangeInclusive<u16>,
+        tcp_capacity: usize,
+        udp_capacity: usize,
+        fs_config: FsConfig,
+    ) -> Host {
+        Host {
+            nodename: nodename.into(),
+            addr,
+            udp: Udp::new(udp_capacity),
+            tcp: Tcp::new(tcp_capacity),
+            fs: Arc::new(Mutex::new(Fs::new(fs_config))),
+            timer,
+            next_ephemeral_port: *ephemeral_ports.start(),
+            ephemeral_ports,
+        }
+    }
+
+    #[cfg(not(feature = "unstable-fs"))]
     pub(crate) fn new(
         nodename: impl Into<String>,
         addr: IpAddr,
@@ -509,10 +541,23 @@ pub(crate) fn is_same(src: SocketAddr, dst: SocketAddr) -> bool {
 mod test {
     use std::time::Duration;
 
+    #[cfg(feature = "unstable-fs")]
+    use crate::fs::FsConfig;
     use crate::{host::HostTimer, Host, Result};
 
     #[test]
     fn recycle_ports() -> Result {
+        #[cfg(feature = "unstable-fs")]
+        let mut host = Host::new(
+            "host",
+            std::net::Ipv4Addr::UNSPECIFIED.into(),
+            HostTimer::new(Duration::ZERO, Duration::ZERO),
+            49152..=49162,
+            1,
+            1,
+            FsConfig::default(),
+        );
+        #[cfg(not(feature = "unstable-fs"))]
         let mut host = Host::new(
             "host",
             std::net::Ipv4Addr::UNSPECIFIED.into(),
