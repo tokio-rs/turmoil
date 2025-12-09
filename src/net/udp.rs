@@ -292,6 +292,19 @@ impl UdpSocket {
 
         Ok((limit, origin))
     }
+    /// Tries to receive a single datagram message on the socket from the remote
+    /// address to which it is connected. On success, returns the number of
+    /// bytes read.
+    ///
+    /// This method must be called with valid byte array `buf` of sufficient size
+    /// to hold the message bytes. If a message is too long to fit in the
+    /// supplied buffer, excess bytes may be discarded.
+    ///
+    /// When there is no pending data, `Err(io::ErrorKind::WouldBlock)` is
+    /// returned. This function is usually paired with `readable()`.
+    pub fn try_recv(&self, buf: &mut [u8]) -> io::Result<usize> {
+        self.try_recv_from(buf).map(|(size, _)| size)
+    }
 
     /// Waits for the socket to become readable.
     ///
