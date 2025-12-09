@@ -1139,6 +1139,19 @@ impl OpenOptions {
     /// When enabled, reads and writes bypass the simulated page cache,
     /// always incurring full I/O latency.
     ///
+    /// # Durability Note
+    ///
+    /// In this simulation, O_DIRECT only affects **latency**, not **durability**.
+    /// Writes still require `sync_all()` to become crash-safe, regardless of
+    /// whether O_DIRECT is used. This is actually realistic: on real systems,
+    /// O_DIRECT bypasses the OS page cache but data can still sit in the drive's
+    /// volatile write cache. Only `fsync()` guarantees data reaches persistent
+    /// media.
+    ///
+    /// In practice, O_DIRECT writes are "closer" to disk (smaller device buffer
+    /// vs large OS page cache), but this simulation takes the conservative
+    /// approach of treating all non-synced writes equally for crash testing.
+    ///
     /// # Example
     ///
     /// ```ignore

@@ -467,6 +467,14 @@ impl OpenOptions {
     ///
     /// When enabled, reads and writes bypass the simulated page cache,
     /// always incurring full I/O latency.
+    ///
+    /// # Durability Note
+    ///
+    /// O_DIRECT only affects **latency**, not **durability**. Writes still require
+    /// `sync_all()` to become crash-safe. See [`std::fs::OpenOptions::direct_io`]
+    /// for details.
+    ///
+    /// [`std::fs::OpenOptions::direct_io`]: crate::fs::shim::std::fs::OpenOptions::direct_io
     pub fn direct_io(&mut self, direct_io: bool) -> &mut Self {
         self.inner.direct_io(direct_io);
         self
