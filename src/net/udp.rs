@@ -129,7 +129,7 @@ impl Rx {
     /// will continue to return immediately until the readiness event is
     /// consumed by an attempt to read that fails with `WouldBlock` or
     /// `Poll::Pending`.
-    pub async fn readable(&mut self) -> Result<()> {
+    async fn readable(&mut self) -> Result<()> {
         if self.buffer.is_some() {
             return Ok(());
         }
@@ -155,6 +155,16 @@ impl UdpSocket {
                 buffer: None,
             }),
         }
+    }
+    pub async fn connect<A: ToSocketAddrs>(&self, addr: A) -> io::Result<()> {
+        World::current(|world| {
+            let addr = addr.to_socket_addr(&world.dns);
+            let host = world.current_host_mut();
+
+            host.udp.connect(self.local_addr, addr);
+        });
+
+        Ok(())
     }
 
     /// This function will create a new UDP socket and attempt to bind it to
