@@ -212,6 +212,7 @@ pub(crate) struct Udp {
 
 struct UdpBind {
     bind_addr: SocketAddr,
+    target_addr: Option<SocketAddr>,
     broadcast: bool,
     multicast_loop: bool,
     queue: mpsc::Sender<(Datagram, SocketAddr)>,
@@ -259,6 +260,7 @@ impl Udp {
         let (tx, rx) = mpsc::channel(self.capacity);
         let bind = UdpBind {
             bind_addr: addr,
+            target_addr: None,
             broadcast: DEFAULT_BROADCAST,
             multicast_loop: DEFAULT_MULTICAST_LOOP,
             queue: tx,
@@ -275,9 +277,24 @@ impl Udp {
 
         Ok(UdpSocket::new(addr, rx))
     }
+    pub(crate) fn connect(&mut self, src: SocketAddr, dst: SocketAddr) {
+        let Some(bind) = self.binds.get_mut(&src.port()) else {
+            tracing::trace!(target: TRACING_TARGET, ?src, protocol = %"UDP", "Connect failed (no matching bind)");
+            return;
+        };
+
+        bind.target_addr = Some(dst);
+    }
 
     fn receive_from_network(&mut self, src: SocketAddr, dst: SocketAddr, datagram: Datagram) {
         if let Some(bind) = self.binds.get_mut(&dst.port()) {
+            if let Some(target) = bind.target_addr {
+                if !matches(target, src) {
+                    tracing::trace!(target: TRACING_TARGET, ?src, ?dst, protocol = %Protocol::Udp(datagram), "Dropped (Connect Addr not matching)");
+                    return;
+                }
+            }
+
             if !matches(bind.bind_addr, dst) {
                 tracing::trace!(target: TRACING_TARGET, ?src, ?dst, protocol = %Protocol::Udp(datagram), "Dropped (Addr not bound)");
                 return;
