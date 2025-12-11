@@ -1393,3 +1393,82 @@ fn try_write() -> Result {
 
     sim.run()
 }
+
+#[test]
+fn network_partition_drops_inflight_messages() {
+    let mut sim = Builder::new()
+        .min_message_latency(Duration::from_millis(10))
+        .max_message_latency(Duration::from_millis(10))
+        .build();
+
+    sim.host("server", || async {
+        let listener = bind().await?;
+        let (mut sock, _) = listener.accept().await?;
+        sock.write_u8(1).await?;
+        turmoil::partition("server", "client");
+        Ok(())
+    });
+
+    sim.client("client", async {
+        let mut sock = TcpStream::connect(("server", PORT)).await?;
+        let result = timeout(Duration::from_secs(1), sock.read_u8()).await;
+        assert!(result.is_err());
+        Ok(())
+    });
+
+    sim.run().unwrap();
+}
+
+#[test]
+fn network_partition_oneway_drops_inflight_messages() {
+    let mut sim = Builder::new()
+        .min_message_latency(Duration::from_millis(10))
+        .max_message_latency(Duration::from_millis(10))
+        .build();
+
+    sim.host("server", || async {
+        let listener = bind().await?;
+        let (mut sock, _) = listener.accept().await?;
+        sock.write_u8(1).await?;
+        turmoil::partition_oneway("server", "client");
+        Ok(())
+    });
+
+    sim.client("client", async {
+        let mut sock = TcpStream::connect(("server", PORT)).await?;
+        let result = timeout(Duration::from_secs(1), sock.read_u8()).await;
+        assert!(result.is_err());
+        Ok(())
+    });
+
+    sim.run().unwrap();
+}
+
+#[test]
+fn network_hold_holds_inflight_messages() {
+    let mut sim = Builder::new()
+        .min_message_latency(Duration::from_millis(10))
+        .build();
+
+    sim.host("server", || async {
+        let listener = bind().await?;
+        let (mut sock, _) = listener.accept().await?;
+        sock.write_u8(1).await?;
+
+        turmoil::hold("server", "client");
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        turmoil::release("server", "client");
+
+        Ok(())
+    });
+
+    sim.client("client", async {
+        let mut sock = TcpStream::connect(("server", PORT)).await?;
+        let result = timeout(Duration::from_millis(500), sock.read_u8()).await;
+        assert!(result.is_err());
+        sock.read_u8().await?;
+        Ok(())
+    });
+
+    sim.run().unwrap();
+}
