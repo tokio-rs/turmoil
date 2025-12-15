@@ -161,10 +161,8 @@ impl UdpSocket {
             let addr = addr.to_socket_addr(&world.dns);
             let host = world.current_host_mut();
 
-            host.udp.connect(self.local_addr, addr);
-        });
-
-        Ok(())
+            host.udp.connect(self.local_addr, addr)
+        })
     }
 
     /// This function will create a new UDP socket and attempt to bind it to
