@@ -460,6 +460,14 @@ impl Tcp {
         Some(sock.assign_seq())
     }
 
+    pub(crate) fn rollback_send_seq(&mut self, pair: SocketPair, seq: u64) {
+        if let Some(sock) = self.sockets.get_mut(&pair) {
+            if sock.next_send_seq == seq + 1 {
+                sock.next_send_seq -= 1;
+            }
+        }
+    }
+
     fn receive_from_network(
         &mut self,
         src: SocketAddr,

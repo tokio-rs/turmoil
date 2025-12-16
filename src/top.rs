@@ -228,6 +228,22 @@ impl Topology {
         self.message_filter = filter;
     }
 
+    pub(crate) fn should_drop_message(
+        &mut self,
+        src: SocketAddr,
+        dst: SocketAddr,
+        message: &Protocol,
+    ) -> bool {
+        if let Some(filter) = self.message_filter.as_mut() {
+            if filter(src, dst, message) {
+                tracing::trace!(target: TRACING_TARGET, ?src, ?dst, protocol = %message, "Drop via filter");
+                return true;
+            }
+        }
+
+        false
+    }
+
     // Send a `message` from `src` to `dst`. This method returns immediately,
     // and message delivery happens at a later time (or never, if the link is
     // broken).
@@ -238,13 +254,6 @@ impl Topology {
         dst: SocketAddr,
         message: Protocol,
     ) -> Result<()> {
-        if let Some(filter) = self.message_filter.as_mut() {
-            if filter(src, dst, &message) {
-                tracing::trace!(target: TRACING_TARGET, ?src, ?dst, protocol = %message, "Drop via filter");
-                return Ok(());
-            }
-        }
-
         if let Some(link) = self.links.get_mut(&Pair::new(src.ip(), dst.ip())) {
             link.enqueue_message(&self.config, rand, src, dst, message);
             Ok(())
@@ -260,7 +269,11 @@ impl Topology {
     pub(crate) fn deliver_messages(&mut self, rand: &mut dyn RngCore, dst: &mut Host) {
         for (pair, link) in &mut self.links {
             if pair.0 == dst.addr || pair.1 == dst.addr {
-                link.deliver_messages(&self.config, rand, dst);
+                let drop_if = self
+                    .message_filter
+                    .as_mut()
+                    .map(|drop_if| &mut **drop_if as _);
+                link.deliver_messages(&self.config, rand, dst, drop_if);
             }
         }
     }
@@ -443,6 +456,7 @@ impl Link {
         global_config: &config::Link,
         rand: &mut dyn RngCore,
         host: &mut Host,
+        mut drop_if: Option<&mut dyn FnMut(SocketAddr, SocketAddr, &Protocol) -> bool>,
     ) {
         let deliverable = self
             .deliverable
@@ -454,6 +468,18 @@ impl Link {
         for message in deliverable {
             let (src, dst) = (message.src, message.dst);
             if let Err(message) = host.receive_from_network(message) {
+                if let Some(drop_if) = drop_if.as_deref_mut() {
+                    if drop_if(dst, src, &message) {
+                        tracing::trace!(
+                            target: TRACING_TARGET,
+                            src = ?dst,
+                            dst = ?src,
+                            protocol = %message,
+                            "Drop via filter"
+                        );
+                        continue;
+                    }
+                }
                 self.enqueue_message(global_config, rand, dst, src, message);
             }
         }
