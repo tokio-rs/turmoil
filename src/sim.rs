@@ -1,7 +1,7 @@
 use rand::{rngs::SmallRng, seq::SliceRandom, Rng, SeedableRng};
 use std::cell::RefCell;
 use std::future::Future;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::ops::DerefMut;
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
@@ -12,7 +12,8 @@ use tracing::Level;
 
 use crate::host::HostTimer;
 use crate::{
-    for_pairs, rt, Config, LinksIter, Result, Rt, ToIpAddr, ToIpAddrs, World, TRACING_TARGET,
+    envelope::Protocol, for_pairs, rt, Config, LinksIter, Result, Rt, ToIpAddr, ToIpAddrs, World,
+    TRACING_TARGET,
 };
 
 /// A handle for interacting with the simulation.
@@ -305,6 +306,25 @@ impl<'a> Sim<'a> {
     /// Lookup IP addresses for resolved hosts.
     pub fn lookup_many(&self, addr: impl ToIpAddrs) -> Vec<IpAddr> {
         self.world.borrow_mut().lookup_many(addr)
+    }
+
+    /// Drop messages before they enter the network when `drop_if` returns true.
+    ///
+    /// This applies to all protocols and directions; set to [`None`] with
+    /// [`Self::clear_drop_filter`] to restore normal delivery.
+    pub fn set_drop_filter(
+        &mut self,
+        drop_if: impl FnMut(SocketAddr, SocketAddr, &Protocol) -> bool + 'static,
+    ) {
+        self.world
+            .borrow_mut()
+            .topology
+            .set_message_filter(Some(Box::new(drop_if)));
+    }
+
+    /// Remove any previously installed drop filter.
+    pub fn clear_drop_filter(&mut self) {
+        self.world.borrow_mut().topology.set_message_filter(None);
     }
 
     /// Set the max message latency for all links.

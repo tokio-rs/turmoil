@@ -19,6 +19,9 @@ pub(crate) struct Topology {
     /// Specific configuration overrides between specific hosts.
     links: IndexMap<Pair, Link>,
 
+    /// Optional filter applied before a message enters the network.
+    message_filter: Option<Box<dyn FnMut(SocketAddr, SocketAddr, &Protocol) -> bool>>,
+
     /// We don't use a Rt for async. Right now, we just use it to tick time
     /// forward in the same way we do it elsewhere. We'd like to represent
     /// network state with async in the future.
@@ -177,6 +180,7 @@ impl Topology {
         Topology {
             config,
             links: IndexMap::new(),
+            message_filter: None,
             rt: Rt::no_software(),
         }
     }
@@ -217,6 +221,13 @@ impl Topology {
             .fail_rate = value;
     }
 
+    pub(crate) fn set_message_filter(
+        &mut self,
+        filter: Option<Box<dyn FnMut(SocketAddr, SocketAddr, &Protocol) -> bool>>,
+    ) {
+        self.message_filter = filter;
+    }
+
     // Send a `message` from `src` to `dst`. This method returns immediately,
     // and message delivery happens at a later time (or never, if the link is
     // broken).
@@ -227,6 +238,13 @@ impl Topology {
         dst: SocketAddr,
         message: Protocol,
     ) -> Result<()> {
+        if let Some(filter) = self.message_filter.as_mut() {
+            if filter(src, dst, &message) {
+                tracing::trace!(target: TRACING_TARGET, ?src, ?dst, protocol = %message, "Drop via filter");
+                return Ok(());
+            }
+        }
+
         if let Some(link) = self.links.get_mut(&Pair::new(src.ip(), dst.ip())) {
             link.enqueue_message(&self.config, rand, src, dst, message);
             Ok(())

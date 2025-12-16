@@ -10,7 +10,7 @@ use tokio::{sync::oneshot, time::timeout};
 use turmoil::{
     lookup,
     net::{self, UdpSocket},
-    Builder, IpVersion, Result,
+    Builder, IpVersion, Protocol, Result,
 };
 
 const PORT: u16 = 1738;
@@ -140,6 +140,38 @@ fn udp_ipv4_broadcast() -> Result {
         let is_failed = socket.send_to(&[3], dst).await.is_err();
         assert!(is_failed);
 
+        Ok(())
+    });
+
+    sim.run()
+}
+
+#[test]
+fn udp_drop_filter_drops_selected_messages() -> Result {
+    let mut sim = Builder::new()
+        .tick_duration(Duration::from_millis(1))
+        .ip_version(IpVersion::V4)
+        .build();
+
+    sim.set_drop_filter(|_, _, protocol| {
+        matches!(protocol, Protocol::Udp(datagram) if datagram.0.as_ref() == b"drop")
+    });
+
+    let port = 1742;
+    sim.client("server", async move {
+        let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, port)).await?;
+        let mut buf = [0u8; 6];
+
+        let (len, _) = timeout(Duration::from_secs(1), socket.recv_from(&mut buf)).await??;
+        assert_eq!(b"second", &buf[..len]);
+
+        Ok(())
+    });
+
+    sim.client("client", async move {
+        let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await?;
+        socket.send_to(b"drop", (lookup("server"), port)).await?;
+        socket.send_to(b"second", (lookup("server"), port)).await?;
         Ok(())
     });
 
