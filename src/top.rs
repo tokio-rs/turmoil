@@ -223,27 +223,8 @@ impl Topology {
             .fail_rate = value;
     }
 
-    pub(crate) fn set_message_filter(
-        &mut self,
-        filter: Option<Box<MessageFilter>>,
-    ) {
+    pub(crate) fn set_message_filter(&mut self, filter: Option<Box<MessageFilter>>) {
         self.message_filter = filter;
-    }
-
-    pub(crate) fn should_drop_message(
-        &mut self,
-        src: SocketAddr,
-        dst: SocketAddr,
-        message: &Protocol,
-    ) -> bool {
-        if let Some(filter) = self.message_filter.as_mut() {
-            if filter(src, dst, message) {
-                tracing::trace!(target: TRACING_TARGET, ?src, ?dst, protocol = %message, "Drop via filter");
-                return true;
-            }
-        }
-
-        false
     }
 
     // Send a `message` from `src` to `dst`. This method returns immediately,
@@ -257,7 +238,11 @@ impl Topology {
         message: Protocol,
     ) -> Result<()> {
         if let Some(link) = self.links.get_mut(&Pair::new(src.ip(), dst.ip())) {
-            link.enqueue_message(&self.config, rand, src, dst, message);
+            let drop_if = self
+                .message_filter
+                .as_mut()
+                .map(|drop_if| &mut **drop_if as _);
+            link.enqueue_message(&self.config, rand, src, dst, message, drop_if);
             Ok(())
         } else {
             Err(Error::new(
@@ -337,6 +322,7 @@ impl Sent {
 enum DeliveryStatus {
     DeliverAfter(Instant),
     Hold,
+    Drop,
 }
 
 impl Link {
@@ -358,11 +344,10 @@ impl Link {
         src: SocketAddr,
         dst: SocketAddr,
         message: Protocol,
+        drop_if: Option<&mut MessageFilter>,
     ) {
-        tracing::trace!(target: TRACING_TARGET, ?src, ?dst, protocol = %message, "Send");
-
         self.rand_partition_or_repair(global_config, rand);
-        self.enqueue(global_config, rand, src, dst, message);
+        self.enqueue(global_config, rand, src, dst, message, drop_if);
         self.process_deliverables();
     }
 
@@ -392,7 +377,22 @@ impl Link {
         src: SocketAddr,
         dst: SocketAddr,
         message: Protocol,
+        drop_if: Option<&mut MessageFilter>,
     ) {
+        if let Some(drop_if) = drop_if {
+            if drop_if(src, dst, &message) {
+                tracing::trace!(target: TRACING_TARGET, ?src, ?dst, protocol = %message, "Drop via filter");
+                let sent = Sent {
+                    src,
+                    dst,
+                    status: DeliveryStatus::Drop,
+                    protocol: message,
+                };
+                self.sent.push_back(sent);
+                return;
+            }
+        }
+
         let state = self.get_state_for_message(src.ip(), dst.ip());
         let status = match state {
             State::Healthy => {
@@ -406,7 +406,7 @@ impl Link {
             }
             _ => {
                 tracing::trace!(target: TRACING_TARGET,?src, ?dst, protocol = %message, "Drop");
-                return;
+                DeliveryStatus::Drop
             }
         };
 
@@ -428,24 +428,31 @@ impl Link {
     fn process_deliverables(&mut self) {
         // TODO: `drain_filter` is not yet stable, and so we have a low quality
         // implementation here that avoids clones.
-        let mut deliverable = 0;
+        let mut removed = 0;
         for i in 0..self.sent.len() {
-            let index = i - deliverable;
+            let index = i - removed;
             let sent = &self.sent[index];
-            if let DeliveryStatus::DeliverAfter(time) = sent.status {
-                if time <= self.now {
-                    let sent = self.sent.remove(index).unwrap();
-                    let envelope = Envelope {
-                        src: sent.src,
-                        dst: sent.dst,
-                        message: sent.protocol,
-                    };
-                    self.deliverable
-                        .entry(sent.dst.ip())
-                        .or_default()
-                        .push_back(envelope);
-                    deliverable += 1;
+            match sent.status {
+                DeliveryStatus::DeliverAfter(time) => {
+                    if time <= self.now {
+                        let sent = self.sent.remove(index).unwrap();
+                        let envelope = Envelope {
+                            src: sent.src,
+                            dst: sent.dst,
+                            message: sent.protocol,
+                        };
+                        self.deliverable
+                            .entry(sent.dst.ip())
+                            .or_default()
+                            .push_back(envelope);
+                        removed += 1;
+                    }
                 }
+                DeliveryStatus::Drop => {
+                    let _ = self.sent.remove(index);
+                    removed += 1;
+                }
+                DeliveryStatus::Hold => {}
             }
         }
     }
@@ -470,19 +477,8 @@ impl Link {
         for message in deliverable {
             let (src, dst) = (message.src, message.dst);
             if let Err(message) = host.receive_from_network(message) {
-                if let Some(drop_if) = drop_if.as_deref_mut() {
-                    if drop_if(dst, src, &message) {
-                        tracing::trace!(
-                            target: TRACING_TARGET,
-                            src = ?dst,
-                            dst = ?src,
-                            protocol = %message,
-                            "Drop via filter"
-                        );
-                        continue;
-                    }
-                }
-                self.enqueue_message(global_config, rand, dst, src, message);
+                let drop_if = drop_if.as_mut().map(|drop_if| &mut **drop_if as _);
+                self.enqueue_message(global_config, rand, dst, src, message, drop_if);
             }
         }
     }
