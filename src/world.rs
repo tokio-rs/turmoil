@@ -2,8 +2,8 @@ use crate::config::Config;
 use crate::envelope::{Protocol, Segment};
 use crate::host::HostTimer;
 use crate::ip::IpVersionAddrIter;
-use crate::net::SocketPair;
 use crate::net::udp::MulticastGroups;
+use crate::net::SocketPair;
 use crate::{
     config, for_pairs, Dns, Host, Result as TurmoilResult, ToIpAddr, ToIpAddrs, Topology,
     TRACING_TARGET,
@@ -272,8 +272,7 @@ impl World {
                 &message
             {
                 if let Some(host) = self.hosts.get_mut(&src.ip()) {
-                    host.tcp
-                        .rollback_send_seq(SocketPair::new(src, dst), *seq);
+                    host.tcp.rollback_send_seq(SocketPair::new(src, dst), *seq);
                 }
             }
 

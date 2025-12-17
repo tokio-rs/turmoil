@@ -12,6 +12,8 @@ use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 use tokio::time::Instant;
 
+type MessageFilter = dyn FnMut(SocketAddr, SocketAddr, &Protocol) -> bool;
+
 /// Describes the network topology.
 pub(crate) struct Topology {
     config: config::Link,
@@ -20,7 +22,7 @@ pub(crate) struct Topology {
     links: IndexMap<Pair, Link>,
 
     /// Optional filter applied before a message enters the network.
-    message_filter: Option<Box<dyn FnMut(SocketAddr, SocketAddr, &Protocol) -> bool>>,
+    message_filter: Option<Box<MessageFilter>>,
 
     /// We don't use a Rt for async. Right now, we just use it to tick time
     /// forward in the same way we do it elsewhere. We'd like to represent
@@ -223,7 +225,7 @@ impl Topology {
 
     pub(crate) fn set_message_filter(
         &mut self,
-        filter: Option<Box<dyn FnMut(SocketAddr, SocketAddr, &Protocol) -> bool>>,
+        filter: Option<Box<MessageFilter>>,
     ) {
         self.message_filter = filter;
     }
@@ -456,7 +458,7 @@ impl Link {
         global_config: &config::Link,
         rand: &mut dyn RngCore,
         host: &mut Host,
-        mut drop_if: Option<&mut dyn FnMut(SocketAddr, SocketAddr, &Protocol) -> bool>,
+        mut drop_if: Option<&mut MessageFilter>,
     ) {
         let deliverable = self
             .deliverable
