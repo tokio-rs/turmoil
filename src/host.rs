@@ -277,17 +277,12 @@ impl Udp {
 
         Ok(UdpSocket::new(addr, rx))
     }
-    pub(crate) fn connect(&mut self, src: SocketAddr, dst: SocketAddr) -> io::Result<()> {
+    pub(crate) fn connect(&mut self, src: SocketAddr, dst: SocketAddr) {
         let Some(bind) = self.binds.get_mut(&src.port()) else {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                "Connect failed (no matching bind) for {src}",
-            ));
+            panic!("Connect failed (no matching bind) for {src}");
         };
 
         bind.target_addr = Some(dst);
-
-        Ok(())
     }
 
     fn receive_from_network(&mut self, src: SocketAddr, dst: SocketAddr, datagram: Datagram) {
