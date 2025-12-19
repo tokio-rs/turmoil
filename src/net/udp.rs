@@ -129,7 +129,7 @@ impl Rx {
     /// will continue to return immediately until the readiness event is
     /// consumed by an attempt to read that fails with `WouldBlock` or
     /// `Poll::Pending`.
-    pub async fn readable(&mut self) -> Result<()> {
+    async fn readable(&mut self) -> Result<()> {
         if self.buffer.is_some() {
             return Ok(());
         }
@@ -155,6 +155,14 @@ impl UdpSocket {
                 buffer: None,
             }),
         }
+    }
+    pub async fn connect<A: ToSocketAddrs>(&self, addr: A) {
+        World::current(|world| {
+            let addr = addr.to_socket_addr(&world.dns);
+            let host = world.current_host_mut();
+
+            host.udp.connect(self.local_addr, addr);
+        })
     }
 
     /// This function will create a new UDP socket and attempt to bind it to
@@ -291,6 +299,19 @@ impl UdpSocket {
         tracing::trace!(target: TRACING_TARGET, src = ?origin, dst = ?self.local_addr, protocol = %datagram, "Recv");
 
         Ok((limit, origin))
+    }
+    /// Tries to receive a single datagram message on the socket from the remote
+    /// address to which it is connected. On success, returns the number of
+    /// bytes read.
+    ///
+    /// This method must be called with valid byte array `buf` of sufficient size
+    /// to hold the message bytes. If a message is too long to fit in the
+    /// supplied buffer, excess bytes may be discarded.
+    ///
+    /// When there is no pending data, `Err(io::ErrorKind::WouldBlock)` is
+    /// returned. This function is usually paired with `readable()`.
+    pub fn try_recv(&self, buf: &mut [u8]) -> io::Result<usize> {
+        self.try_recv_from(buf).map(|(size, _)| size)
     }
 
     /// Waits for the socket to become readable.

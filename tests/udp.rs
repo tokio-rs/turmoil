@@ -1007,3 +1007,101 @@ fn socket_to_nonexistent_node() -> Result {
     });
     sim.run()
 }
+
+#[test]
+fn try_recv_not_connected() -> Result {
+    let mut sim = Builder::new().build();
+
+    sim.client("server1", async move {
+        let sock = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 1234)).await?;
+
+        sock.readable().await?;
+
+        let mut buf = [0; 3];
+
+        // When not connected try_recv takes any incoming Datagram.
+        let x = sock.try_recv(&mut buf)?;
+
+        assert_eq!(x, 3);
+        assert_eq!(buf, [1, 2, 3]);
+
+        Ok(())
+    });
+
+    sim.client("server2", async move {
+        let sock = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 5678)).await?;
+
+        sock.send_to(&[1, 2, 3], ("server1", 1234)).await?;
+
+        Ok(())
+    });
+
+    sim.run()
+}
+
+#[test]
+fn try_recv_connected() -> Result {
+    let mut sim = Builder::new().build();
+
+    sim.client("server1", async move {
+        let sock = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 1234)).await?;
+
+        sock.connect(("server2", 5678)).await;
+
+        sock.readable().await?;
+
+        let mut buf = [0; 3];
+
+        let x = sock.try_recv(&mut buf)?;
+
+        assert_eq!(x, 3);
+        assert_eq!(buf, [1, 2, 3]);
+
+        Ok(())
+    });
+
+    sim.client("server2", async move {
+        let sock = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 5678)).await?;
+
+        sock.send_to(&[1, 2, 3], ("server1", 1234)).await?;
+
+        Ok(())
+    });
+
+    sim.run()
+}
+
+#[test]
+fn try_recv_connected_wrong_host() -> Result {
+    let mut sim = Builder::new().build();
+
+    sim.client("server1", async move {
+        let sock = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 1234)).await?;
+
+        // Connect to server3, which doesn't send anything.
+        sock.connect(("server3", 6781)).await;
+
+        // Datagram from server2 is filtered so sock never becomes readable.
+        tokio::time::timeout(Duration::from_secs(5), sock.readable())
+            .await
+            .unwrap_err();
+
+        Ok(())
+    });
+
+    sim.client("server2", async move {
+        let sock = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 5678)).await?;
+
+        sock.send_to(&[1, 2, 9], ("server1", 1234)).await?;
+
+        Ok(())
+    });
+
+    sim.client("server3", async move {
+        _ = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 6789)).await?;
+
+        Ok(())
+    });
+
+    sim.run()
+}
