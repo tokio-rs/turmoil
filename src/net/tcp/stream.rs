@@ -63,7 +63,7 @@ impl TcpStream {
         let (ack, syn_ack) = oneshot::channel();
 
         let (pair, rx) = World::current(|world| {
-            let dst = addr.to_socket_addr(&world.dns);
+            let dst = addr.to_socket_addr(&world.dns)?;
 
             let host = world.current_host_mut();
             let mut local_addr = SocketAddr::new(host.addr, host.assign_ephemeral_port());
