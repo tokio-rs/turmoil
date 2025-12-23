@@ -240,6 +240,13 @@ pub(crate) fn for_pairs(a: &Vec<IpAddr>, b: &Vec<IpAddr>, mut f: impl FnMut(IpAd
     }
 }
 
+/// Returns whether the caller is in a simulation context.
+pub fn in_simulation() -> bool {
+    let result = &mut false;
+    World::current_if_set(|_| *result = true);
+    *result
+}
+
 /// Returns how long the currently executing host has been executing for in
 /// virtual time.
 ///
