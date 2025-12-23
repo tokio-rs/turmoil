@@ -36,7 +36,7 @@ impl TcpListener {
     /// Only `0.0.0.0`, `::`, or localhost are currently supported.
     pub async fn bind<A: ToSocketAddrs>(addr: A) -> Result<TcpListener> {
         World::current(|world| {
-            let mut addr = addr.to_socket_addr(&world.dns);
+            let mut addr = addr.to_socket_addr(&world.dns)?;
             let host = world.current_host_mut();
 
             if !addr.ip().is_unspecified() && !addr.ip().is_loopback() {

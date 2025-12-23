@@ -1046,7 +1046,7 @@ fn try_recv_connected() -> Result {
     sim.client("server1", async move {
         let sock = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 1234)).await?;
 
-        sock.connect(("server2", 5678)).await;
+        sock.connect(("server2", 5678)).await?;
 
         sock.readable().await?;
 
@@ -1079,7 +1079,7 @@ fn try_recv_connected_wrong_host() -> Result {
         let sock = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 1234)).await?;
 
         // Connect to server3, which doesn't send anything.
-        sock.connect(("server3", 6781)).await;
+        sock.connect(("server3", 6781)).await?;
 
         // Datagram from server2 is filtered so sock never becomes readable.
         tokio::time::timeout(Duration::from_secs(5), sock.readable())
