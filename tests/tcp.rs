@@ -8,7 +8,7 @@ use std::{
 
 use std::future;
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncReadExt, AsyncWriteExt, Interest, Ready},
     sync::{oneshot, Notify},
     time::timeout,
 };
@@ -1471,4 +1471,130 @@ fn network_hold_holds_inflight_messages() {
     });
 
     sim.run().unwrap();
+}
+
+#[test]
+fn ready_readable() -> Result {
+    let mut sim = Builder::new().build();
+
+    sim.host("server", || async move {
+        let listener = bind().await?;
+        let (mut s, _) = listener.accept().await?;
+        s.write_u8(1).await?;
+        future::pending().await
+    });
+
+    sim.client("client", async move {
+        let mut s = TcpStream::connect(("server", PORT)).await?;
+        let ready = s.ready(Interest::READABLE).await?;
+        assert_eq!(ready, Ready::READABLE);
+        Ok(())
+    });
+
+    sim.run()
+}
+
+#[test]
+fn ready_writable() -> Result {
+    let mut sim = Builder::new().build();
+
+    sim.host("server", || async move {
+        let listener = bind().await?;
+        let (_s, _) = listener.accept().await?;
+        future::pending().await
+    });
+
+    sim.client("client", async move {
+        let mut s = TcpStream::connect(("server", PORT)).await?;
+        let ready = s.ready(Interest::WRITABLE).await?;
+        assert_eq!(ready, Ready::WRITABLE);
+        Ok(())
+    });
+
+    sim.run()
+}
+
+#[test]
+fn ready_readable_and_writable() -> Result {
+    let mut sim = Builder::new().build();
+
+    sim.host("server", || async move {
+        let listener = bind().await?;
+        let (mut s, _) = listener.accept().await?;
+        s.write_all(&[1, 2]).await?;
+        future::pending().await
+    });
+
+    sim.client("client", async move {
+        let mut s = TcpStream::connect(("server", PORT)).await?;
+        s.read_u8().await?;
+        let ready = s.ready(Interest::READABLE | Interest::WRITABLE).await?;
+        assert_eq!(ready, Ready::READABLE | Ready::WRITABLE);
+        Ok(())
+    });
+
+    sim.run()
+}
+
+#[test]
+fn ready_read_closed_on_fin() -> Result {
+    let mut sim = Builder::new().build();
+
+    sim.host("server", || async move {
+        let listener = bind().await?;
+        let (mut s, _) = listener.accept().await?;
+        s.shutdown().await?;
+        future::pending().await
+    });
+
+    sim.client("client", async move {
+        let mut s = TcpStream::connect(("server", PORT)).await?;
+        let ready = s.ready(Interest::READABLE).await?;
+        assert_eq!(ready, Ready::READ_CLOSED);
+        Ok(())
+    });
+
+    sim.run()
+}
+
+#[test]
+fn ready_read_closed_on_rst() -> Result {
+    let mut sim = Builder::new().build();
+
+    sim.host("server", || async move {
+        let listener = bind().await?;
+        let (s, _) = listener.accept().await?;
+        drop(s);
+        future::pending().await
+    });
+
+    sim.client("client", async move {
+        let mut s = TcpStream::connect(("server", PORT)).await?;
+        let ready = s.ready(Interest::READABLE).await?;
+        assert_eq!(ready, Ready::READ_CLOSED);
+        Ok(())
+    });
+
+    sim.run()
+}
+
+#[test]
+fn ready_write_closed_on_shutdown() -> Result {
+    let mut sim = Builder::new().build();
+
+    sim.host("server", || async move {
+        let listener = bind().await?;
+        let (_s, _) = listener.accept().await?;
+        future::pending().await
+    });
+
+    sim.client("client", async move {
+        let mut s = TcpStream::connect(("server", PORT)).await?;
+        s.shutdown().await?;
+        let ready = s.ready(Interest::WRITABLE).await?;
+        assert_eq!(ready, Ready::WRITE_CLOSED);
+        Ok(())
+    });
+
+    sim.run()
 }
