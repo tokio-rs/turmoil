@@ -156,12 +156,13 @@ impl UdpSocket {
             }),
         }
     }
-    pub async fn connect<A: ToSocketAddrs>(&self, addr: A) {
+    pub async fn connect<A: ToSocketAddrs>(&self, addr: A) -> Result<()> {
         World::current(|world| {
-            let addr = addr.to_socket_addr(&world.dns);
+            let addr = addr.to_socket_addr(&world.dns)?;
             let host = world.current_host_mut();
 
             host.udp.connect(self.local_addr, addr);
+            Ok(())
         })
     }
 
@@ -175,7 +176,7 @@ impl UdpSocket {
     /// Only `0.0.0.0`, `::`, or localhost are currently supported.
     pub async fn bind<A: ToSocketAddrs>(addr: A) -> Result<UdpSocket> {
         World::current(|world| {
-            let mut addr = addr.to_socket_addr(&world.dns);
+            let mut addr = addr.to_socket_addr(&world.dns)?;
             let host = world.current_host_mut();
 
             verify_ipv4_bind_interface(addr.ip(), host.addr)?;
@@ -209,7 +210,7 @@ impl UdpSocket {
     /// completes first, then it is guaranteed that the message was not sent.
     pub async fn send_to<A: ToSocketAddrs>(&self, buf: &[u8], target: A) -> Result<usize> {
         World::current(|world| {
-            let dst = target.to_socket_addr(&world.dns);
+            let dst = target.to_socket_addr(&world.dns)?;
             self.send(world, dst, Datagram(Bytes::copy_from_slice(buf)))?;
             Ok(buf.len())
         })
@@ -231,7 +232,7 @@ impl UdpSocket {
     /// [`ErrorKind::WouldBlock`]: std::io::ErrorKind::WouldBlock
     pub fn try_send_to<A: ToSocketAddrs>(&self, buf: &[u8], target: A) -> Result<usize> {
         World::current(|world| {
-            let dst = target.to_socket_addr(&world.dns);
+            let dst = target.to_socket_addr(&world.dns)?;
             self.send(world, dst, Datagram(Bytes::copy_from_slice(buf)))?;
             Ok(buf.len())
         })
