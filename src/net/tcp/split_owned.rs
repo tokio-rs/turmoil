@@ -40,12 +40,8 @@ impl OwnedReadHalf {
     /// Attempts to receive data on the socket, without removing that data from
     /// the queue, registering the current task for wakeup if data is not yet
     /// available.
-    pub fn poll_peek(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf,
-    ) -> Poll<io::Result<usize>> {
-        Pin::new(&mut self.inner).poll_peek(cx, buf)
+    pub fn poll_peek(&self, cx: &mut Context<'_>, buf: &mut ReadBuf) -> Poll<io::Result<usize>> {
+        self.inner.poll_peek(cx, buf)
     }
 
     /// Receives data on the socket from the remote address to which it is
@@ -53,7 +49,7 @@ impl OwnedReadHalf {
     /// returns the number of bytes peeked.
     ///
     /// Successive calls return the same data.
-    pub async fn peek(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+    pub async fn peek(&self, buf: &mut [u8]) -> io::Result<usize> {
         self.inner.peek(buf).await
     }
 }
