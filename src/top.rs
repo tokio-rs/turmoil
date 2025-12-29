@@ -192,13 +192,21 @@ impl Topology {
     }
 
     pub(crate) fn set_link_message_latency(&mut self, a: IpAddr, b: IpAddr, value: Duration) {
-        let latency = self.links[&Pair::new(a, b)].latency(self.config.latency());
+        let pair = Pair::new(a, b);
+        let latency = self
+            .links
+            .get_mut(&pair)
+            .unwrap_or_else(|| panic!("unable to find link between {pair:?}"))
+            .latency(self.config.latency());
         latency.min_message_latency = value;
         latency.max_message_latency = value;
     }
 
     pub(crate) fn set_link_max_message_latency(&mut self, a: IpAddr, b: IpAddr, value: Duration) {
-        self.links[&Pair::new(a, b)]
+        let pair = Pair::new(a, b);
+        self.links
+            .get_mut(&pair)
+            .unwrap_or_else(|| panic!("unable to find link between {pair:?}"))
             .latency(self.config.latency())
             .max_message_latency = value;
     }
@@ -212,7 +220,10 @@ impl Topology {
     }
 
     pub(crate) fn set_link_fail_rate(&mut self, a: IpAddr, b: IpAddr, value: f64) {
-        self.links[&Pair::new(a, b)]
+        let pair = Pair::new(a, b);
+        self.links
+            .get_mut(&pair)
+            .unwrap_or_else(|| panic!("unable to find link between {pair:?}"))
             .message_loss(self.config.message_loss())
             .fail_rate = value;
     }
@@ -248,28 +259,28 @@ impl Topology {
     }
 
     pub(crate) fn hold(&mut self, a: IpAddr, b: IpAddr) {
-        self.links[&Pair::new(a, b)].hold();
+        self.get_link_mut(&Pair::new(a, b)).hold();
     }
 
     pub(crate) fn release(&mut self, a: IpAddr, b: IpAddr) {
-        self.links[&Pair::new(a, b)].release();
+        self.get_link_mut(&Pair::new(a, b)).release();
     }
 
     pub(crate) fn partition(&mut self, a: IpAddr, b: IpAddr) {
-        self.links[&Pair::new(a, b)].explicit_partition();
+        self.get_link_mut(&Pair::new(a, b)).explicit_partition();
     }
 
     pub(crate) fn partition_oneway(&mut self, a: IpAddr, b: IpAddr) {
-        let link = &mut self.links[&Pair::new(a, b)];
+        let link = &mut self.get_link_mut(&Pair::new(a, b));
         link.partition_oneway(a, b);
     }
 
     pub(crate) fn repair(&mut self, a: IpAddr, b: IpAddr) {
-        self.links[&Pair::new(a, b)].explicit_repair();
+        self.get_link_mut(&Pair::new(a, b)).explicit_repair();
     }
 
     pub(crate) fn repair_oneway(&mut self, a: IpAddr, b: IpAddr) {
-        let link = &mut self.links[&Pair::new(a, b)];
+        let link = &mut self.get_link_mut(&Pair::new(a, b));
         link.repair_oneway(a, b);
     }
 
@@ -284,6 +295,13 @@ impl Topology {
         LinksIter {
             iter: self.links.iter_mut(),
         }
+    }
+
+    #[inline]
+    fn get_link_mut(&mut self, pair: &Pair) -> &mut Link {
+        self.links
+            .get_mut(pair)
+            .unwrap_or_else(|| panic!("unable to find link between {pair:?}"))
     }
 }
 
@@ -544,5 +562,19 @@ impl Link {
         self.config
             .message_loss
             .get_or_insert_with(|| global.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::config::Link;
+
+    use super::*;
+
+    #[test]
+    #[should_panic(expected = "unable to find link between Pair(10.0.0.1, 192.168.0.1)")]
+    fn link_access_gives_useful_panic_message() {
+        let mut topo = Topology::new(Link::default());
+        topo.hold("10.0.0.1".parse().unwrap(), "192.168.0.1".parse().unwrap());
     }
 }
