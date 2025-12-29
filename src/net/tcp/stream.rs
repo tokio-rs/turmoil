@@ -1,5 +1,5 @@
 use bytes::{Buf, Bytes};
-use std::future::poll_fn;
+use std::future::{pending, poll_fn};
 use std::{
     fmt::Debug,
     io::{self, Error, Result},
@@ -9,7 +9,7 @@ use std::{
     task::{ready, Context, Poll},
 };
 use tokio::{
-    io::{AsyncRead, AsyncWrite, ReadBuf},
+    io::{AsyncRead, AsyncWrite, Interest, ReadBuf, Ready},
     runtime::Handle,
     sync::{mpsc, oneshot},
     time::sleep,
@@ -125,6 +125,47 @@ impl TcpStream {
             read_half,
             write_half,
         }
+    }
+
+    /// Waits for any of the requested ready states.
+    pub async fn ready(&mut self, interest: Interest) -> Result<Ready> {
+        // Hang indefinitely on unsupported interests, mimicking tokio's behavior.
+        if !interest.is_readable() && !interest.is_writable() {
+            return pending().await;
+        }
+
+        let mut buf = [0];
+        let mut buf = ReadBuf::new(&mut buf);
+
+        poll_fn(|cx| {
+            let mut ready = Ready::EMPTY;
+
+            if interest.is_writable() {
+                if self.write_half.is_shutdown {
+                    ready |= Ready::WRITE_CLOSED;
+                } else {
+                    ready |= Ready::WRITABLE;
+                }
+            }
+
+            if interest.is_readable() {
+                if self.read_half.is_closed {
+                    ready |= Ready::READ_CLOSED;
+                } else if let Poll::Ready(result) = self.poll_peek(cx, &mut buf) {
+                    ready |= match result {
+                        Ok(1) => Ready::READABLE,
+                        _ => Ready::READ_CLOSED,
+                    };
+                }
+            }
+
+            if ready.is_empty() {
+                Poll::Pending
+            } else {
+                Poll::Ready(Ok(ready))
+            }
+        })
+        .await
     }
 
     /// Waits for the socket to become writable.
