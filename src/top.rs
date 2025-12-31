@@ -12,12 +12,17 @@ use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 use tokio::time::Instant;
 
+type MessageFilter = dyn FnMut(SocketAddr, SocketAddr, &Protocol) -> bool;
+
 /// Describes the network topology.
 pub(crate) struct Topology {
     config: config::Link,
 
     /// Specific configuration overrides between specific hosts.
     links: IndexMap<Pair, Link>,
+
+    /// Optional filter applied before a message enters the network.
+    message_filter: Option<Box<MessageFilter>>,
 
     /// We don't use a Rt for async. Right now, we just use it to tick time
     /// forward in the same way we do it elsewhere. We'd like to represent
@@ -177,6 +182,7 @@ impl Topology {
         Topology {
             config,
             links: IndexMap::new(),
+            message_filter: None,
             rt: Rt::no_software(),
         }
     }
@@ -228,6 +234,10 @@ impl Topology {
             .fail_rate = value;
     }
 
+    pub(crate) fn set_message_filter(&mut self, filter: Option<Box<MessageFilter>>) {
+        self.message_filter = filter;
+    }
+
     // Send a `message` from `src` to `dst`. This method returns immediately,
     // and message delivery happens at a later time (or never, if the link is
     // broken).
@@ -239,7 +249,11 @@ impl Topology {
         message: Protocol,
     ) -> Result<()> {
         if let Some(link) = self.links.get_mut(&Pair::new(src.ip(), dst.ip())) {
-            link.enqueue_message(&self.config, rand, src, dst, message);
+            let drop_if = self
+                .message_filter
+                .as_mut()
+                .map(|drop_if| &mut **drop_if as _);
+            link.enqueue_message(&self.config, rand, src, dst, message, drop_if);
             Ok(())
         } else {
             Err(Error::new(
@@ -253,7 +267,11 @@ impl Topology {
     pub(crate) fn deliver_messages(&mut self, rand: &mut dyn RngCore, dst: &mut Host) {
         for (pair, link) in &mut self.links {
             if pair.0 == dst.addr || pair.1 == dst.addr {
-                link.deliver_messages(&self.config, rand, dst);
+                let drop_if = self
+                    .message_filter
+                    .as_mut()
+                    .map(|drop_if| &mut **drop_if as _);
+                link.deliver_messages(&self.config, rand, dst, drop_if);
             }
         }
     }
@@ -322,6 +340,7 @@ impl Sent {
 enum DeliveryStatus {
     DeliverAfter(Instant),
     Hold,
+    Drop,
 }
 
 impl Link {
@@ -343,11 +362,10 @@ impl Link {
         src: SocketAddr,
         dst: SocketAddr,
         message: Protocol,
+        drop_if: Option<&mut MessageFilter>,
     ) {
-        tracing::trace!(target: TRACING_TARGET, ?src, ?dst, protocol = %message, "Send");
-
         self.rand_partition_or_repair(global_config, rand);
-        self.enqueue(global_config, rand, src, dst, message);
+        self.enqueue(global_config, rand, src, dst, message, drop_if);
         self.process_deliverables();
     }
 
@@ -377,7 +395,22 @@ impl Link {
         src: SocketAddr,
         dst: SocketAddr,
         message: Protocol,
+        drop_if: Option<&mut MessageFilter>,
     ) {
+        if let Some(drop_if) = drop_if {
+            if drop_if(src, dst, &message) {
+                tracing::trace!(target: TRACING_TARGET, ?src, ?dst, protocol = %message, "Drop via filter");
+                let sent = Sent {
+                    src,
+                    dst,
+                    status: DeliveryStatus::Drop,
+                    protocol: message,
+                };
+                self.sent.push_back(sent);
+                return;
+            }
+        }
+
         let state = self.get_state_for_message(src.ip(), dst.ip());
         let status = match state {
             State::Healthy => {
@@ -391,7 +424,7 @@ impl Link {
             }
             _ => {
                 tracing::trace!(target: TRACING_TARGET,?src, ?dst, protocol = %message, "Drop");
-                return;
+                DeliveryStatus::Drop
             }
         };
 
@@ -413,24 +446,31 @@ impl Link {
     fn process_deliverables(&mut self) {
         // TODO: `drain_filter` is not yet stable, and so we have a low quality
         // implementation here that avoids clones.
-        let mut deliverable = 0;
+        let mut removed = 0;
         for i in 0..self.sent.len() {
-            let index = i - deliverable;
+            let index = i - removed;
             let sent = &self.sent[index];
-            if let DeliveryStatus::DeliverAfter(time) = sent.status {
-                if time <= self.now {
-                    let sent = self.sent.remove(index).unwrap();
-                    let envelope = Envelope {
-                        src: sent.src,
-                        dst: sent.dst,
-                        message: sent.protocol,
-                    };
-                    self.deliverable
-                        .entry(sent.dst.ip())
-                        .or_default()
-                        .push_back(envelope);
-                    deliverable += 1;
+            match sent.status {
+                DeliveryStatus::DeliverAfter(time) => {
+                    if time <= self.now {
+                        let sent = self.sent.remove(index).unwrap();
+                        let envelope = Envelope {
+                            src: sent.src,
+                            dst: sent.dst,
+                            message: sent.protocol,
+                        };
+                        self.deliverable
+                            .entry(sent.dst.ip())
+                            .or_default()
+                            .push_back(envelope);
+                        removed += 1;
+                    }
                 }
+                DeliveryStatus::Drop => {
+                    let _ = self.sent.remove(index);
+                    removed += 1;
+                }
+                DeliveryStatus::Hold => {}
             }
         }
     }
@@ -443,6 +483,7 @@ impl Link {
         global_config: &config::Link,
         rand: &mut dyn RngCore,
         host: &mut Host,
+        mut drop_if: Option<&mut MessageFilter>,
     ) {
         let deliverable = self
             .deliverable
@@ -454,7 +495,8 @@ impl Link {
         for message in deliverable {
             let (src, dst) = (message.src, message.dst);
             if let Err(message) = host.receive_from_network(message) {
-                self.enqueue_message(global_config, rand, dst, src, message);
+                let drop_if = drop_if.as_mut().map(|drop_if| &mut **drop_if as _);
+                self.enqueue_message(global_config, rand, dst, src, message, drop_if);
             }
         }
     }

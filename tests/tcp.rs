@@ -15,7 +15,7 @@ use tokio::{
 use turmoil::{
     lookup,
     net::{TcpListener, TcpStream},
-    Builder, IpVersion, Result,
+    Builder, IpVersion, Protocol, Result, Segment,
 };
 
 const PORT: u16 = 1738;
@@ -63,6 +63,49 @@ fn network_partitions_during_connect() -> Result {
                 .await
                 .is_err()
         );
+
+        Ok(())
+    });
+
+    sim.run()
+}
+
+#[test]
+fn drop_filter_skips_data_without_corrupting_stream() -> Result {
+    let mut sim = Builder::new()
+        .tick_duration(Duration::from_millis(1))
+        .build();
+
+    let mut drop_first = true;
+    sim.set_drop_filter(move |_, _, protocol| {
+        if let Protocol::Tcp(Segment::Data(_, _)) = protocol {
+            if drop_first {
+                drop_first = false;
+                return true;
+            }
+        }
+
+        false
+    });
+
+    let port = 4242;
+
+    sim.host("server", move || async move {
+        let listener = TcpListener::bind((IpAddr::V4(Ipv4Addr::UNSPECIFIED), port)).await?;
+        let (mut stream, _) = listener.accept().await?;
+
+        let mut buf = Vec::new();
+        timeout(Duration::from_secs(1), stream.read_to_end(&mut buf)).await??;
+        assert_eq!(b"world", buf.as_slice());
+
+        Ok(())
+    });
+
+    sim.client("client", async move {
+        let mut stream = TcpStream::connect(("server", port)).await?;
+        stream.write_all(b"hello").await?;
+        stream.write_all(b"world").await?;
+        stream.shutdown().await?;
 
         Ok(())
     });
