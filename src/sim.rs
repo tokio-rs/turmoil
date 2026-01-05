@@ -308,7 +308,7 @@ impl<'a> Sim<'a> {
         self.world.borrow_mut().lookup_many(addr)
     }
 
-    /// Drop messages before they enter the network when `drop_if` returns true.
+    /// Drop in-flight messages on links when `drop_if` returns true.
     ///
     /// This applies to all protocols and directions; set to [`None`] with
     /// [`Self::clear_drop_filter`] to restore normal delivery.
