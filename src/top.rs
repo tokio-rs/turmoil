@@ -12,12 +12,17 @@ use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 use tokio::time::Instant;
 
+type MessageFilter = dyn FnMut(SocketAddr, SocketAddr, &Protocol) -> bool;
+
 /// Describes the network topology.
 pub(crate) struct Topology {
     config: config::Link,
 
     /// Specific configuration overrides between specific hosts.
     links: IndexMap<Pair, Link>,
+
+    /// Optional filter applied to in-flight messages on links.
+    message_filter: Option<Box<MessageFilter>>,
 
     /// We don't use a Rt for async. Right now, we just use it to tick time
     /// forward in the same way we do it elsewhere. We'd like to represent
@@ -99,6 +104,11 @@ impl SentRef<'_> {
     pub fn deliver(self) {
         self.sent.deliver(self.now);
     }
+
+    /// Drop the message the next time the simulation steps, consuming the item.
+    pub fn drop(self) {
+        self.sent.status = DeliveryStatus::Drop;
+    }
 }
 
 impl<'a> Iterator for LinksIter<'a> {
@@ -177,6 +187,7 @@ impl Topology {
         Topology {
             config,
             links: IndexMap::new(),
+            message_filter: None,
             rt: Rt::no_software(),
         }
     }
@@ -228,6 +239,10 @@ impl Topology {
             .fail_rate = value;
     }
 
+    pub(crate) fn set_message_filter(&mut self, filter: Option<Box<MessageFilter>>) {
+        self.message_filter = filter;
+    }
+
     // Send a `message` from `src` to `dst`. This method returns immediately,
     // and message delivery happens at a later time (or never, if the link is
     // broken).
@@ -253,6 +268,9 @@ impl Topology {
     pub(crate) fn deliver_messages(&mut self, rand: &mut dyn RngCore, dst: &mut Host) {
         for (pair, link) in &mut self.links {
             if pair.0 == dst.addr || pair.1 == dst.addr {
+                if let Some(drop_if) = self.message_filter.as_mut() {
+                    link.apply_message_filter(&mut **drop_if);
+                }
                 link.deliver_messages(&self.config, rand, dst);
             }
         }
@@ -322,6 +340,7 @@ impl Sent {
 enum DeliveryStatus {
     DeliverAfter(Instant),
     Hold,
+    Drop,
 }
 
 impl Link {
@@ -345,7 +364,6 @@ impl Link {
         message: Protocol,
     ) {
         tracing::trace!(target: TRACING_TARGET, ?src, ?dst, protocol = %message, "Send");
-
         self.rand_partition_or_repair(global_config, rand);
         self.enqueue(global_config, rand, src, dst, message);
         self.process_deliverables();
@@ -410,27 +428,52 @@ impl Link {
         self.process_deliverables();
     }
 
+    fn apply_message_filter(&mut self, drop_if: &mut MessageFilter) {
+        for sent in self.sent.iter_mut() {
+            if let DeliveryStatus::Drop = sent.status {
+                continue;
+            }
+            let sent_ref = SentRef {
+                src: sent.src,
+                dst: sent.dst,
+                now: self.now,
+                sent,
+            };
+            if drop_if(sent_ref.src, sent_ref.dst, sent_ref.protocol()) {
+                tracing::trace!(target: TRACING_TARGET, ?sent_ref.src, ?sent_ref.dst, protocol = %sent_ref.protocol(), "Drop via filter");
+                sent_ref.drop();
+            }
+        }
+    }
+
     fn process_deliverables(&mut self) {
         // TODO: `drain_filter` is not yet stable, and so we have a low quality
         // implementation here that avoids clones.
-        let mut deliverable = 0;
+        let mut removed = 0;
         for i in 0..self.sent.len() {
-            let index = i - deliverable;
+            let index = i - removed;
             let sent = &self.sent[index];
-            if let DeliveryStatus::DeliverAfter(time) = sent.status {
-                if time <= self.now {
-                    let sent = self.sent.remove(index).unwrap();
-                    let envelope = Envelope {
-                        src: sent.src,
-                        dst: sent.dst,
-                        message: sent.protocol,
-                    };
-                    self.deliverable
-                        .entry(sent.dst.ip())
-                        .or_default()
-                        .push_back(envelope);
-                    deliverable += 1;
+            match sent.status {
+                DeliveryStatus::DeliverAfter(time) => {
+                    if time <= self.now {
+                        let sent = self.sent.remove(index).unwrap();
+                        let envelope = Envelope {
+                            src: sent.src,
+                            dst: sent.dst,
+                            message: sent.protocol,
+                        };
+                        self.deliverable
+                            .entry(sent.dst.ip())
+                            .or_default()
+                            .push_back(envelope);
+                        removed += 1;
+                    }
                 }
+                DeliveryStatus::Drop => {
+                    let _ = self.sent.remove(index);
+                    removed += 1;
+                }
+                DeliveryStatus::Hold => {}
             }
         }
     }
