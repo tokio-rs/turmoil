@@ -821,7 +821,7 @@ fn peek_empty_buffer() -> Result {
     });
 
     sim.client("client", async move {
-        let mut s = TcpStream::connect(("server", PORT)).await?;
+        let s = TcpStream::connect(("server", PORT)).await?;
 
         // no-op peek with empty buffer
         let mut buf = [0; 0];
