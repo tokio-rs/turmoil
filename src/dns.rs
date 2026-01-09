@@ -1,6 +1,7 @@
 use indexmap::IndexMap;
 #[cfg(feature = "regex")]
 use regex::Regex;
+use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
 use crate::ip::IpVersionAddrIter;
@@ -30,7 +31,7 @@ pub trait ToIpAddrs: sealed::Sealed {
 /// A simulated version of `tokio::net::ToSocketAddrs`.
 pub trait ToSocketAddrs: sealed::Sealed {
     #[doc(hidden)]
-    fn to_socket_addr(&self, dns: &Dns) -> SocketAddr;
+    fn to_socket_addr(&self, dns: &Dns) -> io::Result<SocketAddr>;
 }
 
 impl Dns {
@@ -116,73 +117,76 @@ impl ToIpAddrs for Regex {
 
 // Hostname and port
 impl ToSocketAddrs for (String, u16) {
-    fn to_socket_addr(&self, dns: &Dns) -> SocketAddr {
+    fn to_socket_addr(&self, dns: &Dns) -> io::Result<SocketAddr> {
         (&self.0[..], self.1).to_socket_addr(dns)
     }
 }
 
 impl ToSocketAddrs for (&str, u16) {
-    fn to_socket_addr(&self, dns: &Dns) -> SocketAddr {
+    fn to_socket_addr(&self, dns: &Dns) -> io::Result<SocketAddr> {
         // When IP address is passed directly as a str.
         if let Ok(ip) = self.0.parse::<IpAddr>() {
-            return (ip, self.1).into();
+            return Ok((ip, self.1).into());
         }
 
         match dns.names.get(self.0) {
-            Some(ip) => (*ip, self.1).into(),
-            None => panic!("no ip address found for a hostname: {}", self.0),
+            Some(ip) => Ok((*ip, self.1).into()),
+            None => Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("no ip address found for a hostname: {}", self.0),
+            )),
         }
     }
 }
 
 impl ToSocketAddrs for SocketAddr {
-    fn to_socket_addr(&self, _: &Dns) -> SocketAddr {
-        *self
+    fn to_socket_addr(&self, _: &Dns) -> io::Result<SocketAddr> {
+        Ok(*self)
     }
 }
 
 impl ToSocketAddrs for SocketAddrV4 {
-    fn to_socket_addr(&self, _: &Dns) -> SocketAddr {
-        SocketAddr::V4(*self)
+    fn to_socket_addr(&self, _: &Dns) -> io::Result<SocketAddr> {
+        Ok(SocketAddr::V4(*self))
     }
 }
 
 impl ToSocketAddrs for SocketAddrV6 {
-    fn to_socket_addr(&self, _: &Dns) -> SocketAddr {
-        SocketAddr::V6(*self)
+    fn to_socket_addr(&self, _: &Dns) -> io::Result<SocketAddr> {
+        Ok(SocketAddr::V6(*self))
     }
 }
 
 impl ToSocketAddrs for (IpAddr, u16) {
-    fn to_socket_addr(&self, _: &Dns) -> SocketAddr {
-        (*self).into()
+    fn to_socket_addr(&self, _: &Dns) -> io::Result<SocketAddr> {
+        Ok((*self).into())
     }
 }
 
 impl ToSocketAddrs for (Ipv4Addr, u16) {
-    fn to_socket_addr(&self, _: &Dns) -> SocketAddr {
-        (*self).into()
+    fn to_socket_addr(&self, _: &Dns) -> io::Result<SocketAddr> {
+        Ok((*self).into())
     }
 }
 
 impl ToSocketAddrs for (Ipv6Addr, u16) {
-    fn to_socket_addr(&self, _: &Dns) -> SocketAddr {
-        (*self).into()
+    fn to_socket_addr(&self, _: &Dns) -> io::Result<SocketAddr> {
+        Ok((*self).into())
     }
 }
 
 impl<T: ToSocketAddrs + ?Sized> ToSocketAddrs for &T {
-    fn to_socket_addr(&self, dns: &Dns) -> SocketAddr {
+    fn to_socket_addr(&self, dns: &Dns) -> io::Result<SocketAddr> {
         (**self).to_socket_addr(dns)
     }
 }
 
 impl ToSocketAddrs for str {
-    fn to_socket_addr(&self, dns: &Dns) -> SocketAddr {
+    fn to_socket_addr(&self, dns: &Dns) -> io::Result<SocketAddr> {
         let socketaddr: Result<SocketAddr, _> = self.parse();
 
         if let Ok(s) = socketaddr {
-            return s;
+            return Ok(s);
         }
 
         // Borrowed from std
@@ -191,7 +195,7 @@ impl ToSocketAddrs for str {
             ($e:expr, $msg:expr) => {
                 match $e {
                     Some(r) => r,
-                    None => panic!("Unable to parse dns: {}", $msg),
+                    None => return Err(io::Error::new(io::ErrorKind::InvalidInput, $msg)),
                 }
             };
         }
@@ -205,7 +209,7 @@ impl ToSocketAddrs for str {
 }
 
 impl ToSocketAddrs for String {
-    fn to_socket_addr(&self, dns: &Dns) -> SocketAddr {
+    fn to_socket_addr(&self, dns: &Dns) -> io::Result<SocketAddr> {
         self.as_str().to_socket_addr(dns)
     }
 }
@@ -227,16 +231,22 @@ mod tests {
         let mut dns = Dns::new(IpVersionAddrIter::default());
         let generated_addr = dns.lookup("foo");
 
-        let hostname_port = "foo:5000".to_socket_addr(&dns);
+        let hostname_port = "foo:5000";
         let ipv4_port = "127.0.0.1:5000";
         let ipv6_port = "[::1]:5000";
 
         assert_eq!(
-            hostname_port,
+            hostname_port.to_socket_addr(&dns).unwrap(),
             format!("{generated_addr}:5000").parse().unwrap()
         );
-        assert_eq!(ipv4_port.to_socket_addr(&dns), ipv4_port.parse().unwrap());
-        assert_eq!(ipv6_port.to_socket_addr(&dns), ipv6_port.parse().unwrap());
+        assert_eq!(
+            ipv4_port.to_socket_addr(&dns).unwrap(),
+            ipv4_port.parse().unwrap()
+        );
+        assert_eq!(
+            ipv6_port.to_socket_addr(&dns).unwrap(),
+            ipv6_port.parse().unwrap()
+        );
     }
 
     #[test]
@@ -251,7 +261,7 @@ mod tests {
         let addr = dns.lookup("192.168.3.3");
         assert_eq!(addr, Ipv4Addr::new(192, 168, 3, 3));
 
-        let addr = "192.168.3.3:0".to_socket_addr(&dns);
+        let addr = "192.168.3.3:0".to_socket_addr(&dns).unwrap();
         assert_eq!(addr.ip(), Ipv4Addr::new(192, 168, 3, 3));
     }
 }
