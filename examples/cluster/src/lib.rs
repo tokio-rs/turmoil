@@ -159,8 +159,8 @@ pub fn machine_attrition(
                 break;
             }
 
-            // let mut jitter = (Duration::from_secs(0)..mean_delay).gen_range(&mut rng);
-            tokio::time::sleep(mean_delay).await;
+            let jitter = cluster.rng().random_range(0..mean_delay.as_millis());
+            tokio::time::sleep(Duration::from_millis(jitter as u64)).await;
 
             let machines = cluster.get_machines();
 
@@ -256,7 +256,7 @@ impl Client {
 
             attempt += 1;
 
-            let backoff = std::cmp::max(init_backoff * 2u64.pow(attempt), 3600);
+            let backoff = std::cmp::min(init_backoff * 2u64.pow(attempt), 3600);
             let jitter = self.cluster.rng().random_range(0..backoff);
 
             tokio::time::sleep(Duration::from_millis(jitter)).await;

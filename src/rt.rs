@@ -38,6 +38,7 @@ pub struct Config {
     /// Rng used to seed the tokio runtime.
     ///
     /// Only used if the `tokio_unstable` cfg flag is set.
+    #[cfg_attr(not(tokio_unstable), expect(dead_code))]
     pub rng: Option<SmallRng>,
 }
 

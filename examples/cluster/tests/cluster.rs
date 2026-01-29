@@ -12,7 +12,7 @@ fn retries() {
 
     let test_duration = Duration::from_secs(10);
 
-    let mut cluster = Cluster::new(50, None);
+    let mut cluster = Cluster::new(50, Some(8877673959163467592));
 
     let mut sim = turmoil::Builder::new()
         .simulation_duration(Duration::from_secs(360))
