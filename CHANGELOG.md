@@ -1,3 +1,33 @@
+# 0.7.1 (January 29, 2026)
+
+### Added
+
+- Add simulated filesystem and barriers for deterministic testing ([#250], [#254])
+  - `unstable-fs` feature: Drop-in replacements for std::fs and tokio::fs with durability simulation
+  - `unstable-barriers` feature: Inject hooks at specific code points for deterministic test control
+- Add `turmoil::net::lookup_host` ([#257])
+- Add API to check whether we are inside a simulation ([#258])
+- Add `UdpSocket::try_recv` ([#255])
+- Add `crate::since_epoch()` API to return logical time elapsed since epoch ([#249])
+- Add ci to check external types ([#250])
+- Update to rand 0.9 ([#215])
+
+[#215]: https://github.com/tokio-rs/turmoil/pull/215
+[#249]: https://github.com/tokio-rs/turmoil/pull/249
+[#250]: https://github.com/tokio-rs/turmoil/pull/250
+[#254]: https://github.com/tokio-rs/turmoil/pull/254
+[#255]: https://github.com/tokio-rs/turmoil/pull/255
+[#257]: https://github.com/tokio-rs/turmoil/pull/257
+[#258]: https://github.com/tokio-rs/turmoil/pull/258
+
+### Changed
+
+- Let network faults affect in-flight messages ([#252])
+- Provide clearer panic message when link is missing ([#261])
+
+[#252]: https://github.com/tokio-rs/turmoil/pull/252
+[#261]: https://github.com/tokio-rs/turmoil/pull/261
+
 # 0.7.0 (November 3, 2025)
 
 ### Added
