@@ -1,4 +1,5 @@
 use crate::envelope::{hex, Datagram, Protocol, Segment, Syn};
+use crate::net::tcp::stream::BidiFlowControl;
 #[cfg(feature = "unstable-fs")]
 use crate::fs::{Fs, FsConfig};
 use crate::net::{SocketPair, TcpListener, UdpSocket};
@@ -11,10 +12,9 @@ use std::fmt::Display;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::ops::RangeInclusive;
-#[cfg(not(feature = "unstable-fs"))]
 use std::sync::Arc;
 #[cfg(feature = "unstable-fs")]
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use tokio::sync::{mpsc, Notify};
 use tokio::time::{Duration, Instant};
 
@@ -351,6 +351,7 @@ struct StreamSocket {
     next_send_seq: u64,
     recv_seq: u64,
     sender: mpsc::Sender<SequencedSegment>,
+    flow_control: BidiFlowControl,
     /// A simple reference counter for tracking read/write half drops. Once 0, the
     /// socket may be removed from the host.
     ref_ct: usize,
@@ -374,18 +375,20 @@ impl Display for SequencedSegment {
 }
 
 impl StreamSocket {
-    fn new(local_addr: SocketAddr, capacity: usize) -> (Self, mpsc::Receiver<SequencedSegment>) {
+    fn new(local_addr: SocketAddr, capacity: usize) -> (Self, mpsc::Receiver<SequencedSegment>, BidiFlowControl) {
         let (tx, rx) = mpsc::channel(capacity);
+        let flow_control = BidiFlowControl::new(capacity);
         let sock = Self {
             local_addr,
             buf: IndexMap::new(),
             next_send_seq: 1,
             recv_seq: 0,
             sender: tx,
+            flow_control: flow_control.clone(),
             ref_ct: 2,
         };
 
-        (sock, rx)
+        (sock, rx, flow_control)
     }
 
     fn assign_seq(&mut self) -> u64 {
@@ -406,11 +409,17 @@ impl StreamSocket {
         while self.buf.contains_key(&(self.recv_seq + 1)) {
             self.recv_seq += 1;
 
-            let segment = self.buf.swap_remove(&self.recv_seq).unwrap();
-            self.sender.try_send(segment).map_err(|e| match e {
-                Closed(_) => Protocol::Tcp(Segment::Rst),
-                Full(_) => panic!("{} socket buffer full", self.local_addr),
-            })?;
+            match self.sender.try_reserve() {
+                Ok(permit) => {
+                    let segment = self.buf.swap_remove(&self.recv_seq).unwrap();
+                    permit.send(segment) 
+                }
+                Err(Closed(())) => return Err(Protocol::Tcp(Segment::Rst)),
+                Err(Full(())) => {
+                    self.recv_seq -= 1;
+                    break;
+                }
+            }
         }
 
         Ok(())
@@ -451,14 +460,22 @@ impl Tcp {
         Ok(TcpListener::new(addr, notify))
     }
 
-    pub(crate) fn new_stream(&mut self, pair: SocketPair) -> mpsc::Receiver<SequencedSegment> {
-        let (sock, rx) = StreamSocket::new(pair.local, self.socket_capacity);
+    pub(crate) fn new_stream(&mut self, pair: SocketPair) -> (mpsc::Receiver<SequencedSegment>, BidiFlowControl) {
+        let (sock, rx, bidi) = StreamSocket::new(pair.local, self.socket_capacity);
 
         let exists = self.sockets.insert(pair, sock);
 
         assert!(exists.is_none(), "{pair:?} is already connected");
 
-        rx
+        (rx, bidi)
+    }
+
+    pub(crate) fn flow_control(&self, pair: SocketPair) -> BidiFlowControl {
+        self.sockets
+            .get(&pair)
+            .expect("missing stream socket")
+            .flow_control
+            .clone()
     }
 
     pub(crate) fn stream_count(&self) -> usize {

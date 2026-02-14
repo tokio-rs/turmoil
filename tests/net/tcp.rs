@@ -1472,3 +1472,204 @@ fn network_hold_holds_inflight_messages() {
 
     sim.run().unwrap();
 }
+
+#[test]
+fn tcp_write_backpressure_on_hold() {
+    let capacity = 4;
+
+    let mut sim = Builder::new()
+        .tcp_capacity(capacity)
+        .min_message_latency(Duration::from_millis(1))
+        .max_message_latency(Duration::from_millis(1))
+        .build();
+
+    sim.host("server", || async {
+        let listener = bind().await?;
+        let (mut conn, _) = listener.accept().await?;
+        let mut buf = [0u8; 1024];
+        while conn.read(&mut buf).await? > 0 {}
+        Ok(())
+    });
+
+    sim.client("client", async move {
+        let mut stream = TcpStream::connect(("server", PORT)).await?;
+
+        turmoil::hold("client", "server");
+
+        for _ in 0..capacity {
+            let n = stream.try_write(b"x")?;
+            assert_eq!(n, 1);
+        }
+
+        // Buffer full — try_write returns WouldBlock
+        let err = stream.try_write(b"x").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+
+        // Release the link — server reads, credits are restored
+        turmoil::release("client", "server");
+
+        // writable() resolves once credits are available
+        stream.writable().await?;
+        stream.write_all(b"y").await?;
+        stream.shutdown().await?;
+
+        Ok(())
+    });
+
+    sim.run().unwrap();
+}
+
+#[test]
+fn tcp_receiver_buffer_full_backpressures() {
+    let capacity = 4;
+
+    let mut sim = Builder::new()
+        .tcp_capacity(capacity)
+        .min_message_latency(Duration::from_millis(1))
+        .max_message_latency(Duration::from_millis(1))
+        .build();
+
+    sim.host("server", || async {
+        let listener = bind().await?;
+        let (_conn, _) = listener.accept().await?;
+        // Server never reads — credits are never released
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        Ok(())
+    });
+
+    sim.client("client", async move {
+        let stream = TcpStream::connect(("server", PORT)).await?;
+
+        turmoil::hold("client", "server");
+
+        for _ in 0..capacity {
+            let n = stream.try_write(b"x")?;
+            assert_eq!(n, 1);
+        }
+
+        let err = stream.try_write(b"x").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+
+        Ok(())
+    });
+
+    sim.run().unwrap();
+}
+
+#[test]
+fn tcp_write_succeeds_on_healthy_link() {
+    let capacity: usize = 4;
+
+    let mut sim = Builder::new()
+        .tcp_capacity(capacity)
+        .min_message_latency(Duration::from_millis(1))
+        .max_message_latency(Duration::from_millis(1))
+        .build();
+
+    sim.host("server", || async {
+        let listener = bind().await?;
+        let (mut conn, _) = listener.accept().await?;
+        let mut buf = [0u8; 1024];
+        while conn.read(&mut buf).await? > 0 {}
+        Ok(())
+    });
+
+    sim.client("client", async move {
+        let mut stream = TcpStream::connect(("server", PORT)).await?;
+
+        // Write more than capacity on a healthy link — messages drain as they
+        // are delivered, so the send buffer never fills completely.
+        for i in 0u8..100 {
+            stream.write_all(&[i]).await?;
+        }
+
+        stream.shutdown().await?;
+        Ok(())
+    });
+
+    sim.run().unwrap();
+}
+
+#[test]
+fn tcp_backpressure_with_oneway_partition() {
+    let capacity = 4;
+
+    let mut sim = Builder::new()
+        .tcp_capacity(capacity)
+        .min_message_latency(Duration::from_millis(1))
+        .max_message_latency(Duration::from_millis(1))
+        .build();
+
+    sim.host("server", || async {
+        let listener = bind().await?;
+        let (mut conn, _) = listener.accept().await?;
+
+        conn.write_all(b"hello").await?;
+
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        Ok(())
+    });
+
+    sim.client("client", async move {
+        let mut stream = TcpStream::connect(("server", PORT)).await?;
+
+        // Partition client→server only; server→client remains open
+        turmoil::partition_oneway("client", "server");
+
+        // Client→server: exhaust credits then WouldBlock
+        for _ in 0..capacity {
+            let n = stream.try_write(b"x")?;
+            assert_eq!(n, 1);
+        }
+        let err = stream.try_write(b"x").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+
+        // Server→client: reads succeed (healthy direction)
+        let mut buf = [0u8; 5];
+        stream.read_exact(&mut buf).await?;
+        assert_eq!(&buf, b"hello");
+
+        Ok(())
+    });
+
+    sim.run().unwrap();
+}
+
+#[test]
+fn tcp_try_write_returns_would_block_when_full() {
+    let capacity = 4;
+
+    let mut sim = Builder::new()
+        .tcp_capacity(capacity)
+        .min_message_latency(Duration::from_millis(1))
+        .max_message_latency(Duration::from_millis(1))
+        .build();
+
+    sim.host("server", || async {
+        let listener = bind().await?;
+        let (_conn, _) = listener.accept().await?;
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        Ok(())
+    });
+
+    sim.client("client", async move {
+        let stream = TcpStream::connect(("server", PORT)).await?;
+
+        // Hold the link so messages cannot drain
+        turmoil::hold("client", "server");
+
+        // Fill the buffer — each try_write succeeds
+        for _ in 0..capacity {
+            let n = stream.try_write(b"x")?;
+            assert_eq!(n, 1);
+        }
+
+        // Buffer is full — try_write returns WouldBlock
+        let err = stream.try_write(b"x").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+
+        Ok(())
+    });
+
+    sim.run().unwrap();
+}

@@ -239,8 +239,7 @@ impl Topology {
         message: Protocol,
     ) -> Result<()> {
         if let Some(link) = self.links.get_mut(&Pair::new(src.ip(), dst.ip())) {
-            link.enqueue_message(&self.config, rand, src, dst, message);
-            Ok(())
+            link.enqueue_message(&self.config, rand, src, dst, message)
         } else {
             Err(Error::new(
                 ErrorKind::ConnectionRefused,
@@ -343,12 +342,13 @@ impl Link {
         src: SocketAddr,
         dst: SocketAddr,
         message: Protocol,
-    ) {
+    ) -> Result<()> {
         tracing::trace!(target: TRACING_TARGET, ?src, ?dst, protocol = %message, "Send");
 
         self.rand_partition_or_repair(global_config, rand);
-        self.enqueue(global_config, rand, src, dst, message);
+        let result = self.enqueue(global_config, rand, src, dst, message);
         self.process_deliverables();
+        result
     }
 
     fn get_state_for_message(&self, src: IpAddr, dst: IpAddr) -> State {
@@ -370,6 +370,7 @@ impl Link {
     //
     // Messages may be dropped, sit on the link for a while (due to latency, or
     // because the link has stalled), or be delivered immediately.
+    // Link will return an Err(()) if the socket buffer is full.
     fn enqueue(
         &mut self,
         global_config: &config::Link,
@@ -377,7 +378,7 @@ impl Link {
         src: SocketAddr,
         dst: SocketAddr,
         message: Protocol,
-    ) {
+    ) -> Result<()> {
         let state = self.get_state_for_message(src.ip(), dst.ip());
         let status = match state {
             State::Healthy => {
@@ -391,7 +392,7 @@ impl Link {
             }
             _ => {
                 tracing::trace!(target: TRACING_TARGET,?src, ?dst, protocol = %message, "Drop");
-                return;
+                return Ok(());
             }
         };
 
@@ -403,6 +404,7 @@ impl Link {
         };
 
         self.sent.push_back(sent);
+        Ok(())
     }
 
     fn tick(&mut self, now: Instant) {
@@ -433,6 +435,7 @@ impl Link {
                 }
             }
         }
+
     }
 
     // FIXME: This implementation does not respect message delivery order. If
@@ -454,7 +457,7 @@ impl Link {
         for message in deliverable {
             let (src, dst) = (message.src, message.dst);
             if let Err(message) = host.receive_from_network(message) {
-                self.enqueue_message(global_config, rand, dst, src, message);
+                let _ = self.enqueue_message(global_config, rand, dst, src, message);
             }
         }
     }
@@ -563,6 +566,7 @@ impl Link {
             .message_loss
             .get_or_insert_with(|| global.clone())
     }
+
 }
 
 #[cfg(test)]
