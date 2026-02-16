@@ -346,7 +346,6 @@ struct ServerSocket {
 }
 
 struct StreamSocket {
-    local_addr: SocketAddr,
     buf: IndexMap<u64, SequencedSegment>,
     next_send_seq: u64,
     recv_seq: u64,
@@ -375,11 +374,10 @@ impl Display for SequencedSegment {
 }
 
 impl StreamSocket {
-    fn new(local_addr: SocketAddr, capacity: usize) -> (Self, mpsc::Receiver<SequencedSegment>, BidiFlowControl) {
+    fn new(capacity: usize) -> (Self, mpsc::Receiver<SequencedSegment>, BidiFlowControl) {
         let (tx, rx) = mpsc::channel(capacity);
         let flow_control = BidiFlowControl::new(capacity);
         let sock = Self {
-            local_addr,
             buf: IndexMap::new(),
             next_send_seq: 1,
             recv_seq: 0,
@@ -461,7 +459,7 @@ impl Tcp {
     }
 
     pub(crate) fn new_stream(&mut self, pair: SocketPair) -> (mpsc::Receiver<SequencedSegment>, BidiFlowControl) {
-        let (sock, rx, bidi) = StreamSocket::new(pair.local, self.socket_capacity);
+        let (sock, rx, bidi) = StreamSocket::new(self.socket_capacity);
 
         let exists = self.sockets.insert(pair, sock);
 
