@@ -1673,3 +1673,52 @@ fn tcp_try_write_returns_would_block_when_full() {
 
     sim.run().unwrap();
 }
+
+#[test]
+fn tcp_backpressure_on_loopback() {
+    let capacity = 4;
+
+    let mut sim = Builder::new().tcp_capacity(capacity).build();
+
+    sim.client("host", async move {
+        let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, PORT)).await?;
+
+        // accept must be spawned concurrently — loopback connect/accept
+        // deadlocks if sequential (connect awaits SYN-ACK, accept never runs)
+        let (tx, rx) = oneshot::channel();
+        tokio::spawn(async move {
+            let (server, _) = listener.accept().await.unwrap();
+            tx.send(server).unwrap();
+        });
+
+        let mut client = TcpStream::connect((Ipv4Addr::LOCALHOST, PORT)).await?;
+        let mut server = rx.await.unwrap();
+
+        // Fill the send buffer
+        for _ in 0..capacity {
+            let n = client.try_write(b"x")?;
+            assert_eq!(n, 1);
+        }
+
+        // Buffer full — WouldBlock
+        let err = client.try_write(b"x").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+
+        // Server reads — frees buffer space
+        let mut buf = [0u8; 4];
+        server.read_exact(&mut buf).await?;
+        assert_eq!(&buf, b"xxxx");
+
+        // Writer can resume
+        client.writable().await?;
+        client.write_all(b"y").await?;
+
+        let mut buf = [0u8; 1];
+        server.read_exact(&mut buf).await?;
+        assert_eq!(&buf, b"y");
+
+        Ok(())
+    });
+
+    sim.run().unwrap();
+}

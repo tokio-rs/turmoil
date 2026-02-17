@@ -339,7 +339,10 @@ impl WriteHalf {
         }
 
         if !self.flow_control.try_acquire() {
-            return Err(io::Error::new(io::ErrorKind::WouldBlock, "send buffer full"));
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "send buffer full",
+            ));
         }
 
         World::current(|world| {
@@ -353,7 +356,10 @@ impl WriteHalf {
 
     fn poll_writable(&self, cx: &mut Context<'_>) -> Poll<Result<()>> {
         if self.is_shutdown {
-            return Poll::Ready(Err(io::Error::new(io::ErrorKind::BrokenPipe, "Broken pipe")));
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "Broken pipe",
+            )));
         }
         if self.flow_control.has_credits() {
             return Poll::Ready(Ok(()));

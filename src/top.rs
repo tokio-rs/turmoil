@@ -435,7 +435,6 @@ impl Link {
                 }
             }
         }
-
     }
 
     // FIXME: This implementation does not respect message delivery order. If
@@ -566,7 +565,6 @@ impl Link {
             .message_loss
             .get_or_insert_with(|| global.clone())
     }
-
 }
 
 #[cfg(test)]

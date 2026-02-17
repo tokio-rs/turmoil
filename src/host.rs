@@ -1,7 +1,7 @@
 use crate::envelope::{hex, Datagram, Protocol, Segment, Syn};
-use crate::net::tcp::stream::BidiFlowControl;
 #[cfg(feature = "unstable-fs")]
 use crate::fs::{Fs, FsConfig};
+use crate::net::tcp::stream::BidiFlowControl;
 use crate::net::{SocketPair, TcpListener, UdpSocket};
 use crate::{Envelope, TRACING_TARGET};
 
@@ -410,7 +410,7 @@ impl StreamSocket {
             match self.sender.try_reserve() {
                 Ok(permit) => {
                     let segment = self.buf.swap_remove(&self.recv_seq).unwrap();
-                    permit.send(segment) 
+                    permit.send(segment)
                 }
                 Err(Closed(())) => return Err(Protocol::Tcp(Segment::Rst)),
                 Err(Full(())) => {
@@ -458,7 +458,10 @@ impl Tcp {
         Ok(TcpListener::new(addr, notify))
     }
 
-    pub(crate) fn new_stream(&mut self, pair: SocketPair) -> (mpsc::Receiver<SequencedSegment>, BidiFlowControl) {
+    pub(crate) fn new_stream(
+        &mut self,
+        pair: SocketPair,
+    ) -> (mpsc::Receiver<SequencedSegment>, BidiFlowControl) {
         let (sock, rx, bidi) = StreamSocket::new(self.socket_capacity);
 
         let exists = self.sockets.insert(pair, sock);
