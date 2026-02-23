@@ -1,5 +1,8 @@
 use bytes::{Buf, Bytes};
 use std::future::poll_fn;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
+use std::task::Waker;
 use std::{
     fmt::Debug,
     io::{self, Error, Result},
@@ -17,8 +20,7 @@ use tokio::{
 
 use crate::{
     envelope::{Envelope, Protocol, Segment, Syn},
-    host::is_same,
-    host::SequencedSegment,
+    host::{is_same, SequencedSegment},
     net::SocketPair,
     world::World,
     ToSocketAddrs, TRACING_TARGET,
@@ -36,7 +38,11 @@ pub struct TcpStream {
 }
 
 impl TcpStream {
-    pub(crate) fn new(pair: SocketPair, receiver: mpsc::Receiver<SequencedSegment>) -> Self {
+    pub(crate) fn new(
+        pair: SocketPair,
+        receiver: mpsc::Receiver<SequencedSegment>,
+        flow_control: BidiFlowControl,
+    ) -> Self {
         let pair = Arc::new(pair);
         let read_half = ReadHalf {
             pair: pair.clone(),
@@ -45,11 +51,13 @@ impl TcpStream {
                 buffer: None,
             },
             is_closed: false,
+            flow_control: flow_control.read,
         };
 
         let write_half = WriteHalf {
             pair,
             is_shutdown: false,
+            flow_control: flow_control.write,
         };
 
         Self {
@@ -62,26 +70,29 @@ impl TcpStream {
     pub async fn connect<A: ToSocketAddrs>(addr: A) -> Result<TcpStream> {
         let (ack, syn_ack) = oneshot::channel();
 
-        let (pair, rx) = World::current(|world| {
+        let (pair, rx, bidi) = World::current(|world| {
             let dst = addr.to_socket_addr(&world.dns)?;
 
-            let host = world.current_host_mut();
-            let mut local_addr = SocketAddr::new(host.addr, host.assign_ephemeral_port());
-            if dst.ip().is_loopback() {
-                local_addr.set_ip(dst.ip());
-            }
+            let (pair, rx, bidi) = {
+                let host = world.current_host_mut();
+                let mut local_addr = SocketAddr::new(host.addr, host.assign_ephemeral_port());
+                if dst.ip().is_loopback() {
+                    local_addr.set_ip(dst.ip());
+                }
 
-            let pair = SocketPair::new(local_addr, dst);
-            let rx = host.tcp.new_stream(pair);
-
-            let syn = Protocol::Tcp(Segment::Syn(Syn { ack }));
-            if !is_same(local_addr, dst) {
-                world.send_message(local_addr, dst, syn)?;
-            } else {
-                send_loopback(local_addr, dst, syn);
+                let pair = SocketPair::new(local_addr, dst);
+                let (rx, bidi) = host.tcp.new_stream(pair);
+                (pair, rx, bidi)
             };
 
-            Ok::<_, Error>((pair, rx))
+            let syn = Protocol::Tcp(Segment::Syn(Syn { ack }));
+            if !is_same(pair.local, pair.remote) {
+                world.send_message(pair.local, pair.remote, syn)?;
+            } else {
+                send_loopback(pair.local, pair.remote, syn);
+            };
+
+            Ok::<_, Error>((pair, rx, bidi))
         })?;
 
         syn_ack.await.map_err(|_| {
@@ -90,7 +101,7 @@ impl TcpStream {
 
         tracing::trace!(target: TRACING_TARGET, src = ?pair.remote, dst = ?pair.local, protocol = %"TCP SYN-ACK", "Recv");
 
-        Ok(TcpStream::new(pair, rx))
+        Ok(TcpStream::new(pair, rx, bidi))
     }
 
     /// Try to write a buffer to the stream, returning how many bytes were
@@ -139,7 +150,7 @@ impl TcpStream {
     /// consumed by an attempt to write that fails with `WouldBlock` or
     /// `Poll::Pending`.
     pub async fn writable(&self) -> Result<()> {
-        Ok(())
+        poll_fn(|cx| self.write_half.poll_writable(cx)).await
     }
 
     /// Splits a `TcpStream` into a read half and a write half, which can be used
@@ -188,6 +199,7 @@ pub(crate) struct ReadHalf {
     rx: Rx,
     /// FIN received, EOF for reads
     is_closed: bool,
+    flow_control: Arc<FlowControl>,
 }
 
 struct Rx {
@@ -217,6 +229,7 @@ impl ReadHalf {
 
                 match seg {
                     SequencedSegment::Data(bytes) => {
+                        self.flow_control.release();
                         self.rx.buffer = Self::put_slice(bytes, buf);
                     }
                     SequencedSegment::Fin => {
@@ -273,6 +286,7 @@ impl ReadHalf {
 
                 match seg {
                     SequencedSegment::Data(bytes) => {
+                        self.flow_control.release();
                         let len = std::cmp::min(bytes.len(), buf.remaining());
                         buf.put_slice(&bytes[..len]);
                         self.rx.buffer = Some(bytes);
@@ -311,6 +325,7 @@ pub(crate) struct WriteHalf {
     pub(crate) pair: Arc<SocketPair>,
     /// FIN sent, closed for writes
     is_shutdown: bool,
+    flow_control: Arc<FlowControl>,
 }
 
 impl WriteHalf {
@@ -323,19 +338,50 @@ impl WriteHalf {
             return Err(io::Error::new(io::ErrorKind::BrokenPipe, "Broken pipe"));
         }
 
+        if !self.flow_control.try_acquire() {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "send buffer full",
+            ));
+        }
+
         World::current(|world| {
             let bytes = Bytes::copy_from_slice(buf);
             let len = bytes.len();
-
             let seq = self.seq(world)?;
             self.send(world, Segment::Data(seq, bytes))?;
-
             Ok(len)
         })
     }
 
-    fn poll_write_priv(&self, _cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize>> {
-        Poll::Ready(self.try_write(buf))
+    fn poll_writable(&self, cx: &mut Context<'_>) -> Poll<Result<()>> {
+        if self.is_shutdown {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "Broken pipe",
+            )));
+        }
+        if self.flow_control.has_credits() {
+            return Poll::Ready(Ok(()));
+        }
+        self.flow_control.register_waker(cx.waker().clone());
+        Poll::Pending
+    }
+
+    fn poll_write_priv(&self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize>> {
+        if self.is_shutdown {
+            return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
+        }
+
+        match self.try_write(buf) {
+            // If the socket is full, behave like non-blocking port, and register a waker
+            // for the socket to become writable again.
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                self.flow_control.register_waker(cx.waker().clone());
+                Poll::Pending
+            }
+            result => Poll::Ready(result),
+        }
     }
 
     fn poll_shutdown_priv(&mut self) -> Poll<Result<()>> {
@@ -409,6 +455,80 @@ fn send_loopback(src: SocketAddr, dst: SocketAddr, message: Protocol) {
             }
         })
     });
+}
+
+/// Bidirectional flow control for a TCP connection.
+///
+/// Wraps both directional `FlowControl` instances so they can be
+/// managed as a single unit and inverted for the accepting side.
+#[derive(Clone, Debug)]
+pub(crate) struct BidiFlowControl {
+    write: Arc<FlowControl>,
+    read: Arc<FlowControl>,
+}
+
+impl BidiFlowControl {
+    pub(crate) fn new(capacity: usize) -> Self {
+        Self {
+            write: Arc::new(FlowControl::new(capacity)),
+            read: Arc::new(FlowControl::new(capacity)),
+        }
+    }
+
+    pub(crate) fn invert(self) -> Self {
+        Self {
+            write: self.read,
+            read: self.write,
+        }
+    }
+}
+
+/// End-to-end flow control for a single TCP stream direction.
+///
+/// Shared between the sender's `WriteHalf` and receiver's `ReadHalf` via
+/// `Arc`. Credits are initialized to the mpsc channel capacity so the
+/// invariant `credits + segments_in_flight = capacity` holds.
+pub(crate) struct FlowControl {
+    credits: AtomicUsize,
+    waker: Mutex<Option<Waker>>,
+}
+
+impl FlowControl {
+    fn new(capacity: usize) -> Self {
+        Self {
+            credits: AtomicUsize::new(capacity),
+            waker: Mutex::new(None),
+        }
+    }
+
+    fn try_acquire(&self) -> bool {
+        self.credits
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| v.checked_sub(1))
+            .is_ok()
+    }
+
+    fn release(&self) {
+        self.credits.fetch_add(1, Ordering::Release);
+        if let Some(waker) = self.waker.lock().unwrap().take() {
+            waker.wake();
+        }
+    }
+
+    fn register_waker(&self, waker: Waker) {
+        *self.waker.lock().unwrap() = Some(waker);
+    }
+
+    fn has_credits(&self) -> bool {
+        self.credits.load(Ordering::Acquire) > 0
+    }
+}
+
+impl Debug for FlowControl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FlowControl")
+            .field("credits", &self.credits.load(Ordering::Relaxed))
+            .finish()
+    }
 }
 
 impl Debug for WriteHalf {

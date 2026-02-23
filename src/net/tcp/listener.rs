@@ -71,15 +71,12 @@ impl TcpListener {
             });
 
             let Some((syn, origin)) = maybe_accept else {
-                // Wait for a new incoming connection, then retry.
                 self.notify.notified().await;
                 continue;
             };
 
             tracing::trace!(target: TRACING_TARGET, src = ?origin, dst = ?self.local_addr, protocol = %"TCP SYN", "Recv");
 
-            // Send SYN-ACK -> origin. If Ok we proceed (acts as the ACK), else
-            // we retry.
             let ack = syn.ack.send(());
             tracing::trace!(target: TRACING_TARGET, src = ?self.local_addr, dst = ?origin, protocol = %"TCP SYN-ACK", "Send");
 
@@ -89,19 +86,35 @@ impl TcpListener {
         };
 
         let stream = World::current(|world| {
-            let host = world.current_host_mut();
+            let (pair, rx) = {
+                let host = world.current_host_mut();
 
-            let mut my_addr = self.local_addr;
-            if origin.ip().is_loopback() {
-                my_addr.set_ip(origin.ip());
-            }
-            if my_addr.ip().is_unspecified() {
-                my_addr.set_ip(host.addr);
-            }
+                let mut my_addr = self.local_addr;
+                if origin.ip().is_loopback() {
+                    my_addr.set_ip(origin.ip());
+                }
+                if my_addr.ip().is_unspecified() {
+                    my_addr.set_ip(host.addr);
+                }
 
-            let pair = SocketPair::new(my_addr, origin);
-            let rx = host.tcp.new_stream(pair);
-            TcpStream::new(pair, rx)
+                let pair = SocketPair::new(my_addr, origin);
+                let (rx, _) = host.tcp.new_stream(pair);
+                (pair, rx)
+            };
+
+            let client_ip = if origin.ip().is_loopback() {
+                world.current.expect("current host missing")
+            } else {
+                origin.ip()
+            };
+            let client_pair = SocketPair::new(origin, pair.local);
+            let bidi = world
+                .hosts
+                .get(&client_ip)
+                .expect("client host missing")
+                .tcp
+                .flow_control(client_pair);
+            TcpStream::new(pair, rx, bidi.invert())
         });
 
         tracing::trace!(target: TRACING_TARGET, src = ?self.local_addr, dst = ?origin, "Accepted");
