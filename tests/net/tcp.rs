@@ -1532,15 +1532,12 @@ fn tcp_receiver_buffer_full_backpressures() {
     sim.host("server", || async {
         let listener = bind().await?;
         let (_conn, _) = listener.accept().await?;
-        // Server never reads — credits are never released
-        tokio::time::sleep(Duration::from_secs(10)).await;
-        Ok(())
+        // Emulate a busy server, so it never reads
+        future::pending().await
     });
 
     sim.client("client", async move {
         let stream = TcpStream::connect(("server", PORT)).await?;
-
-        turmoil::hold("client", "server");
 
         for _ in 0..capacity {
             let n = stream.try_write(b"x")?;
@@ -1606,8 +1603,7 @@ fn tcp_backpressure_with_oneway_partition() {
 
         conn.write_all(b"hello").await?;
 
-        tokio::time::sleep(Duration::from_secs(10)).await;
-        Ok(())
+        future::pending().await
     });
 
     sim.client("client", async move {
@@ -1648,8 +1644,7 @@ fn tcp_try_write_returns_would_block_when_full() {
     sim.host("server", || async {
         let listener = bind().await?;
         let (_conn, _) = listener.accept().await?;
-        tokio::time::sleep(Duration::from_secs(10)).await;
-        Ok(())
+        future::pending().await
     });
 
     sim.client("client", async move {
