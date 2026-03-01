@@ -225,6 +225,8 @@ pub use top::{LinkIter, LinksIter, SentRef};
 mod world;
 use world::World;
 
+pub mod workload;
+
 const TRACING_TARGET: &str = "turmoil";
 
 /// Utility method for performing a function on all hosts in `a` against all
