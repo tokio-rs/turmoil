@@ -16,6 +16,7 @@
 
 mod basic;
 mod cache;
+mod direct_io;
 mod dirs;
 mod durability;
 mod links;
