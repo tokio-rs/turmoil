@@ -142,14 +142,16 @@ fn direct_io_bypasses_cache() -> Result {
     sim.client("test", async {
         tokio_fs::create_dir("/data").await?;
 
-        // Write with normal I/O (populates cache)
+        // Write with normal I/O (populates cache) - write a full 512-byte block
         let normal_file = tokio_fs::OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .open("/data/file.txt")
             .await?;
-        normal_file.write_at(b"hello", 0).await?;
+        let mut write_data = vec![0u8; 512];
+        write_data[..5].copy_from_slice(b"hello");
+        normal_file.write_at(&write_data, 0).await?;
 
         // Open with direct_io - should bypass cache
         // This is the cross-platform way (works on both Linux and macOS)
@@ -159,10 +161,13 @@ fn direct_io_bypasses_cache() -> Result {
             .open("/data/file.txt")
             .await?;
 
-        // Read with direct_io should have full latency even though data is cached
+        // Read with direct_io should have full latency even though data is cached.
+        // Use an aligned buffer (512 bytes, aligned to 512).
+        let layout = std::alloc::Layout::from_size_align(512, 512).unwrap();
+        let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
         let start = tokio::time::Instant::now();
-        let mut buf = [0u8; 5];
-        direct_file.read_at(&mut buf, 0).await?;
+        let buf = unsafe { std::slice::from_raw_parts_mut(ptr, 512) };
+        direct_file.read_at(buf, 0).await?;
         let elapsed = start.elapsed();
 
         assert!(
@@ -170,7 +175,8 @@ fn direct_io_bypasses_cache() -> Result {
             "direct_io should bypass cache and have full latency, got {:?}",
             elapsed
         );
-        assert_eq!(&buf, b"hello");
+        assert_eq!(&buf[..5], b"hello");
+        unsafe { std::alloc::dealloc(ptr, layout) };
 
         Ok(())
     });

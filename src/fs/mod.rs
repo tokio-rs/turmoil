@@ -466,6 +466,7 @@ impl PageCacheConfig {
 /// - `io_error_probability`: 0.0 (no random I/O errors)
 /// - `corruption_probability`: 0.0 (no silent corruption)
 /// - `noatime`: true (access time not updated on reads)
+/// - `direct_io_alignment`: 512 (minimum kernel alignment for O_DIRECT)
 /// - `block_size`: None (writes are atomic, no torn writes)
 /// - `io_latency`: None (instant operations)
 /// - `page_cache`: None (no page cache simulation)
@@ -481,6 +482,8 @@ pub struct FsConfig {
     pub(crate) corruption_probability: f64,
     /// Whether to use noatime semantics (atime not updated on reads)
     pub(crate) noatime: bool,
+    /// Required alignment in bytes for O_DIRECT I/O (buffer pointer, offset, and length)
+    pub(crate) direct_io_alignment: u64,
     /// Block size for torn write simulation (None = atomic writes)
     pub(crate) block_size: Option<u64>,
     /// I/O latency configuration (None = instant operations)
@@ -497,6 +500,7 @@ impl Default for FsConfig {
             io_error_probability: 0.0,
             corruption_probability: 0.0,
             noatime: true,
+            direct_io_alignment: 512,
             block_size: None,
             io_latency: None,
             page_cache: None,
@@ -585,6 +589,33 @@ impl FsConfig {
             unimplemented!("atime tracking is not implemented; noatime must be true");
         }
         self.noatime = value;
+        self
+    }
+
+    /// Set the required alignment in bytes for `O_DIRECT` I/O operations.
+    ///
+    /// Default: 512 bytes — the minimum alignment the Linux kernel enforces for
+    /// `O_DIRECT`. Any read or write on a file opened with `direct_io(true)` will
+    /// fail with `EINVAL` if the buffer pointer, file offset, or buffer length is
+    /// not a multiple of this value.
+    ///
+    /// For realistic testing, set this to match your production device's logical
+    /// block size. You can check it with:
+    /// - NVMe: `nvme id-ns /dev/nvmeXnY` (look for "lbads" / LBA data size)
+    /// - Block device: `blockdev --getbsz /dev/sdX`
+    ///
+    /// Common values: 512 (legacy), 4096 (modern NVMe/SSD).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `bytes` is 0 or not a power of two.
+    pub fn direct_io_alignment(&mut self, bytes: u64) -> &mut Self {
+        assert!(bytes > 0, "direct_io_alignment must be positive");
+        assert!(
+            bytes.is_power_of_two(),
+            "direct_io_alignment must be a power of two"
+        );
+        self.direct_io_alignment = bytes;
         self
     }
 
@@ -951,6 +982,8 @@ pub(crate) struct Fs {
     pub(crate) io_error_probability: f64,
     /// Probability of silent data corruption on reads (0.0 - 1.0)
     pub(crate) corruption_probability: f64,
+    /// Required alignment in bytes for O_DIRECT I/O
+    pub(crate) direct_io_alignment: u64,
     /// Block size for torn write simulation (None = atomic writes)
     pub(crate) block_size: Option<u64>,
     /// I/O latency configuration (None = instant operations)
@@ -980,6 +1013,7 @@ impl Fs {
             capacity: config.capacity,
             io_error_probability: config.io_error_probability,
             corruption_probability: config.corruption_probability,
+            direct_io_alignment: config.direct_io_alignment,
             block_size: config.block_size,
             io_latency: config.io_latency,
             page_cache: config.page_cache.map(PageCache::new),

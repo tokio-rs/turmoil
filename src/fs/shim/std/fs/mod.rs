@@ -728,6 +728,23 @@ impl File {
         }
 
         FsContext::current(|mut ctx| {
+            // Check O_DIRECT alignment requirements
+            if self.direct_io {
+                let alignment = ctx.fs.direct_io_alignment;
+                let align = alignment as usize;
+                if !(buf.as_ptr() as usize).is_multiple_of(align)
+                    || !offset.is_multiple_of(alignment)
+                    || !buf.len().is_multiple_of(align)
+                {
+                    return Err(Error::new(
+                        ErrorKind::InvalidInput,
+                        format!(
+                            "direct I/O: buffer pointer, offset, and length must be aligned to {alignment} bytes"
+                        ),
+                    ));
+                }
+            }
+
             // Check for random I/O error
             let io_err_prob = ctx.fs.io_error_probability;
             if io_err_prob > 0.0 && ctx.random_bool(io_err_prob) {
@@ -774,6 +791,23 @@ impl File {
         }
 
         FsContext::current(|mut ctx| {
+            // Check O_DIRECT alignment requirements
+            if self.direct_io {
+                let alignment = ctx.fs.direct_io_alignment;
+                let align = alignment as usize;
+                if !(buf.as_ptr() as usize).is_multiple_of(align)
+                    || !offset.is_multiple_of(alignment)
+                    || !buf.len().is_multiple_of(align)
+                {
+                    return Err(Error::new(
+                        ErrorKind::InvalidInput,
+                        format!(
+                            "direct I/O: buffer pointer, offset, and length must be aligned to {alignment} bytes"
+                        ),
+                    ));
+                }
+            }
+
             // Check for random I/O error
             let io_err_prob = ctx.fs.io_error_probability;
             if io_err_prob > 0.0 && ctx.random_bool(io_err_prob) {
@@ -1137,7 +1171,11 @@ impl OpenOptions {
     /// or `fcntl(F_NOCACHE)` on macOS.
     ///
     /// When enabled, reads and writes bypass the simulated page cache,
-    /// always incurring full I/O latency.
+    /// always incurring full I/O latency. Additionally, all reads and writes
+    /// enforce alignment requirements: the buffer pointer, file offset, and
+    /// buffer length must each be a multiple of `direct_io_alignment` (default
+    /// 512 bytes). Misaligned operations fail with `InvalidInput`, matching
+    /// the `EINVAL` behavior of the Linux kernel.
     ///
     /// # Durability Note
     ///
