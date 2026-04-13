@@ -1,7 +1,5 @@
 # Turmoil
 
-**This is very experimental**
-
 Add hardship to your tests.
 
 Turmoil is a framework for testing distributed systems. It provides
