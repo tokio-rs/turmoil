@@ -26,7 +26,10 @@ rand = "0.9"
 rand_distr = "0.5"
 regex = { version = "1", optional = true }
 scoped-tls = "1.0.1"
-tokio = { version = "1.25.0", features = ["full", "test-util"] }
+tokio = { version = "1.25.0", features = [
+    "fs", "io-util", "io-std", "macros", "net", "process",
+    "rt", "rt-multi-thread", "signal", "sync", "time", "test-util",
+] }
 tracing = "0.1"
 uuid = { version = "1", features = ["v4"], optional = true }
 
