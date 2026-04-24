@@ -609,18 +609,14 @@ impl ReadHalf {
             return true;
         }
 
-        // Drain the mpsc looking for Data. Any Data discovered is unread;
-        // a FIN means EOF was already delivered (or about to be) with no
-        // trailing data — not a reset condition.
-        loop {
-            match self.rx.recv.try_recv() {
-                Ok(SequencedSegment::Data(_)) => return true,
-                Ok(SequencedSegment::Fin) => {
-                    self.is_closed = true;
-                    break;
-                }
-                Err(_) => break,
-            }
+        // Inspect the head of the mpsc. Data means unread bytes; a FIN
+        // means EOF has already been delivered (or is about to be) with no
+        // trailing data — not a reset condition. FIN is always the last
+        // segment, so looking past it is unnecessary.
+        match self.rx.recv.try_recv() {
+            Ok(SequencedSegment::Data(_)) => return true,
+            Ok(SequencedSegment::Fin) => self.is_closed = true,
+            Err(_) => {}
         }
 
         world.current_host_mut().tcp.has_buffered_data(*self.pair)
