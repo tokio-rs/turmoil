@@ -1717,3 +1717,51 @@ fn tcp_backpressure_on_loopback() {
 
     sim.run().unwrap();
 }
+
+// https://github.com/tokio-rs/turmoil/issues/158
+//
+// Per RFC 9293 §3.10.4, if a receiver closes the connection while there is
+// still unread data in the receive queue, the stack MUST send a RST rather
+// than a graceful FIN so the peer learns data was lost.
+#[test]
+fn close_with_unread_data_sends_rst() -> Result {
+    let mut sim = Builder::new().build();
+
+    sim.client("server", async move {
+        let listener = bind().await?;
+        let (mut s, _) = listener.accept().await?;
+
+        // Send some data the client will never read.
+        s.write_all(b"unread").await?;
+
+        // Next I/O on the connection should observe a RST (ConnectionReset),
+        // not a graceful EOF.
+        let mut buf = [0; 8];
+        let err = loop {
+            match s.read(&mut buf).await {
+                Ok(0) => panic!("expected RST, got graceful EOF"),
+                Ok(_) => continue,
+                Err(e) => break e,
+            }
+        };
+        assert_eq!(io::ErrorKind::ConnectionReset, err.kind());
+
+        Ok(())
+    });
+
+    sim.client("client", async move {
+        let mut s = TcpStream::connect(("server", PORT)).await?;
+
+        // Block until at least one byte has arrived in our receive queue,
+        // then drop without consuming it. Peek stashes the bytes in the rx
+        // buffer so they count as unread at drop time.
+        let mut buf = [0; 1];
+        assert!(s.peek(&mut buf).await? >= 1);
+
+        drop(s);
+
+        Ok(())
+    });
+
+    sim.run()
+}

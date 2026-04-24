@@ -595,6 +595,33 @@ impl AsyncWrite for TcpStream {
 impl Drop for ReadHalf {
     fn drop(&mut self) {
         World::current_if_set(|world| {
+            // RFC 9293 §3.10.4: closing with unread data MUST send a RST so
+            // the peer learns data was lost. "Unread data" = application
+            // bytes received but not consumed: partial segment bytes stashed
+            // in the rx buffer, a Data segment still queued on the mpsc, or
+            // a Data segment parked in the host's reorder buffer. A queued
+            // FIN is not a reset condition — a graceful close followed by a
+            // drop should stay graceful.
+            let has_unread = !self.is_closed
+                && (self.rx.buffer.is_some()
+                    || matches!(self.rx.recv.try_recv(), Ok(SequencedSegment::Data(_)))
+                    || world.current_host_mut().tcp.has_buffered_data(*self.pair));
+
+            if has_unread {
+                let pair = *self.pair;
+                let message = Protocol::Tcp(Segment::Rst);
+                if is_same(pair.local, pair.remote) {
+                    send_loopback(pair.local, pair.remote, message);
+                } else {
+                    let _ = world.send_message(pair.local, pair.remote, message);
+                }
+                // Tear down locally so the sibling WriteHalf drop does not
+                // also send a FIN — seq() will return Err after the socket
+                // is gone.
+                world.current_host_mut().tcp.reset_stream(pair);
+                return;
+            }
+
             world.current_host_mut().tcp.close_stream_half(*self.pair);
         })
     }

@@ -535,6 +535,26 @@ impl Tcp {
         Ok(())
     }
 
+    /// Returns true if the given stream has any Data segments waiting in the
+    /// out-of-order reorder buffer that have not yet been delivered to the
+    /// receive mpsc channel.
+    pub(crate) fn has_buffered_data(&self, pair: SocketPair) -> bool {
+        self.sockets
+            .get(&pair)
+            .map(|s| {
+                s.buf
+                    .values()
+                    .any(|seg| matches!(seg, SequencedSegment::Data(_)))
+            })
+            .unwrap_or(false)
+    }
+
+    /// Remove the stream socket without decrementing the half-close refcount.
+    /// Used when sending RST: the connection is torn down immediately.
+    pub(crate) fn reset_stream(&mut self, pair: SocketPair) {
+        self.sockets.swap_remove(&pair);
+    }
+
     pub(crate) fn close_stream_half(&mut self, pair: SocketPair) {
         // Receiving a RST removes the socket, so it's possible that has occurred
         // when halves of the stream drop.
