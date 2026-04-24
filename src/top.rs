@@ -465,18 +465,16 @@ impl Link {
     fn rand_partition_or_repair(&mut self, global_config: &config::Link, rand: &mut dyn RngCore) {
         let do_rand = self.rand_partition(global_config.message_loss(), rand);
         match (self.state_a_b, self.state_b_a) {
-            (State::Healthy, _) | (_, State::Healthy) => {
-                if do_rand {
-                    self.state_a_b = State::RandPartition;
-                    self.state_b_a = State::RandPartition;
+            (State::Healthy, _) | (_, State::Healthy) if do_rand => {
+                self.state_a_b = State::RandPartition;
+                self.state_b_a = State::RandPartition;
 
-                    self.sent.clear();
-                }
+                self.sent.clear();
             }
-            (State::RandPartition, _) | (_, State::RandPartition) => {
-                if self.rand_repair(global_config.message_loss(), rand) {
-                    self.release();
-                }
+            (State::RandPartition, _) | (_, State::RandPartition)
+                if self.rand_repair(global_config.message_loss(), rand) =>
+            {
+                self.release();
             }
             _ => {}
         }
