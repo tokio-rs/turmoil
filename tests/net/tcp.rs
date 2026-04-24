@@ -1750,11 +1750,13 @@ fn close_with_unread_data_sends_rst() -> Result {
     });
 
     sim.client("client", async move {
-        let s = TcpStream::connect(("server", PORT)).await?;
+        let mut s = TcpStream::connect(("server", PORT)).await?;
 
-        // Give the server's data time to arrive in our receive queue before
-        // we drop without reading.
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        // Block until at least one byte has arrived in our receive queue,
+        // then drop without consuming it. Peek stashes the bytes in the rx
+        // buffer so they count as unread at drop time.
+        let mut buf = [0; 1];
+        assert!(s.peek(&mut buf).await? >= 1);
 
         drop(s);
 
