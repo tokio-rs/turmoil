@@ -1,3 +1,25 @@
+# 0.7.2 (April 24, 2026)
+
+### Added
+
+- Add end-to-end flow control for TCP streams ([#265])
+
+[#265]: https://github.com/tokio-rs/turmoil/pull/265
+
+### Changed
+
+- Send RST when a TcpStream is dropped with unread data ([#269])
+- Enforce O_DIRECT buffer alignment in simulated filesystem ([#266])
+- Drop parking_lot from tokio feature list ([#267])
+- Remove experimental disclaimer from README ([#268])
+- Fix rng warning and flakey example test ([#263])
+
+[#263]: https://github.com/tokio-rs/turmoil/pull/263
+[#266]: https://github.com/tokio-rs/turmoil/pull/266
+[#267]: https://github.com/tokio-rs/turmoil/pull/267
+[#268]: https://github.com/tokio-rs/turmoil/pull/268
+[#269]: https://github.com/tokio-rs/turmoil/pull/269
+
 # 0.7.1 (January 29, 2026)
 
 ### Added
