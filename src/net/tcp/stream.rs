@@ -604,10 +604,7 @@ impl Drop for ReadHalf {
             // drop should stay graceful.
             let has_unread = !self.is_closed
                 && (self.rx.buffer.is_some()
-                    || matches!(
-                        self.rx.recv.try_recv(),
-                        Ok(SequencedSegment::Data(_))
-                    )
+                    || matches!(self.rx.recv.try_recv(), Ok(SequencedSegment::Data(_)))
                     || world.current_host_mut().tcp.has_buffered_data(*self.pair));
 
             if has_unread {
