@@ -592,43 +592,25 @@ impl AsyncWrite for TcpStream {
     }
 }
 
-impl ReadHalf {
-    /// Returns true if there is application-level data that was received but
-    /// never consumed by the user: partial bytes from the last segment, a
-    /// Data segment already queued on the mpsc, or a Data segment still
-    /// waiting in the host's reorder buffer.
-    ///
-    /// A queued FIN is not considered unread data — a graceful close followed
-    /// by a drop should not trigger a RST.
-    fn has_unread_data(&mut self, world: &mut World) -> bool {
-        if self.is_closed {
-            return false;
-        }
-
-        if self.rx.buffer.is_some() {
-            return true;
-        }
-
-        // Inspect the head of the mpsc. Data means unread bytes; a FIN
-        // means EOF has already been delivered (or is about to be) with no
-        // trailing data — not a reset condition. FIN is always the last
-        // segment, so looking past it is unnecessary.
-        match self.rx.recv.try_recv() {
-            Ok(SequencedSegment::Data(_)) => return true,
-            Ok(SequencedSegment::Fin) => self.is_closed = true,
-            Err(_) => {}
-        }
-
-        world.current_host_mut().tcp.has_buffered_data(*self.pair)
-    }
-}
-
 impl Drop for ReadHalf {
     fn drop(&mut self) {
         World::current_if_set(|world| {
-            if self.has_unread_data(world) {
-                // RFC 9293 §3.10.4: closing with unread data MUST send a RST
-                // so the peer learns data was lost.
+            // RFC 9293 §3.10.4: closing with unread data MUST send a RST so
+            // the peer learns data was lost. "Unread data" = application
+            // bytes received but not consumed: partial segment bytes stashed
+            // in the rx buffer, a Data segment still queued on the mpsc, or
+            // a Data segment parked in the host's reorder buffer. A queued
+            // FIN is not a reset condition — a graceful close followed by a
+            // drop should stay graceful.
+            let has_unread = !self.is_closed
+                && (self.rx.buffer.is_some()
+                    || matches!(
+                        self.rx.recv.try_recv(),
+                        Ok(SequencedSegment::Data(_))
+                    )
+                    || world.current_host_mut().tcp.has_buffered_data(*self.pair));
+
+            if has_unread {
                 let pair = *self.pair;
                 let message = Protocol::Tcp(Segment::Rst);
                 if is_same(pair.local, pair.remote) {
