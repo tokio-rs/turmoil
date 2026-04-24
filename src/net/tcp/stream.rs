@@ -592,9 +592,61 @@ impl AsyncWrite for TcpStream {
     }
 }
 
+impl ReadHalf {
+    /// Returns true if there is application-level data that was received but
+    /// never consumed by the user: partial bytes from the last segment, a
+    /// Data segment already queued on the mpsc, or a Data segment still
+    /// waiting in the host's reorder buffer.
+    ///
+    /// A queued FIN is not considered unread data — a graceful close followed
+    /// by a drop should not trigger a RST.
+    fn has_unread_data(&mut self, world: &mut World) -> bool {
+        if self.is_closed {
+            return false;
+        }
+
+        if self.rx.buffer.is_some() {
+            return true;
+        }
+
+        // Drain the mpsc looking for Data. Any Data discovered is unread;
+        // a FIN means EOF was already delivered (or about to be) with no
+        // trailing data — not a reset condition.
+        loop {
+            match self.rx.recv.try_recv() {
+                Ok(SequencedSegment::Data(_)) => return true,
+                Ok(SequencedSegment::Fin) => {
+                    self.is_closed = true;
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+
+        world.current_host_mut().tcp.has_buffered_data(*self.pair)
+    }
+}
+
 impl Drop for ReadHalf {
     fn drop(&mut self) {
         World::current_if_set(|world| {
+            if self.has_unread_data(world) {
+                // RFC 9293 §3.10.4: closing with unread data MUST send a RST
+                // so the peer learns data was lost.
+                let pair = *self.pair;
+                let message = Protocol::Tcp(Segment::Rst);
+                if is_same(pair.local, pair.remote) {
+                    send_loopback(pair.local, pair.remote, message);
+                } else {
+                    let _ = world.send_message(pair.local, pair.remote, message);
+                }
+                // Tear down locally so the sibling WriteHalf drop does not
+                // also send a FIN — seq() will return Err after the socket
+                // is gone.
+                world.current_host_mut().tcp.reset_stream(pair);
+                return;
+            }
+
             world.current_host_mut().tcp.close_stream_half(*self.pair);
         })
     }
