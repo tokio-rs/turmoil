@@ -1,0 +1,18 @@
+[package]
+name = "turmoil-fs"
+version = "0.0.0"
+edition = "2021"
+license = "MIT"
+authors = ["Tokio Contributors <team@tokio.rs>"]
+description = "Simulated filesystem for turmoil"
+homepage = "https://github.com/tokio-rs/turmoil"
+repository = "https://github.com/tokio-rs/turmoil"
+publish = false
+
+[dependencies]
+bytes = "1.4"
+tokio = { version = "1.25.0", features = ["fs", "io-util", "sync", "time"] }
+tracing = "0.1"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tokio_unstable)'] }
