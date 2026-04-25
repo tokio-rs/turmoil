@@ -15,7 +15,7 @@ tonic-prost = "0.14"
 tower = "0.5"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-turmoil = { path = "../.." }
+turmoil = { path = "../../crates/turmoil" }
 
 [build-dependencies]
 tonic-prost-build = "0.14"

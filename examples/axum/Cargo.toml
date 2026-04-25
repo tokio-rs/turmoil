@@ -9,7 +9,7 @@ axum = "0.8"
 hyper = "1"
 hyper-util = { version = "0.1.2", features = ["client-legacy"] }
 http-body-util = "0.1"
-turmoil = { path = "../.." }
+turmoil = { path = "../../crates/turmoil" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio = "1"
