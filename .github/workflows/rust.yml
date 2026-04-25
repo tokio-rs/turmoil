@@ -44,7 +44,7 @@ jobs:
       - name: Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
       - name: Run cargo clippy
-        run: cargo clippy --all-targets -- --deny warnings
+        run: cargo clippy -p turmoil -p turmoil-net --all-targets -- --deny warnings
 
   semver:
     name: semver
@@ -68,4 +68,4 @@ jobs:
         with:
           tool: cargo-check-external-types@0.3.0
       - uses: Swatinem/rust-cache@v2
-      - run: cargo check-external-types --all-features
+      - run: cargo check-external-types --all-features --manifest-path crates/turmoil/Cargo.toml
