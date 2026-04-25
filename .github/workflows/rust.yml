@@ -44,7 +44,7 @@ jobs:
       - name: Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
       - name: Run cargo clippy
-        run: cargo clippy -p turmoil -p turmoil-net --all-targets -- --deny warnings
+        run: cargo clippy -p turmoil -p turmoil-net -p turmoil-fs --all-targets -- --deny warnings
 
   semver:
     name: semver
