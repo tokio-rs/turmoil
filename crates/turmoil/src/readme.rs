@@ -5,4 +5,4 @@
 ///!
 ///! https://blog.guillaume-gomez.fr/articles/2020-03-07+cfg%28doctest%29+is+stable+and+you+should+use+it
 
-doc_comment::doctest!("../README.md");
+doc_comment::doctest!("../../../README.md");
