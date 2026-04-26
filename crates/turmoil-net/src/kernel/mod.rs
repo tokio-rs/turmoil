@@ -5,7 +5,6 @@
 //! deterministic host runtime. Protocol state machines for TCP, UDP, and
 //! UDS live in the submodules below.
 
-pub mod options;
 pub mod socket;
 pub mod table;
 pub mod tcp;
