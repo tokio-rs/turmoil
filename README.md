@@ -34,7 +34,7 @@ See crate documentation for simulation setup instructions.
 
 ### Examples
 
-- [/tests](https://github.com/tokio-rs/turmoil/tree/main/tests) for TCP, UDP, and filesystem.
+- [/tests](https://github.com/tokio-rs/turmoil/tree/main/crates/turmoil/tests) for TCP, UDP, and filesystem.
 - [`gRPC`](https://github.com/tokio-rs/turmoil/tree/main/examples/grpc) using
     `tonic` and `hyper`.
 - [`axum`](https://github.com/tokio-rs/turmoil/tree/main/examples/axum)
