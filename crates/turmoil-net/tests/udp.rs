@@ -140,6 +140,76 @@ async fn udp_recv_wakes_when_packet_arrives() {
 }
 
 #[tokio::test]
+async fn udp_peer_addr() {
+    let _guard = Net::new().enter();
+
+    let s = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    assert_eq!(s.peer_addr().unwrap_err().kind(), ErrorKind::NotConnected);
+
+    s.connect("127.0.0.1:5000").await.unwrap();
+    assert_eq!(s.peer_addr().unwrap().port(), 5000);
+}
+
+#[tokio::test]
+async fn udp_peek_from_leaves_datagram() {
+    let _guard = Net::new().enter();
+
+    let server = UdpSocket::bind("127.0.0.1:6100").await.unwrap();
+    let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    client.send_to(b"hello", "127.0.0.1:6100").await.unwrap();
+    step();
+
+    let mut buf = [0u8; 16];
+    let (n, _) = server.peek_from(&mut buf).await.unwrap();
+    assert_eq!(&buf[..n], b"hello");
+
+    // Same datagram still there for recv_from.
+    let mut buf2 = [0u8; 16];
+    let (n2, _) = server.recv_from(&mut buf2).await.unwrap();
+    assert_eq!(&buf2[..n2], b"hello");
+}
+
+#[tokio::test]
+async fn udp_try_recv_would_block_when_empty() {
+    let _guard = Net::new().enter();
+
+    let s = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let mut buf = [0u8; 16];
+    assert_eq!(
+        s.try_recv_from(&mut buf).unwrap_err().kind(),
+        ErrorKind::WouldBlock
+    );
+}
+
+#[tokio::test]
+async fn udp_try_send_and_try_recv() {
+    let _guard = Net::new().enter();
+
+    let server = UdpSocket::bind("127.0.0.1:6200").await.unwrap();
+    let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    client
+        .try_send_to(b"hi", "127.0.0.1:6200".parse().unwrap())
+        .unwrap();
+    step();
+
+    let mut buf = [0u8; 16];
+    let (n, _) = server.try_recv_from(&mut buf).unwrap();
+    assert_eq!(&buf[..n], b"hi");
+}
+
+#[tokio::test]
+async fn udp_ttl_roundtrips() {
+    let _guard = Net::new().enter();
+
+    let s = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    assert_eq!(s.ttl().unwrap(), 64);
+    s.set_ttl(32).unwrap();
+    assert_eq!(s.ttl().unwrap(), 32);
+
+    assert_eq!(s.set_ttl(256).unwrap_err().kind(), ErrorKind::InvalidInput);
+}
+
+#[tokio::test]
 async fn udp_close_frees_port() {
     let _guard = Net::new().enter();
 

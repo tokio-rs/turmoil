@@ -3,7 +3,7 @@
 use std::future::poll_fn;
 use std::io;
 use std::net::SocketAddr;
-use std::task::Poll;
+use std::task::{Context, Poll, Waker};
 
 use tokio::io::ReadBuf;
 
@@ -25,6 +25,13 @@ impl UdpSocket {
 
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         match sys(|k| k.local_addr(self.fd))? {
+            Addr::Inet(sa) => Ok(sa),
+            Addr::Unix(_) => panic!("UdpSocket is Addr::Inet"),
+        }
+    }
+
+    pub fn peer_addr(&self) -> io::Result<SocketAddr> {
+        match sys(|k| k.peer_addr(self.fd))? {
             Addr::Inet(sa) => Ok(sa),
             Addr::Unix(_) => panic!("UdpSocket is Addr::Inet"),
         }
@@ -71,6 +78,48 @@ impl UdpSocket {
         .await
     }
 
+    pub async fn peek_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+        poll_fn(|cx| {
+            let mut rb = ReadBuf::new(buf);
+            match sys(|k| k.poll_peek_from(self.fd, cx, &mut rb)) {
+                Poll::Ready(Ok(Addr::Inet(peer))) => Poll::Ready(Ok((rb.filled().len(), peer))),
+                Poll::Ready(Ok(Addr::Unix(_))) => panic!("UdpSocket is Addr::Inet"),
+                Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+                Poll::Pending => Poll::Pending,
+            }
+        })
+        .await
+    }
+
+    pub fn try_send(&self, buf: &[u8]) -> io::Result<usize> {
+        unwrap_try(sys(|k| k.poll_send(self.fd, &mut noop_cx(), buf)))
+    }
+
+    pub fn try_send_to(&self, buf: &[u8], target: SocketAddr) -> io::Result<usize> {
+        unwrap_try(sys(|k| {
+            k.poll_send_to(self.fd, &mut noop_cx(), buf, &Addr::Inet(target))
+        }))
+    }
+
+    pub fn try_recv(&self, buf: &mut [u8]) -> io::Result<usize> {
+        let mut rb = ReadBuf::new(buf);
+        match sys(|k| k.poll_recv(self.fd, &mut noop_cx(), &mut rb)) {
+            Poll::Ready(Ok(())) => Ok(rb.filled().len()),
+            Poll::Ready(Err(e)) => Err(e),
+            Poll::Pending => Err(io::ErrorKind::WouldBlock.into()),
+        }
+    }
+
+    pub fn try_recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+        let mut rb = ReadBuf::new(buf);
+        match sys(|k| k.poll_recv_from(self.fd, &mut noop_cx(), &mut rb)) {
+            Poll::Ready(Ok(Addr::Inet(peer))) => Ok((rb.filled().len(), peer)),
+            Poll::Ready(Ok(Addr::Unix(_))) => panic!("UdpSocket is Addr::Inet"),
+            Poll::Ready(Err(e)) => Err(e),
+            Poll::Pending => Err(io::ErrorKind::WouldBlock.into()),
+        }
+    }
+
     pub fn set_broadcast(&self, on: bool) -> io::Result<()> {
         sys(|k| k.set_option(self.fd, SocketOption::Broadcast(on)))
     }
@@ -80,6 +129,31 @@ impl UdpSocket {
             SocketOption::Broadcast(v) => Ok(v),
             _ => unreachable!(),
         }
+    }
+
+    pub fn set_ttl(&self, ttl: u32) -> io::Result<()> {
+        let ttl: u8 = ttl
+            .try_into()
+            .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+        sys(|k| k.set_option(self.fd, SocketOption::IpTtl(ttl)))
+    }
+
+    pub fn ttl(&self) -> io::Result<u32> {
+        match sys(|k| k.get_option(self.fd, SocketOptionKind::IpTtl))? {
+            SocketOption::IpTtl(v) => Ok(v as u32),
+            _ => unreachable!(),
+        }
+    }
+}
+
+fn noop_cx() -> Context<'static> {
+    Context::from_waker(Waker::noop())
+}
+
+fn unwrap_try(p: Poll<io::Result<usize>>) -> io::Result<usize> {
+    match p {
+        Poll::Ready(r) => r,
+        Poll::Pending => Err(io::ErrorKind::WouldBlock.into()),
     }
 }
 

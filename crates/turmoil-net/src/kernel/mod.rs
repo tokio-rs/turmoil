@@ -191,6 +191,7 @@ impl Kernel {
         let st = self.lookup_mut(fd)?;
         match opt {
             SocketOption::Broadcast(v) => st.broadcast = v,
+            SocketOption::IpTtl(v) => st.ttl = v,
             _ => unimplemented!("set_option {:?}", opt),
         }
         Ok(())
@@ -201,6 +202,7 @@ impl Kernel {
         let st = self.lookup(fd)?;
         Ok(match kind {
             SocketOptionKind::Broadcast => SocketOption::Broadcast(st.broadcast),
+            SocketOptionKind::IpTtl => SocketOption::IpTtl(st.ttl),
             _ => unimplemented!("get_option {:?}", kind),
         })
     }
@@ -213,6 +215,15 @@ impl Kernel {
             .as_ref()
             .ok_or_else(|| Error::from(ErrorKind::InvalidInput))?;
         Ok(Addr::Inet(SocketAddr::new(key.local_addr, key.local_port)))
+    }
+
+    /// `getpeername(2)`. Returns `NotConnected` if `connect` was never
+    /// called.
+    pub fn peer_addr(&self, fd: Fd) -> std::io::Result<Addr> {
+        self.lookup(fd)?
+            .peer
+            .clone()
+            .ok_or_else(|| Error::from(ErrorKind::NotConnected))
     }
 
     /// `sendto(2)` for UDP. Auto-binds an ephemeral local address if
@@ -317,6 +328,36 @@ impl Kernel {
         };
         assert_eq!(st.ty, Type::Dgram, "poll_recv on non-Dgram fd");
         udp::recv(st, cx, buf)
+    }
+
+    /// `recvfrom(2)` with `MSG_PEEK`. Like [`Self::poll_recv_from`] but
+    /// leaves the datagram in the recv queue.
+    pub fn poll_peek_from(
+        &mut self,
+        fd: Fd,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<Addr>> {
+        let st = match self.lookup_mut(fd) {
+            Ok(st) => st,
+            Err(e) => return Poll::Ready(Err(e)),
+        };
+        assert_eq!(st.ty, Type::Dgram, "poll_peek_from on non-Dgram fd");
+        udp::peek_from(st, cx, buf)
+    }
+
+    /// `recv(2)` with `MSG_PEEK` — connected-socket peek.
+    pub fn poll_peek(
+        &mut self,
+        fd: Fd,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        match self.poll_peek_from(fd, cx, buf) {
+            Poll::Ready(Ok(_)) => Poll::Ready(Ok(())),
+            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+            Poll::Pending => Poll::Pending,
+        }
     }
 
     /// Hand an inbound packet to the stack — dispatches to the socket

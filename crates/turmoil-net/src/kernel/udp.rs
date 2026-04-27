@@ -113,6 +113,20 @@ pub(super) fn recv_from(
     Poll::Pending
 }
 
+pub(super) fn peek_from(
+    st: &mut Socket,
+    cx: &mut Context<'_>,
+    buf: &mut ReadBuf<'_>,
+) -> Poll<Result<Addr>> {
+    if let Some((from, payload)) = st.recv_queue.front() {
+        let n = payload.len().min(buf.remaining());
+        buf.put_slice(&payload[..n]);
+        return Poll::Ready(Ok(from.clone()));
+    }
+    st.register_recv_waker(cx.waker());
+    Poll::Pending
+}
+
 pub(super) fn deliver(k: &mut Kernel, pkt: &Packet, d: &UdpDatagram) {
     let domain = match pkt.dst {
         IpAddr::V4(_) => Domain::Inet,

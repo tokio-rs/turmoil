@@ -152,6 +152,8 @@ pub struct Socket {
     /// `_to`/`_from`. For TCP this is the connected remote endpoint.
     pub peer: Option<Addr>,
     pub broadcast: bool,
+    /// `IP_TTL` — stored only; not applied to simulated packets yet.
+    pub ttl: u8,
     /// Datagrams queued for this socket, in arrival order. Only UDP
     /// populates this today. Bounded by `SO_RCVBUF` later.
     pub recv_queue: VecDeque<(Addr, Bytes)>,
@@ -169,6 +171,7 @@ impl Socket {
             bound: None,
             peer: None,
             broadcast: false,
+            ttl: 64,
             recv_queue: VecDeque::new(),
             recv_wakers: Vec::new(),
         }
