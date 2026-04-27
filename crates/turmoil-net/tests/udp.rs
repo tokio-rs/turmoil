@@ -113,30 +113,26 @@ async fn udp_connected_drops_packets_from_non_peer() {
     );
 }
 
-#[tokio::test(flavor = "current_thread")]
+#[tokio::test]
 async fn udp_recv_wakes_when_packet_arrives() {
     let _guard = Net::new().enter();
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let server = UdpSocket::bind("127.0.0.1:6000").await.unwrap();
-            let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
 
-            // Park a recv task; it must register a waker and yield.
-            let recv = tokio::task::spawn_local(async move {
-                let mut buf = [0u8; 16];
-                let (n, _) = server.recv_from(&mut buf).await.unwrap();
-                buf[..n].to_vec()
-            });
-            tokio::task::yield_now().await;
+    let server = UdpSocket::bind("127.0.0.1:6000").await.unwrap();
+    let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
 
-            client.send_to(b"hi", "127.0.0.1:6000").await.unwrap();
-            step();
+    // Park a recv task; it must register a waker and yield.
+    let recv = tokio::spawn(async move {
+        let mut buf = [0u8; 16];
+        let (n, _) = server.recv_from(&mut buf).await.unwrap();
+        buf[..n].to_vec()
+    });
+    tokio::task::yield_now().await;
 
-            let got = recv.await.unwrap();
-            assert_eq!(got, b"hi");
-        })
-        .await;
+    client.send_to(b"hi", "127.0.0.1:6000").await.unwrap();
+    step();
+
+    let got = recv.await.unwrap();
+    assert_eq!(got, b"hi");
 }
 
 #[tokio::test]

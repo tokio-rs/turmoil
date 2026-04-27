@@ -138,6 +138,52 @@ pub enum SocketOptionKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Fd(u64);
 
+/// TCP connection state. Only the states v1 needs — close states
+/// (`FinWait*`, `CloseWait`, `TimeWait`, etc.) come with `shutdown`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TcpState {
+    SynSent,
+    SynReceived,
+    Established,
+}
+
+/// TCP control block. Present on a socket once it's paired with a peer
+/// (either via `connect` or `accept`). Mirrors the subset of fields a
+/// real TCB needs for the pieces we model today; send/recv buffers,
+/// unacked-segment tracking, and close-state bookkeeping come later.
+#[derive(Debug)]
+pub struct Tcb {
+    pub state: TcpState,
+    /// Remote endpoint. Mirrored in `Socket::peer` for UDP parity.
+    pub peer: SocketAddr,
+    /// Next sequence number we'll send.
+    pub snd_nxt: u32,
+    /// Next sequence number we expect to receive.
+    pub rcv_nxt: u32,
+}
+
+/// Listener state. Attached to a socket by `listen(2)`.
+#[derive(Debug)]
+pub struct ListenState {
+    /// Configured backlog. Real Linux clamps to `somaxconn`; we don't.
+    pub backlog: usize,
+    /// Fully-established connections waiting to be `accept`-ed. Each
+    /// entry is the server-side Fd of a finished handshake.
+    pub ready: VecDeque<Fd>,
+    /// Tasks parked in `poll_accept`.
+    pub accept_wakers: Vec<Waker>,
+}
+
+impl ListenState {
+    pub fn new(backlog: usize) -> Self {
+        Self {
+            backlog,
+            ready: VecDeque::new(),
+            accept_wakers: Vec::new(),
+        }
+    }
+}
+
 /// Kernel-internal per-socket state. Tracks creation parameters, the
 /// bound local address (if any), reuse-option state, the default peer
 /// (for connected sockets), and the inbound datagram queue for
@@ -161,6 +207,13 @@ pub struct Socket {
     /// because `UdpSocket::{recv, recv_from}` take `&self` and can be
     /// polled from concurrent tasks.
     pub recv_wakers: Vec<Waker>,
+    /// TCP control block — populated on connect (client) or accept
+    /// (server) once a socket is paired with a peer.
+    pub tcb: Option<Tcb>,
+    /// Listener state — populated by `listen(2)`.
+    pub listen: Option<ListenState>,
+    /// Waker for a `connect` parked in `SynSent` waiting for SYN-ACK.
+    pub connect_waker: Option<Waker>,
 }
 
 impl Socket {
@@ -174,6 +227,9 @@ impl Socket {
             ttl: 64,
             recv_queue: VecDeque::new(),
             recv_wakers: Vec::new(),
+            tcb: None,
+            listen: None,
+            connect_waker: None,
         }
     }
 
@@ -236,6 +292,10 @@ impl SocketTable {
 
     pub fn get(&self, fd: Fd) -> Option<&Socket> {
         self.sockets.get(&fd)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (Fd, &Socket)> {
+        self.sockets.iter().map(|(&fd, s)| (fd, s))
     }
 
     pub fn get_mut(&mut self, fd: Fd) -> Option<&mut Socket> {

@@ -39,7 +39,7 @@ impl UdpSocket {
 
     pub async fn connect<A: ToSocketAddrs>(&self, addr: A) -> io::Result<()> {
         let addr = Sealed::to_socket_addr(&addr)?;
-        sys(|k| k.connect(self.fd, &Addr::Inet(addr)))
+        poll_fn(|cx| sys(|k| k.poll_connect(self.fd, cx, &Addr::Inet(addr)))).await
     }
 
     pub async fn send_to<A: ToSocketAddrs>(&self, buf: &[u8], target: A) -> io::Result<usize> {
