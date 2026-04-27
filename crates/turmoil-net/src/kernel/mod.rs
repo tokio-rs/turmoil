@@ -224,11 +224,19 @@ impl Kernel {
         buf: &[u8],
         dst: &Addr,
     ) -> Poll<std::io::Result<usize>> {
-        match self.lookup(fd) {
-            Ok(st) if st.ty == Type::Dgram => udp::send_to(self, fd, cx, buf, dst),
-            Ok(_) => Poll::Ready(Err(Error::from(ErrorKind::InvalidInput))),
-            Err(e) => Poll::Ready(Err(e)),
+        let Addr::Inet(dst_sa) = dst else {
+            panic!("AF_UNIX not wired through poll_send_to");
+        };
+        let (ty, domain) = match self.lookup(fd) {
+            Ok(st) => (st.ty, st.domain),
+            Err(e) => return Poll::Ready(Err(e)),
+        };
+        assert_eq!(ty, Type::Dgram, "poll_send_to on non-Dgram fd");
+        match (domain, dst_sa) {
+            (Domain::Inet, SocketAddr::V4(_)) | (Domain::Inet6, SocketAddr::V6(_)) => {}
+            _ => return Poll::Ready(Err(Error::from(ErrorKind::InvalidInput))),
         }
+        udp::send_to(self, fd, cx, buf, dst_sa)
     }
 
     /// `recvfrom(2)`. Returns the peer address alongside the filled
@@ -240,19 +248,39 @@ impl Kernel {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<Addr>> {
-        match self.lookup(fd) {
-            Ok(st) if st.ty == Type::Dgram => udp::recv_from(self, fd, cx, buf),
-            Ok(_) => Poll::Ready(Err(Error::from(ErrorKind::InvalidInput))),
-            Err(e) => Poll::Ready(Err(e)),
-        }
+        let st = match self.lookup_mut(fd) {
+            Ok(st) => st,
+            Err(e) => return Poll::Ready(Err(e)),
+        };
+        assert_eq!(st.ty, Type::Dgram, "poll_recv_from on non-Dgram fd");
+        udp::recv_from(st, cx, buf)
     }
 
-    /// `connect(2)`. For UDP, sets the default peer (no handshake).
+    /// `connect(2)`. For UDP, sets the default peer (no handshake). TCP
+    /// will grow a handshake path that doesn't fit this eager shape.
     pub fn connect(&mut self, fd: Fd, addr: &Addr) -> std::io::Result<()> {
-        match self.lookup(fd)?.ty {
-            Type::Dgram => udp::connect(self, fd, addr),
-            _ => Err(Error::from(ErrorKind::InvalidInput)),
+        let Addr::Inet(peer) = addr else {
+            panic!("AF_UNIX not wired through connect");
+        };
+        let (domain, ty, is_bound) = {
+            let st = self.lookup(fd)?;
+            (st.domain, st.ty, st.bound.is_some())
+        };
+        match (domain, peer) {
+            (Domain::Inet, SocketAddr::V4(_)) | (Domain::Inet6, SocketAddr::V6(_)) => {}
+            _ => return Err(Error::from(ErrorKind::InvalidInput)),
         }
+        match ty {
+            Type::Dgram => {
+                if !is_bound {
+                    udp::auto_bind(self, fd, domain, ty, peer.ip())?;
+                }
+            }
+            Type::Stream => unimplemented!("TCP connect"),
+            Type::SeqPacket => unimplemented!("SOCK_SEQPACKET connect"),
+        }
+        self.lookup_mut(fd).expect("socket present").peer = Some(Addr::Inet(*peer));
+        Ok(())
     }
 
     /// `send(2)` — for connected sockets.
@@ -262,11 +290,18 @@ impl Kernel {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
-        match self.lookup(fd) {
-            Ok(st) if st.ty == Type::Dgram => udp::send(self, fd, cx, buf),
-            Ok(_) => Poll::Ready(Err(Error::from(ErrorKind::InvalidInput))),
-            Err(e) => Poll::Ready(Err(e)),
-        }
+        let (ty, peer) = match self.lookup(fd) {
+            Ok(st) => (st.ty, st.peer.clone()),
+            Err(e) => return Poll::Ready(Err(e)),
+        };
+        assert_eq!(ty, Type::Dgram, "poll_send on non-Dgram fd");
+        let Some(peer) = peer else {
+            return Poll::Ready(Err(Error::from(ErrorKind::NotConnected)));
+        };
+        let Addr::Inet(peer_sa) = peer else {
+            panic!("UDP peer stored as Addr::Unix");
+        };
+        udp::send_to(self, fd, cx, buf, &peer_sa)
     }
 
     /// `recv(2)` — for connected sockets.
@@ -276,11 +311,12 @@ impl Kernel {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
-        match self.lookup(fd) {
-            Ok(st) if st.ty == Type::Dgram => udp::recv(self, fd, cx, buf),
-            Ok(_) => Poll::Ready(Err(Error::from(ErrorKind::InvalidInput))),
-            Err(e) => Poll::Ready(Err(e)),
-        }
+        let st = match self.lookup_mut(fd) {
+            Ok(st) => st,
+            Err(e) => return Poll::Ready(Err(e)),
+        };
+        assert_eq!(st.ty, Type::Dgram, "poll_recv on non-Dgram fd");
+        udp::recv(st, cx, buf)
     }
 
     /// Hand an inbound packet to the stack — dispatches to the socket
