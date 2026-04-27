@@ -1,13 +1,420 @@
-//! Kernel-shaped socket layer.
+//! Per-host network stack.
 //!
-//! Models POSIX socket primitives (`socket`, `bind`, `listen`, `accept`,
-//! `connect`, `send`, `recv`, `close`, `shutdown`, `setsockopt`) over a
-//! deterministic host runtime. Protocol state machines for TCP, UDP, and
-//! UDS live in the submodules below.
+//! The [`Kernel`] owns one host's socket table, packet queues, and
+//! interface configuration. It does not route between hosts — that's a
+//! concern for the transport layer above.
+//!
+//! Mutability and thread-safety aren't yet decided — the kernel is a
+//! plain struct with `&mut self` on mutating methods. Sharing and
+//! interior mutability (`RefCell`, `Arc<Mutex<_>>`, thread-local, etc.)
+//! will be layered on later once the transport story is clearer.
 
-pub mod options;
-pub mod socket;
-pub mod table;
-pub mod tcp;
-pub mod udp;
-pub mod uds;
+#![allow(dead_code, unused_variables)]
+
+use std::collections::VecDeque;
+use std::io::{Error, ErrorKind};
+use std::net::{IpAddr, SocketAddr};
+use std::task::{Context, Poll};
+
+use tokio::io::ReadBuf;
+
+use crate::kernel::packet::{Packet, Transport};
+use crate::kernel::socket::{BindKey, Socket, SocketTable};
+
+mod packet;
+mod socket;
+mod tcp;
+mod udp;
+mod uds;
+
+// for shims
+pub use socket::{Addr, Domain, Fd, SocketOption, SocketOptionKind, Type};
+
+// TODO: prevent busy loops on lo
+
+/// Default MTU for non-loopback traffic (bytes). Matches standard Ethernet.
+const DEFAULT_MTU: u32 = 1500;
+/// Default MTU for loopback (bytes). Matches Linux `lo`.
+const DEFAULT_LOOPBACK_MTU: u32 = 65536;
+
+/// A per-host network stack.
+///
+/// Owns the socket table and the inbound/outbound packet queues. Does
+/// not know how packets reach other hosts — that's the transport
+/// layer's job.
+#[derive(Debug)]
+pub struct Kernel {
+    sockets: SocketTable,
+    addresses: Vec<IpAddr>,
+    mtu: u32,
+    loopback_mtu: u32,
+    /// Packets queued by `poll_send_*` awaiting `egress()`.
+    outbound: VecDeque<Packet>,
+}
+
+impl Kernel {
+    /// Construct a fresh kernel with default MTU settings and no
+    /// configured addresses beyond implicit loopback.
+    pub fn new() -> Self {
+        Self {
+            sockets: SocketTable::new(),
+            addresses: Vec::new(),
+            mtu: DEFAULT_MTU,
+            loopback_mtu: DEFAULT_LOOPBACK_MTU,
+            outbound: VecDeque::new(),
+        }
+    }
+
+    /// Create a new socket in this kernel's socket table.
+    fn mk_socket(&mut self, domain: Domain, ty: Type) -> Fd {
+        self.sockets.insert(Socket::new(domain, ty))
+    }
+
+    /// `close(2)`. Removes the entry from the socket table along with
+    /// any binding. Idempotent — closing an already-closed socket is a
+    /// no-op.
+    pub fn close(&mut self, fd: Fd) {
+        self.sockets.remove(fd);
+    }
+
+    pub(crate) fn lookup(&self, fd: Fd) -> std::io::Result<&Socket> {
+        self.sockets
+            .get(fd)
+            .ok_or_else(|| Error::from(ErrorKind::NotFound))
+    }
+
+    pub(crate) fn lookup_mut(&mut self, fd: Fd) -> std::io::Result<&mut Socket> {
+        self.sockets
+            .get_mut(fd)
+            .ok_or_else(|| Error::from(ErrorKind::NotFound))
+    }
+
+    /// Configure an additional local address for this host. Loopback
+    /// (`127.0.0.1`, `::1`) is always implicit.
+    pub fn add_address(&mut self, addr: IpAddr) {
+        if !self.addresses.contains(&addr) {
+            self.addresses.push(addr);
+        }
+    }
+
+    /// Set the non-loopback MTU.
+    pub fn set_mtu(&mut self, mtu: u32) {
+        self.mtu = mtu;
+    }
+
+    /// Current non-loopback MTU.
+    pub fn mtu(&self) -> u32 {
+        self.mtu
+    }
+
+    /// Current loopback MTU.
+    pub fn loopback_mtu(&self) -> u32 {
+        self.loopback_mtu
+    }
+
+    /// `true` if `addr` is one of this host's local addresses
+    /// (including implicit loopback).
+    pub fn is_local(&self, addr: IpAddr) -> bool {
+        if addr.is_loopback() {
+            return true;
+        }
+        self.addresses.contains(&addr)
+    }
+
+    /// `socket(2)` + `bind(2)`. Creates a socket of the given type,
+    /// assigns it `addr`, and returns the handle. Domain is inferred
+    /// from `addr`.
+    pub fn bind(&mut self, addr: &Addr, ty: Type) -> std::io::Result<Fd> {
+        let (domain, ip, port) = match addr {
+            Addr::Inet(sa) if sa.is_ipv4() => (Domain::Inet, sa.ip(), sa.port()),
+            Addr::Inet(sa) => (Domain::Inet6, sa.ip(), sa.port()),
+            Addr::Unix(_) => unimplemented!("AF_UNIX bind"),
+        };
+
+        // Non-wildcard IPs must be configured on this host.
+        if !ip.is_unspecified() && !self.is_local(ip) {
+            return Err(Error::from(ErrorKind::AddrNotAvailable));
+        }
+
+        // Pick a port if the caller asked for one.
+        let port = if port == 0 {
+            self.sockets
+                .allocate_port(domain, ty)
+                .ok_or_else(|| Error::from(ErrorKind::AddrInUse))?
+        } else {
+            port
+        };
+
+        let key = BindKey {
+            domain,
+            ty,
+            local_addr: ip,
+            local_port: port,
+        };
+
+        // Walk every existing binding on the same (domain, ty, port) to
+        // evaluate conflicts. Two scenarios:
+        //
+        // 1. Exact-tuple match. Allowed only if every socket in the
+        //    existing group AND the new socket has SO_REUSEPORT set.
+        // 2. Wildcard-vs-specific mismatch (one side bound to 0.0.0.0/::,
+        //    the other to a concrete IP). Allowed only if both sides
+        //    have SO_REUSEADDR set.
+        //
+        // Distinct concrete IPs on the same port never conflict on
+        // Linux — those just coexist regardless of options.
+        //
+        // Socket defaults (reuse_addr, reuse_port) are both `false`, so
+        // a freshly created socket never satisfies either reuse
+        // condition — that means any overlap at this step is a
+        // conflict and we can bail before creating the table entry.
+        for (existing, _ids) in self
+            .sockets
+            .bindings_on_port(key.domain, key.ty, key.local_port)
+        {
+            if existing.local_addr == key.local_addr
+                || existing.local_addr.is_unspecified()
+                || key.local_addr.is_unspecified()
+            {
+                return Err(Error::from(ErrorKind::AddrInUse));
+            }
+        }
+
+        let fd = self.mk_socket(domain, ty);
+        self.sockets.insert_binding(key.clone(), fd);
+        self.lookup_mut(fd).expect("socket entry present").bound = Some(key);
+        Ok(fd)
+    }
+
+    /// `setsockopt(2)`. Most variants are still unimplemented.
+    pub fn set_option(&mut self, fd: Fd, opt: SocketOption) -> std::io::Result<()> {
+        let st = self.lookup_mut(fd)?;
+        match opt {
+            SocketOption::Broadcast(v) => st.broadcast = v,
+            _ => unimplemented!("set_option {:?}", opt),
+        }
+        Ok(())
+    }
+
+    /// `getsockopt(2)`. Most variants are still unimplemented.
+    pub fn get_option(&self, fd: Fd, kind: SocketOptionKind) -> std::io::Result<SocketOption> {
+        let st = self.lookup(fd)?;
+        Ok(match kind {
+            SocketOptionKind::Broadcast => SocketOption::Broadcast(st.broadcast),
+            _ => unimplemented!("get_option {:?}", kind),
+        })
+    }
+
+    /// `getsockname(2)`.
+    pub fn local_addr(&self, fd: Fd) -> std::io::Result<Addr> {
+        let key = self
+            .lookup(fd)?
+            .bound
+            .as_ref()
+            .ok_or_else(|| Error::from(ErrorKind::InvalidInput))?;
+        Ok(Addr::Inet(SocketAddr::new(key.local_addr, key.local_port)))
+    }
+
+    /// `sendto(2)` for UDP. Auto-binds an ephemeral local address if
+    /// `socket` was never explicitly bound, matching Linux semantics.
+    pub fn poll_send_to(
+        &mut self,
+        fd: Fd,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+        dst: &Addr,
+    ) -> Poll<std::io::Result<usize>> {
+        match self.lookup(fd) {
+            Ok(st) if st.ty == Type::Dgram => udp::send_to(self, fd, cx, buf, dst),
+            Ok(_) => Poll::Ready(Err(Error::from(ErrorKind::InvalidInput))),
+            Err(e) => Poll::Ready(Err(e)),
+        }
+    }
+
+    /// `recvfrom(2)`. Returns the peer address alongside the filled
+    /// buffer. Returns `Pending` and stores the waker when the
+    /// socket's recv queue is empty.
+    pub fn poll_recv_from(
+        &mut self,
+        fd: Fd,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<Addr>> {
+        match self.lookup(fd) {
+            Ok(st) if st.ty == Type::Dgram => udp::recv_from(self, fd, cx, buf),
+            Ok(_) => Poll::Ready(Err(Error::from(ErrorKind::InvalidInput))),
+            Err(e) => Poll::Ready(Err(e)),
+        }
+    }
+
+    /// `connect(2)`. For UDP, sets the default peer (no handshake).
+    pub fn connect(&mut self, fd: Fd, addr: &Addr) -> std::io::Result<()> {
+        match self.lookup(fd)?.ty {
+            Type::Dgram => udp::connect(self, fd, addr),
+            _ => Err(Error::from(ErrorKind::InvalidInput)),
+        }
+    }
+
+    /// `send(2)` — for connected sockets.
+    pub fn poll_send(
+        &mut self,
+        fd: Fd,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        match self.lookup(fd) {
+            Ok(st) if st.ty == Type::Dgram => udp::send(self, fd, cx, buf),
+            Ok(_) => Poll::Ready(Err(Error::from(ErrorKind::InvalidInput))),
+            Err(e) => Poll::Ready(Err(e)),
+        }
+    }
+
+    /// `recv(2)` — for connected sockets.
+    pub fn poll_recv(
+        &mut self,
+        fd: Fd,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        match self.lookup(fd) {
+            Ok(st) if st.ty == Type::Dgram => udp::recv(self, fd, cx, buf),
+            Ok(_) => Poll::Ready(Err(Error::from(ErrorKind::InvalidInput))),
+            Err(e) => Poll::Ready(Err(e)),
+        }
+    }
+
+    /// Hand an inbound packet to the stack — dispatches to the socket
+    /// bound at the destination tuple, appending to its recv queue and
+    /// waking any pending receiver. Drops the packet if no matching
+    /// socket is bound.
+    pub fn deliver(&mut self, pkt: Packet) {
+        match &pkt.payload {
+            Transport::Udp(d) => udp::deliver(self, &pkt, d),
+            Transport::Tcp(_) => { /* TODO */ }
+        }
+    }
+
+    /// Take all packets the stack has produced since the last call.
+    /// Loopback (or any packet whose destination is one of this
+    /// kernel's local addresses) is folded back through
+    /// [`deliver`](Self::deliver) inline; the returned vec holds only
+    /// packets that need to leave this host.
+    pub fn egress(&mut self) -> Vec<Packet> {
+        let drained: Vec<_> = std::mem::take(&mut self.outbound).into_iter().collect();
+        let mut leaving = Vec::new();
+        for pkt in drained {
+            if self.is_local(pkt.dst) {
+                self.deliver(pkt);
+            } else {
+                leaving.push(pkt);
+            }
+        }
+        leaving
+    }
+}
+
+impl Default for Kernel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::ErrorKind;
+    use std::net::SocketAddr;
+
+    use super::*;
+
+    fn inet(s: &str) -> Addr {
+        Addr::Inet(s.parse().unwrap())
+    }
+
+    #[test]
+    fn default_mtu_matches_ethernet() {
+        let k = Kernel::new();
+        assert_eq!(k.mtu(), 1500);
+    }
+
+    #[test]
+    fn loopback_is_implicit_local() {
+        let mut k = Kernel::new();
+        assert!(k.is_local("127.0.0.1".parse().unwrap()));
+        assert!(k.is_local("::1".parse().unwrap()));
+        assert!(!k.is_local("10.0.0.1".parse().unwrap()));
+        k.add_address("10.0.0.1".parse().unwrap());
+        assert!(k.is_local("10.0.0.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn bind_records_local_addr() {
+        let mut k = Kernel::new();
+        let s = k.bind(&inet("127.0.0.1:5000"), Type::Dgram).unwrap();
+        assert_eq!(k.local_addr(s).unwrap(), inet("127.0.0.1:5000"));
+    }
+
+    #[test]
+    fn bind_port_zero_allocates_ephemeral() {
+        let mut k = Kernel::new();
+        let s = k.bind(&inet("127.0.0.1:0"), Type::Dgram).unwrap();
+        let Addr::Inet(SocketAddr::V4(v4)) = k.local_addr(s).unwrap() else {
+            panic!("expected v4")
+        };
+        assert!((49152..=65535).contains(&v4.port()));
+    }
+
+    #[test]
+    fn bind_conflict_is_addr_in_use() {
+        let mut k = Kernel::new();
+        k.bind(&inet("127.0.0.1:5000"), Type::Dgram).unwrap();
+        let err = k.bind(&inet("127.0.0.1:5000"), Type::Dgram).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::AddrInUse);
+    }
+
+    #[test]
+    fn bind_different_protocols_can_share_port() {
+        let mut k = Kernel::new();
+        // TCP and UDP live in separate port spaces.
+        k.bind(&inet("127.0.0.1:5000"), Type::Dgram).unwrap();
+        k.bind(&inet("127.0.0.1:5000"), Type::Stream).unwrap();
+    }
+
+    #[test]
+    fn bind_rejects_non_local_addr() {
+        let mut k = Kernel::new();
+        let err = k.bind(&inet("10.0.0.1:5000"), Type::Dgram).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::AddrNotAvailable);
+    }
+
+    #[test]
+    fn bind_wildcard_addr_is_allowed() {
+        let mut k = Kernel::new();
+        k.bind(&inet("0.0.0.0:5000"), Type::Dgram).unwrap();
+    }
+
+    #[test]
+    fn distinct_specific_ips_coexist() {
+        // Linux: two sockets bound to different specific IPs on the
+        // same port never conflict.
+        let mut k = Kernel::new();
+        k.add_address("10.0.0.1".parse().unwrap());
+        k.add_address("10.0.0.2".parse().unwrap());
+        k.bind(&inet("10.0.0.1:5000"), Type::Dgram).unwrap();
+        k.bind(&inet("10.0.0.2:5000"), Type::Dgram).unwrap();
+    }
+
+    #[test]
+    fn broadcast_option_roundtrips() {
+        let mut k = Kernel::new();
+        let s = k.bind(&inet("127.0.0.1:0"), Type::Dgram).unwrap();
+        assert_eq!(
+            k.get_option(s, SocketOptionKind::Broadcast).unwrap(),
+            SocketOption::Broadcast(false)
+        );
+        k.set_option(s, SocketOption::Broadcast(true)).unwrap();
+        assert_eq!(
+            k.get_option(s, SocketOptionKind::Broadcast).unwrap(),
+            SocketOption::Broadcast(true)
+        );
+    }
+}

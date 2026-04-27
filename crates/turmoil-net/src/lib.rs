@@ -1,38 +1,92 @@
 //! Simulated socket layer for turmoil.
 //!
-//! This crate provides a kernel-shaped socket API ([`kernel`]) that models
-//! POSIX-style sockets over a deterministic host runtime, and a tokio-shaped
-//! shim ([`shim::tokio::net`]) layered on top for drop-in use in existing code.
-//!
-//! The kernel layer is the authoritative implementation: address families
-//! (`AF_INET`, `AF_INET6`, `AF_UNIX`), socket types (`SOCK_STREAM`,
-//! `SOCK_DGRAM`), and the TCP/UDP/UDS state machines live there. The shim
-//! layer is a thin translation onto those primitives.
-//!
-//! # Integration with a host runtime
-//!
-//! `turmoil-net` is runtime-agnostic. A host runtime (e.g. the `turmoil`
-//! crate) implements the [`NetRuntime`] trait to plug in its notion of the
-//! current host, RNG, timer, and inter-host delivery. This keeps the socket
-//! layer a standalone crate rather than coupling it to `turmoil`'s `World`.
+//! This crate provides a kernel-shaped socket layer that models
+//! POSIX-style sockets over a deterministic host stack, and a
+//! tokio-shaped shim ([`shim::tokio::net`]) layered on top for drop-in
+//! use in existing code.
 
-pub mod kernel;
+use std::cell::RefCell;
+
+pub(crate) mod kernel;
 pub mod shim;
 
-use std::net::IpAddr;
+use crate::kernel::Kernel;
 
-/// Host runtime hooks that `turmoil-net` needs to drive the socket layer.
+thread_local! {
+    static CURRENT: RefCell<Option<Net>> = const { RefCell::new(None) };
+}
+
+/// Per-thread network state installed by [`Net::enter`].
 ///
-/// Implemented by the embedding simulator (e.g. the `turmoil` crate) so that
-/// `turmoil-net` can stay runtime-agnostic. The exact shape of this trait is
-/// expected to evolve as the kernel layer lands — keep it minimal.
-pub trait NetRuntime {
-    /// IP address of the host currently executing.
-    fn current_host(&self) -> IpAddr;
+/// Follows tokio's `Handle::enter` → `EnterGuard` pattern. A test
+/// builds a [`Net`], calls [`Net::enter`] to install it on the current
+/// thread, and runs its workload inside the returned guard's scope;
+/// on drop the slot is cleared.
+///
+/// For now `Net` just holds one [`Kernel`] — the "current host". The
+/// fabric (inter-host transport) will layer on top later, at which
+/// point `Net` will own the fabric for the lifetime of the test and
+/// swap the current kernel as each host executes.
+#[derive(Debug)]
+pub struct Net {
+    current: Kernel,
+}
 
-    /// Deliver a packet/segment to another host's inbox.
-    ///
-    /// The concrete envelope type is TBD — this signature is a placeholder
-    /// while the kernel layer is being sketched out.
-    fn deliver(&self, dst: IpAddr, bytes: bytes::Bytes);
+impl Net {
+    pub fn new() -> Self {
+        Self {
+            current: Kernel::new(),
+        }
+    }
+
+    /// Install `self` as the current thread's network for the lifetime
+    /// of the returned guard. Panics if another `Net` is already
+    /// installed on this thread.
+    pub fn enter(self) -> EnterGuard {
+        CURRENT.with(|c| {
+            let mut slot = c.borrow_mut();
+            assert!(slot.is_none(), "another Net is already installed");
+            *slot = Some(self);
+        });
+        EnterGuard { _priv: () }
+    }
+}
+
+impl Default for Net {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// RAII guard returned by [`Net::enter`]. Clears the thread-local slot
+/// on drop.
+#[must_use = "a Net is only active while the guard is held"]
+pub struct EnterGuard {
+    _priv: (),
+}
+
+impl Drop for EnterGuard {
+    fn drop(&mut self) {
+        CURRENT.with(|c| *c.borrow_mut() = None);
+    }
+}
+
+/// Run `f` against the current thread's kernel. Panics if no `Net` has
+/// been entered.
+pub(crate) fn sys<R>(f: impl FnOnce(&mut Kernel) -> R) -> R {
+    CURRENT.with(|c| {
+        let mut cell = c.borrow_mut();
+        let net = cell
+            .as_mut()
+            .expect("no Net installed — call Net::enter() first");
+        f(&mut net.current)
+    })
+}
+
+/// Temporary hooks for integration tests - these should be removed.
+pub fn step() -> usize {
+    sys(|k| k.egress().len())
+}
+pub fn add_address(addr: std::net::IpAddr) {
+    sys(|k| k.add_address(addr));
 }
