@@ -1,13 +1,17 @@
 //! Drop-in replacements for [`tokio::net::TcpListener`] and
 //! [`tokio::net::TcpStream`].
 //!
-//! `TcpListener` surface is complete; `TcpStream` is v1 (handshake
-//! only). Read / write / shutdown come in follow-up passes.
+//! `TcpListener` surface is complete; `TcpStream` supports connect,
+//! read, and write. Shutdown / FIN handling is still a follow-up —
+//! `poll_shutdown` is a no-op.
 
 use std::future::poll_fn;
 use std::io;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::task::{Context, Poll};
+
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::kernel::{Addr, Domain, Fd, SocketOption, SocketOptionKind, Type};
 use crate::shim::tokio::net::addr::sealed::Sealed;
@@ -108,6 +112,50 @@ impl TcpStream {
 impl Drop for TcpStream {
     fn drop(&mut self) {
         sys(|k| k.close(self.fd));
+    }
+}
+
+impl AsyncRead for TcpStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let fd = self.fd;
+        let unfilled = buf.initialize_unfilled();
+        match sys(|k| k.poll_read(fd, cx, unfilled)) {
+            Poll::Ready(Ok(n)) => {
+                buf.advance(n);
+                Poll::Ready(Ok(()))
+            }
+            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl AsyncWrite for TcpStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let fd = self.fd;
+        sys(|k| k.poll_write(fd, cx, buf))
+    }
+
+    /// No-op — bytes are copied into the kernel's send buffer in
+    /// `poll_write` and drained by `egress()`. There's no userspace
+    /// buffer to flush.
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    /// TODO: emit FIN and transition through the close states. For v1
+    /// this just reports success — callers that rely on half-close
+    /// semantics will notice the absence once we add FIN.
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
     }
 }
 

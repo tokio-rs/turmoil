@@ -415,6 +415,39 @@ impl Kernel {
         udp::recv(st, cx, buf)
     }
 
+    /// `send(2)` for TCP. Copies bytes into the socket's send buffer
+    /// and returns the count; actual wire emit happens during `egress`
+    /// via TCP segmentation. Returns `Pending` only when the send
+    /// buffer is full.
+    pub fn poll_write(
+        &mut self,
+        fd: Fd,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let ty = match self.lookup(fd) {
+            Ok(st) => st.ty,
+            Err(e) => return Poll::Ready(Err(e)),
+        };
+        assert_eq!(ty, Type::Stream, "poll_write on non-Stream fd");
+        tcp::poll_write(self, fd, cx, buf)
+    }
+
+    /// `recv(2)` for TCP. Drains from the socket's receive buffer.
+    pub fn poll_read(
+        &mut self,
+        fd: Fd,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let ty = match self.lookup(fd) {
+            Ok(st) => st.ty,
+            Err(e) => return Poll::Ready(Err(e)),
+        };
+        assert_eq!(ty, Type::Stream, "poll_read on non-Stream fd");
+        tcp::poll_read(self, fd, cx, buf)
+    }
+
     /// `recvfrom(2)` with `MSG_PEEK`. Like [`Self::poll_recv_from`] but
     /// leaves the datagram in the recv queue.
     pub fn poll_peek_from(
@@ -457,18 +490,30 @@ impl Kernel {
     }
 
     /// Take all packets the stack has produced since the last call.
-    /// Loopback (or any packet whose destination is one of this
-    /// kernel's local addresses) is folded back through
+    ///
+    /// Runs TCP segmentation first (draining each established socket's
+    /// `send_buf` into MSS-sized segments on `outbound`), then drains
+    /// `outbound`. Loopback packets fold back through
     /// [`deliver`](Self::deliver) inline; the returned vec holds only
     /// packets that need to leave this host.
+    ///
+    /// Loops until a full pass produces no new outbound packets, so
+    /// that an ACK folded through `deliver` can open a window and let
+    /// the next segmentation pass pick up queued bytes.
     pub fn egress(&mut self) -> Vec<Packet> {
-        let drained: Vec<_> = std::mem::take(&mut self.outbound).into_iter().collect();
         let mut leaving = Vec::new();
-        for pkt in drained {
-            if self.is_local(pkt.dst) {
-                self.deliver(pkt);
-            } else {
-                leaving.push(pkt);
+        loop {
+            tcp::segment_all(self);
+            if self.outbound.is_empty() {
+                break;
+            }
+            let drained: Vec<_> = std::mem::take(&mut self.outbound).into_iter().collect();
+            for pkt in drained {
+                if self.is_local(pkt.dst) {
+                    self.deliver(pkt);
+                } else {
+                    leaving.push(pkt);
+                }
             }
         }
         leaving

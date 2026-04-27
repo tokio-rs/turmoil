@@ -1,13 +1,14 @@
 //! TCP state machine.
 //!
-//! v1 scope: handshake only. Sequence-number bookkeeping, send/recv
-//! queues, FIN/RST, half-close, retransmit timers all come later.
+//! v1 scope: handshake + streaming data. FIN/RST, half-close, and
+//! retransmit still come later — the simulated fabric is reliable, so
+//! dropping retransmit for now is safe.
 //!
 //! # Perf TODO
-//! - `find_by_peer` and `count_children` sweep every socket via
-//!   `SocketTable::iter`. Real kernels demux by 4-tuple hash. Replace
-//!   with `HashMap<(local, remote), Fd>` on `SocketTable` before we
-//!   take on TCP-heavy benchmarks — the old `turmoil` crate's
+//! - `find_by_peer`, `count_children`, and `segment_all` sweep every
+//!   socket via `SocketTable::iter`. Real kernels demux by 4-tuple
+//!   hash. Replace with `HashMap<(local, remote), Fd>` on `SocketTable`
+//!   before we take on TCP-heavy benchmarks — the old `turmoil` crate's
 //!   per-packet overhead is partly the thing this rewrite is trying
 //!   to beat.
 
@@ -15,10 +16,12 @@ use std::io::{Error, ErrorKind, Result};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::task::{Context, Poll};
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 
-use crate::kernel::packet::{Packet, TcpFlags, TcpSegment, Transport};
-use crate::kernel::socket::{Addr, BindKey, Domain, Fd, Socket, Tcb, TcpState, Type};
+use crate::kernel::packet::{self, Packet, TcpFlags, TcpSegment, Transport};
+use crate::kernel::socket::{
+    Addr, BindKey, Domain, Fd, Socket, Tcb, TcpState, Type, RECV_BUF_CAP, SEND_BUF_CAP,
+};
 use crate::kernel::Kernel;
 
 /// Drives `Kernel::poll_connect` for `SOCK_STREAM`. First poll builds a
@@ -56,7 +59,11 @@ pub(super) fn poll_connect(
             state: TcpState::SynSent,
             peer,
             snd_nxt: isn.wrapping_add(1),
+            snd_una: isn.wrapping_add(1),
+            snd_wnd: DEFAULT_WINDOW,
             rcv_nxt: 0,
+            send_buf: BytesMut::new(),
+            recv_buf: BytesMut::new(),
         });
         st.peer = Some(Addr::Inet(peer));
     }
@@ -122,11 +129,12 @@ fn handle_on_connection(
     match state {
         // Client received SYN-ACK. Move to Established and ACK.
         TcpState::SynSent if s.flags.syn && s.flags.ack => {
-            let (snd_nxt, rcv_nxt) = {
+            let (snd_nxt, rcv_nxt, window) = {
                 let tcb = k.lookup_mut(fd).unwrap().tcb.as_mut().unwrap();
                 tcb.state = TcpState::Established;
                 tcb.rcv_nxt = s.seq.wrapping_add(1);
-                (tcb.snd_nxt, tcb.rcv_nxt)
+                tcb.snd_wnd = s.window;
+                (tcb.snd_nxt, tcb.rcv_nxt, advertised_window(0))
             };
             wake_connect(k, fd);
             emit(
@@ -142,7 +150,7 @@ fn handle_on_connection(
                         ack: true,
                         ..TcpFlags::default()
                     },
-                    window: DEFAULT_WINDOW,
+                    window,
                     payload: Bytes::new(),
                 },
             );
@@ -154,13 +162,101 @@ fn handle_on_connection(
             if s.ack != expected_ack {
                 return;
             }
-            k.lookup_mut(fd).unwrap().tcb.as_mut().unwrap().state = TcpState::Established;
+            {
+                let tcb = k.lookup_mut(fd).unwrap().tcb.as_mut().unwrap();
+                tcb.state = TcpState::Established;
+                tcb.snd_wnd = s.window;
+            }
             push_to_listener(k, fd, local);
         }
+        // Data / ACK on an open connection.
+        TcpState::Established => handle_established(k, fd, local, remote, s),
         _ => {
-            // Anything else is out of scope for v1 (data, FIN, RST,
+            // Anything else is out of scope for v1 (FIN, RST,
             // duplicate SYN). Drop silently.
         }
+    }
+}
+
+/// ACK processing, in-order data receipt, and waker plumbing. Out-of-
+/// order segments are dropped — v1's fabric is reliable.
+fn handle_established(
+    k: &mut Kernel,
+    fd: Fd,
+    local: SocketAddr,
+    remote: SocketAddr,
+    s: &TcpSegment,
+) {
+    let mut write_waker = None;
+    let mut read_waker = None;
+    let mut send_ack = false;
+
+    {
+        let st = k.lookup_mut(fd).unwrap();
+        let tcb = st.tcb.as_mut().unwrap();
+
+        // ACK: drain ACK'd bytes from send_buf, refresh advertised
+        // window. Any ACK is worth waking a parked writer for — either
+        // bytes drained or the window grew.
+        if s.flags.ack {
+            let acked = s.ack.wrapping_sub(tcb.snd_una);
+            let in_flight = tcb.snd_nxt.wrapping_sub(tcb.snd_una);
+            if acked > 0 && acked <= in_flight {
+                let _ = tcb.send_buf.split_to(acked as usize);
+                tcb.snd_una = s.ack;
+            }
+            tcb.snd_wnd = s.window;
+            write_waker = st.write_waker.take();
+        }
+
+        // Data: accept if it lands exactly at rcv_nxt and fits under
+        // the receive cap. Gaps, overlaps, and overruns all drop.
+        let tcb = st.tcb.as_mut().unwrap();
+        if !s.payload.is_empty() && s.seq == tcb.rcv_nxt {
+            let room = RECV_BUF_CAP.saturating_sub(tcb.recv_buf.len());
+            let n = s.payload.len().min(room);
+            if n > 0 {
+                tcb.recv_buf.extend_from_slice(&s.payload[..n]);
+                tcb.rcv_nxt = tcb.rcv_nxt.wrapping_add(n as u32);
+                read_waker = st.read_waker.take();
+                send_ack = true;
+            }
+        }
+    }
+
+    if let Some(w) = write_waker {
+        w.wake();
+    }
+    if let Some(w) = read_waker {
+        w.wake();
+    }
+
+    if send_ack {
+        let (snd_nxt, rcv_nxt, window) = {
+            let tcb = k.lookup(fd).unwrap().tcb.as_ref().unwrap();
+            (
+                tcb.snd_nxt,
+                tcb.rcv_nxt,
+                advertised_window(tcb.recv_buf.len()),
+            )
+        };
+        emit(
+            k,
+            local,
+            remote,
+            TcpSegment {
+                src_port: local.port(),
+                dst_port: remote.port(),
+                seq: snd_nxt,
+                ack: rcv_nxt,
+                flags: TcpFlags {
+                    ack: true,
+                    ..TcpFlags::default()
+                },
+                window,
+                payload: Bytes::new(),
+            },
+        );
     }
 }
 
@@ -214,7 +310,11 @@ fn accept_syn(
             state: TcpState::SynReceived,
             peer: remote,
             snd_nxt: isn.wrapping_add(1),
+            snd_una: isn.wrapping_add(1),
+            snd_wnd: s.window,
             rcv_nxt: s.seq.wrapping_add(1),
+            send_buf: BytesMut::new(),
+            recv_buf: BytesMut::new(),
         });
     }
     emit(
@@ -413,6 +513,226 @@ fn initial_sequence(k: &mut Kernel) -> u32 {
     // sequence spaces from colliding visually.
     k.tcp_isn = k.tcp_isn.wrapping_add(0x1_0000);
     v
+}
+
+/// Copy bytes into the socket's `send_buf`, up to the remaining
+/// capacity. Returns `Pending` (parking `write_waker`) when the buffer
+/// is already full. Segmentation and the actual wire emit happen later,
+/// in `segment_all` during `egress`.
+pub(super) fn poll_write(
+    k: &mut Kernel,
+    fd: Fd,
+    cx: &mut Context<'_>,
+    buf: &[u8],
+) -> Poll<Result<usize>> {
+    let st = match k.lookup_mut(fd) {
+        Ok(st) => st,
+        Err(e) => return Poll::Ready(Err(e)),
+    };
+    let Some(tcb) = st.tcb.as_ref() else {
+        return Poll::Ready(Err(Error::from(ErrorKind::NotConnected)));
+    };
+    if tcb.state != TcpState::Established {
+        // Mid-handshake writes could be spec-legal in some states, but
+        // for v1 we only allow writes on an open connection.
+        return Poll::Ready(Err(Error::from(ErrorKind::NotConnected)));
+    }
+    let space = SEND_BUF_CAP.saturating_sub(tcb.send_buf.len());
+    if space == 0 {
+        st.write_waker = Some(cx.waker().clone());
+        return Poll::Pending;
+    }
+    let n = buf.len().min(space);
+    st.tcb
+        .as_mut()
+        .unwrap()
+        .send_buf
+        .extend_from_slice(&buf[..n]);
+    Poll::Ready(Ok(n))
+}
+
+/// Drain bytes from the socket's `recv_buf` into `buf`. Returns
+/// `Pending` (parking `read_waker`) when the buffer is empty. An ACK
+/// is emitted afterward if the drain opened enough window to be worth
+/// advertising — avoids silly-window syndrome on tiny reads.
+pub(super) fn poll_read(
+    k: &mut Kernel,
+    fd: Fd,
+    cx: &mut Context<'_>,
+    buf: &mut [u8],
+) -> Poll<Result<usize>> {
+    let (n, should_update_window, local, remote) = {
+        let st = match k.lookup_mut(fd) {
+            Ok(st) => st,
+            Err(e) => return Poll::Ready(Err(e)),
+        };
+        // Inspect without holding a borrow across the mutable ops.
+        let (empty, established, peer) = match st.tcb.as_ref() {
+            None => return Poll::Ready(Err(Error::from(ErrorKind::NotConnected))),
+            Some(t) => (
+                t.recv_buf.is_empty(),
+                t.state == TcpState::Established,
+                t.peer,
+            ),
+        };
+        if empty {
+            if !established {
+                return Poll::Ready(Err(Error::from(ErrorKind::NotConnected)));
+            }
+            st.read_waker = Some(cx.waker().clone());
+            return Poll::Pending;
+        }
+        let local = bound_endpoint(st);
+        let tcb = st.tcb.as_mut().unwrap();
+        let n = tcb.recv_buf.len().min(buf.len());
+        let drained = tcb.recv_buf.split_to(n);
+        buf[..n].copy_from_slice(&drained);
+        // Window-update trigger: if we freed ≥ half the recv cap,
+        // advertise. Crude SWS avoidance; refine alongside real flow
+        // control.
+        let should_update = n >= RECV_BUF_CAP / 2;
+        (n, should_update, local, peer)
+    };
+
+    if should_update_window {
+        let (snd_nxt, rcv_nxt, window) = {
+            let tcb = k.lookup(fd).unwrap().tcb.as_ref().unwrap();
+            (
+                tcb.snd_nxt,
+                tcb.rcv_nxt,
+                advertised_window(tcb.recv_buf.len()),
+            )
+        };
+        emit(
+            k,
+            local,
+            remote,
+            TcpSegment {
+                src_port: local.port(),
+                dst_port: remote.port(),
+                seq: snd_nxt,
+                ack: rcv_nxt,
+                flags: TcpFlags {
+                    ack: true,
+                    ..TcpFlags::default()
+                },
+                window,
+                payload: Bytes::new(),
+            },
+        );
+    }
+
+    Poll::Ready(Ok(n))
+}
+
+/// Sweep all established TCP sockets and chop queued bytes (the tail of
+/// `send_buf` past `snd_nxt - snd_una`) into MSS-sized segments bounded
+/// by the peer's advertised window. Invoked by `egress` before the
+/// outbound drain, so newly-segmented packets ride the same pump that
+/// handles UDP and handshake traffic.
+pub(super) fn segment_all(k: &mut Kernel) {
+    let candidates: Vec<Fd> = k
+        .sockets
+        .iter()
+        .filter(|(_, s)| {
+            s.tcb
+                .as_ref()
+                .map(|t| {
+                    t.state == TcpState::Established
+                        && t.send_buf.len() > (t.snd_nxt.wrapping_sub(t.snd_una)) as usize
+                })
+                .unwrap_or(false)
+        })
+        .map(|(fd, _)| fd)
+        .collect();
+
+    for fd in candidates {
+        segment_one(k, fd);
+    }
+}
+
+fn segment_one(k: &mut Kernel, fd: Fd) {
+    let local = {
+        let st = k.lookup(fd).unwrap();
+        bound_endpoint(st)
+    };
+    let mss = mss_for(k, local.ip());
+
+    loop {
+        let (seq, payload) = {
+            let tcb = k.lookup_mut(fd).unwrap().tcb.as_mut().unwrap();
+            let in_flight = tcb.snd_nxt.wrapping_sub(tcb.snd_una) as usize;
+            let unsent = tcb.send_buf.len().saturating_sub(in_flight);
+            if unsent == 0 {
+                return;
+            }
+            let wnd_remaining = (tcb.snd_wnd as usize).saturating_sub(in_flight);
+            if wnd_remaining == 0 {
+                return;
+            }
+            let n = unsent.min(mss).min(wnd_remaining);
+            let start = in_flight;
+            let end = start + n;
+            let payload = Bytes::copy_from_slice(&tcb.send_buf[start..end]);
+            let seq = tcb.snd_nxt;
+            tcb.snd_nxt = tcb.snd_nxt.wrapping_add(n as u32);
+            (seq, payload)
+        };
+        let remote = k.lookup(fd).unwrap().tcb.as_ref().unwrap().peer;
+        let window = {
+            let tcb = k.lookup(fd).unwrap().tcb.as_ref().unwrap();
+            advertised_window(tcb.recv_buf.len())
+        };
+        emit(
+            k,
+            local,
+            remote,
+            TcpSegment {
+                src_port: local.port(),
+                dst_port: remote.port(),
+                seq,
+                ack: k.lookup(fd).unwrap().tcb.as_ref().unwrap().rcv_nxt,
+                flags: TcpFlags {
+                    ack: true,
+                    psh: true,
+                    ..TcpFlags::default()
+                },
+                window,
+                payload,
+            },
+        );
+    }
+}
+
+/// Maximum TCP payload for a segment leaving `src_ip`. Mirrors the UDP
+/// MTU math: pick the right MTU (loopback vs. external), subtract IP +
+/// TCP headers.
+fn mss_for(k: &Kernel, src_ip: IpAddr) -> usize {
+    let ip_hdr = match src_ip {
+        IpAddr::V4(_) => packet::IPV4_HEADER_SIZE as u32,
+        IpAddr::V6(_) => packet::IPV6_HEADER_SIZE as u32,
+    };
+    let mtu = if src_ip.is_loopback() {
+        k.loopback_mtu
+    } else {
+        k.mtu
+    };
+    mtu.saturating_sub(ip_hdr)
+        .saturating_sub(packet::TCP_HEADER_SIZE as u32) as usize
+}
+
+/// Pull the local endpoint for an established socket — wildcard binds
+/// never reach here (the handshake path concretizes the source IP
+/// before inserting into the TCB).
+fn bound_endpoint(st: &Socket) -> SocketAddr {
+    let bind = st.bound.as_ref().expect("bound at handshake time");
+    SocketAddr::new(bind.local_addr, bind.local_port)
+}
+
+fn advertised_window(recv_buf_len: usize) -> u16 {
+    RECV_BUF_CAP
+        .saturating_sub(recv_buf_len)
+        .min(u16::MAX as usize) as u16
 }
 
 const DEFAULT_WINDOW: u16 = 65535;

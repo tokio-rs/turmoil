@@ -9,10 +9,22 @@ use std::path::PathBuf;
 use std::task::Waker;
 use std::time::Duration;
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 
 /// Linux default `ip_local_port_range`.
 pub const DEFAULT_EPHEMERAL_PORTS: RangeInclusive<u16> = 49152..=65535;
+
+/// Per-socket TCP send buffer cap (bytes). Bounds the sum of
+/// queued-but-unsent and sent-but-unACK'd data, matching Linux
+/// `SO_SNDBUF` semantics.
+///
+/// TODO: move to a `KernelBuilder` (along with `RECV_BUF_CAP` and MTU)
+/// so tests can drive backpressure behavior without patching the const.
+pub const SEND_BUF_CAP: usize = 64 * 1024;
+
+/// Per-socket TCP receive buffer cap (bytes). Advertised as the TCP
+/// window in outgoing segments.
+pub const RECV_BUF_CAP: usize = 64 * 1024;
 
 /// Communication domain — POSIX `socket(2)`'s first argument.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -149,17 +161,34 @@ pub enum TcpState {
 
 /// TCP control block. Present on a socket once it's paired with a peer
 /// (either via `connect` or `accept`). Mirrors the subset of fields a
-/// real TCB needs for the pieces we model today; send/recv buffers,
-/// unacked-segment tracking, and close-state bookkeeping come later.
+/// real TCB needs for the pieces we model today; close-state
+/// bookkeeping (`FIN`/`RST` states, `TIME-WAIT`) comes later.
+///
+/// `send_buf` layout — `[already-ACK'd drained | in-flight | queued]`:
+/// - Bytes 0..(snd_nxt - snd_una) are on the wire, unACK'd. Kept so we
+///   could retransmit, though v1's fabric is reliable.
+/// - Bytes (snd_nxt - snd_una).. are queued for the next egress pass.
+/// - ACK'd bytes are `advance()`d off the front.
 #[derive(Debug)]
 pub struct Tcb {
     pub state: TcpState,
     /// Remote endpoint. Mirrored in `Socket::peer` for UDP parity.
     pub peer: SocketAddr,
-    /// Next sequence number we'll send.
+    /// Next sequence number we'll send (advances as egress chops and
+    /// emits segments).
     pub snd_nxt: u32,
+    /// Oldest unACK'd sequence number. `snd_nxt - snd_una` == in-flight.
+    pub snd_una: u32,
+    /// Peer's last-advertised receive window, in bytes. Bounds how far
+    /// beyond `snd_una` we're allowed to push `snd_nxt` before pausing.
+    pub snd_wnd: u16,
     /// Next sequence number we expect to receive.
     pub rcv_nxt: u32,
+    /// Outgoing byte queue — see type-level doc for layout.
+    pub send_buf: BytesMut,
+    /// Incoming byte queue. App drains via `poll_read`; advertised
+    /// window shrinks as this fills.
+    pub recv_buf: BytesMut,
 }
 
 /// Listener state. Attached to a socket by `listen(2)`.
@@ -214,6 +243,12 @@ pub struct Socket {
     pub listen: Option<ListenState>,
     /// Waker for a `connect` parked in `SynSent` waiting for SYN-ACK.
     pub connect_waker: Option<Waker>,
+    /// Waker for `poll_read` parked on an empty `recv_buf`. Fired when
+    /// bytes arrive via `deliver`, or when FIN closes the read side.
+    pub read_waker: Option<Waker>,
+    /// Waker for `poll_write` parked on a full `send_buf`. Fired when
+    /// ACK drains in-flight bytes and frees capacity.
+    pub write_waker: Option<Waker>,
 }
 
 impl Socket {
@@ -230,6 +265,8 @@ impl Socket {
             tcb: None,
             listen: None,
             connect_waker: None,
+            read_waker: None,
+            write_waker: None,
         }
     }
 
