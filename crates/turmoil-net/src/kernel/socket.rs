@@ -86,7 +86,11 @@ pub enum SocketOption {
     KeepAlive(bool),
 
     // ---- IPPROTO_TCP ----
-    /// `TCP_NODELAY`. stored (Nagle is not modeled).
+    /// `TCP_NODELAY`. stored — we don't model Nagle at all (every
+    /// `poll_write` copies to `send_buf`, `segment_all` emits
+    /// immediately), so this round-trips without affecting traffic.
+    /// TODO: if we ever model Nagle, gate segmentation on `!nodelay`
+    /// and coalesce sub-MSS payloads the way real TCP does.
     TcpNoDelay(bool),
     /// `TCP_KEEPIDLE`. simulated (idle time before first keepalive probe).
     TcpKeepIdle(Duration),
@@ -270,6 +274,10 @@ pub struct Socket {
     pub broadcast: bool,
     /// `IP_TTL` — stored only; not applied to simulated packets yet.
     pub ttl: u8,
+    /// `TCP_NODELAY` — stored only. We don't model Nagle at all, so
+    /// reading it back round-trips whatever the app set. See the
+    /// `TcpNoDelay` variant on [`SocketOption`] for the TODO.
+    pub tcp_nodelay: bool,
     /// Datagrams queued for this socket, in arrival order. Only UDP
     /// populates this today. Bounded by `SO_RCVBUF` later.
     pub recv_queue: VecDeque<(Addr, Bytes)>,
@@ -307,6 +315,7 @@ impl Socket {
             peer: None,
             broadcast: false,
             ttl: 64,
+            tcp_nodelay: false,
             recv_queue: VecDeque::new(),
             recv_wakers: Vec::new(),
             tcb: None,

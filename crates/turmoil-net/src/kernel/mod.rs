@@ -302,6 +302,7 @@ impl Kernel {
         match opt {
             SocketOption::Broadcast(v) => st.broadcast = v,
             SocketOption::IpTtl(v) => st.ttl = v,
+            SocketOption::TcpNoDelay(v) => st.tcp_nodelay = v,
             _ => unimplemented!("set_option {:?}", opt),
         }
         Ok(())
@@ -313,6 +314,7 @@ impl Kernel {
         Ok(match kind {
             SocketOptionKind::Broadcast => SocketOption::Broadcast(st.broadcast),
             SocketOptionKind::IpTtl => SocketOption::IpTtl(st.ttl),
+            SocketOptionKind::TcpNoDelay => SocketOption::TcpNoDelay(st.tcp_nodelay),
             _ => unimplemented!("get_option {:?}", kind),
         })
     }
@@ -454,7 +456,9 @@ impl Kernel {
         Poll::Pending
     }
 
-    /// `send(2)` — for connected sockets.
+    /// `send(2)` for connected sockets. UDP: resolves the stored peer
+    /// and delegates to `sendto`. TCP: copies into `send_buf` and
+    /// lets `egress` segment and emit.
     pub fn poll_send(
         &mut self,
         fd: Fd,
@@ -465,67 +469,24 @@ impl Kernel {
             Ok(st) => (st.ty, st.peer.clone()),
             Err(e) => return Poll::Ready(Err(e)),
         };
-        assert_eq!(ty, Type::Dgram, "poll_send on non-Dgram fd");
-        let Some(peer) = peer else {
-            return Poll::Ready(Err(Error::from(ErrorKind::NotConnected)));
-        };
-        let Addr::Inet(peer_sa) = peer else {
-            panic!("UDP peer stored as Addr::Unix");
-        };
-        udp::send_to(self, fd, cx, buf, &peer_sa)
+        match ty {
+            Type::Dgram => {
+                let Some(peer) = peer else {
+                    return Poll::Ready(Err(Error::from(ErrorKind::NotConnected)));
+                };
+                let Addr::Inet(peer_sa) = peer else {
+                    panic!("UDP peer stored as Addr::Unix");
+                };
+                udp::send_to(self, fd, cx, buf, &peer_sa)
+            }
+            Type::Stream => tcp::poll_send(self, fd, cx, buf),
+            Type::SeqPacket => unimplemented!("SOCK_SEQPACKET poll_send"),
+        }
     }
 
-    /// `recv(2)` — for connected sockets.
+    /// `recv(2)` for connected sockets. UDP: pops one datagram into
+    /// `buf`. TCP: drains from `recv_buf`.
     pub fn poll_recv(
-        &mut self,
-        fd: Fd,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        let st = match self.lookup_mut(fd) {
-            Ok(st) => st,
-            Err(e) => return Poll::Ready(Err(e)),
-        };
-        assert_eq!(st.ty, Type::Dgram, "poll_recv on non-Dgram fd");
-        udp::recv(st, cx, buf)
-    }
-
-    /// `send(2)` for TCP. Copies bytes into the socket's send buffer
-    /// and returns the count; actual wire emit happens during `egress`
-    /// via TCP segmentation. Returns `Pending` only when the send
-    /// buffer is full.
-    pub fn poll_write(
-        &mut self,
-        fd: Fd,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<std::io::Result<usize>> {
-        let ty = match self.lookup(fd) {
-            Ok(st) => st.ty,
-            Err(e) => return Poll::Ready(Err(e)),
-        };
-        assert_eq!(ty, Type::Stream, "poll_write on non-Stream fd");
-        tcp::poll_write(self, fd, cx, buf)
-    }
-
-    /// `shutdown(SHUT_WR)` for TCP. Queues a FIN behind any buffered
-    /// data. Poll shape for symmetry with `poll_write`; the
-    /// implementation is synchronous today.
-    pub fn poll_shutdown_write(
-        &mut self,
-        fd: Fd,
-        cx: &mut Context<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        let ty = match self.lookup(fd) {
-            Ok(st) => st.ty,
-            Err(e) => return Poll::Ready(Err(e)),
-        };
-        assert_eq!(ty, Type::Stream, "poll_shutdown_write on non-Stream fd");
-        tcp::poll_shutdown_write(self, fd, cx)
-    }
-
-    /// `recv(2)` for TCP. Drains from the socket's receive buffer.
-    pub fn poll_read(
         &mut self,
         fd: Fd,
         cx: &mut Context<'_>,
@@ -535,8 +496,39 @@ impl Kernel {
             Ok(st) => st.ty,
             Err(e) => return Poll::Ready(Err(e)),
         };
-        assert_eq!(ty, Type::Stream, "poll_read on non-Stream fd");
-        tcp::poll_read(self, fd, cx, buf)
+        match ty {
+            Type::Dgram => {
+                let st = self.lookup_mut(fd).expect("fd validated");
+                let mut rb = ReadBuf::new(buf);
+                match udp::recv(st, cx, &mut rb) {
+                    Poll::Ready(Ok(())) => Poll::Ready(Ok(rb.filled().len())),
+                    Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+                    Poll::Pending => Poll::Pending,
+                }
+            }
+            Type::Stream => tcp::poll_recv(self, fd, cx, buf),
+            Type::SeqPacket => unimplemented!("SOCK_SEQPACKET poll_recv"),
+        }
+    }
+
+    /// `shutdown(SHUT_WR)`. TCP-only in practice; UDP sockets have no
+    /// FIN to send. Kernel-level shutdown-read isn't exposed because
+    /// tokio's API doesn't carry the idea (see `TcpStream` docs).
+    pub fn poll_shutdown_write(
+        &mut self,
+        fd: Fd,
+        cx: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let ty = match self.lookup(fd) {
+            Ok(st) => st.ty,
+            Err(e) => return Poll::Ready(Err(e)),
+        };
+        match ty {
+            Type::Stream => tcp::poll_shutdown_write(self, fd, cx),
+            Type::Dgram | Type::SeqPacket => {
+                unimplemented!("poll_shutdown_write on non-Stream fd")
+            }
+        }
     }
 
     /// `recvfrom(2)` with `MSG_PEEK`. Like [`Self::poll_recv_from`] but
@@ -555,17 +547,31 @@ impl Kernel {
         udp::peek_from(st, cx, buf)
     }
 
-    /// `recv(2)` with `MSG_PEEK` — connected-socket peek.
+    /// `recv(2)` with `MSG_PEEK` — connected-socket peek. UDP returns
+    /// the next datagram without consuming it; TCP returns buffered
+    /// bytes without draining.
     pub fn poll_peek(
         &mut self,
         fd: Fd,
         cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        match self.poll_peek_from(fd, cx, buf) {
-            Poll::Ready(Ok(_)) => Poll::Ready(Ok(())),
-            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
-            Poll::Pending => Poll::Pending,
+        buf: &mut [u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let ty = match self.lookup(fd) {
+            Ok(st) => st.ty,
+            Err(e) => return Poll::Ready(Err(e)),
+        };
+        match ty {
+            Type::Dgram => {
+                let st = self.lookup_mut(fd).expect("fd validated");
+                let mut rb = ReadBuf::new(buf);
+                match udp::peek_from(st, cx, &mut rb) {
+                    Poll::Ready(Ok(_)) => Poll::Ready(Ok(rb.filled().len())),
+                    Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+                    Poll::Pending => Poll::Pending,
+                }
+            }
+            Type::Stream => tcp::poll_peek(self, fd, cx, buf),
+            Type::SeqPacket => unimplemented!("SOCK_SEQPACKET poll_peek"),
         }
     }
 

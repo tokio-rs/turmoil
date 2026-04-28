@@ -1,15 +1,11 @@
 //! Drop-in replacements for [`tokio::net::TcpListener`] and
 //! [`tokio::net::TcpStream`].
-//!
-//! `TcpListener` surface is complete; `TcpStream` supports connect,
-//! read, and write. Shutdown / FIN handling is still a follow-up —
-//! `poll_shutdown` is a no-op.
 
 use std::future::poll_fn;
 use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, Waker};
 
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
@@ -104,6 +100,64 @@ impl TcpStream {
         }
     }
 
+    /// Non-blocking read. Returns `WouldBlock` when `recv_buf` is
+    /// empty and the connection is still open.
+    pub fn try_read(&self, buf: &mut [u8]) -> io::Result<usize> {
+        match sys(|k| k.poll_recv(self.fd, &mut noop_cx(), buf)) {
+            Poll::Ready(r) => r,
+            Poll::Pending => Err(io::ErrorKind::WouldBlock.into()),
+        }
+    }
+
+    /// Non-blocking write. Returns `WouldBlock` when `send_buf` is at
+    /// cap (the peer hasn't drained enough to make room).
+    pub fn try_write(&self, buf: &[u8]) -> io::Result<usize> {
+        match sys(|k| k.poll_send(self.fd, &mut noop_cx(), buf)) {
+            Poll::Ready(r) => r,
+            Poll::Pending => Err(io::ErrorKind::WouldBlock.into()),
+        }
+    }
+
+    /// Async peek — returns buffered bytes without draining `recv_buf`.
+    /// Callers typically use this to sniff a protocol prefix (TLS
+    /// ClientHello, HTTP/2 preface) without committing to a specific
+    /// parser.
+    pub async fn peek(&self, buf: &mut [u8]) -> io::Result<usize> {
+        poll_fn(|cx| sys(|k| k.poll_peek(self.fd, cx, buf))).await
+    }
+
+    pub fn set_ttl(&self, ttl: u32) -> io::Result<()> {
+        let ttl: u8 = ttl
+            .try_into()
+            .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+        sys(|k| k.set_option(self.fd, SocketOption::IpTtl(ttl)))
+    }
+
+    pub fn ttl(&self) -> io::Result<u32> {
+        match sys(|k| k.get_option(self.fd, SocketOptionKind::IpTtl))? {
+            SocketOption::IpTtl(v) => Ok(v as u32),
+            _ => unreachable!(),
+        }
+    }
+
+    /// Set `TCP_NODELAY`. Round-trips for API parity but has no
+    /// effect on simulated traffic — we never model Nagle, so every
+    /// write goes out at the next `egress` pass regardless. See the
+    /// `TcpNoDelay` variant of `SocketOption` for the follow-up TODO.
+    pub fn set_nodelay(&self, nodelay: bool) -> io::Result<()> {
+        sys(|k| k.set_option(self.fd, SocketOption::TcpNoDelay(nodelay)))
+    }
+
+    pub fn nodelay(&self) -> io::Result<bool> {
+        match sys(|k| k.get_option(self.fd, SocketOptionKind::TcpNoDelay))? {
+            SocketOption::TcpNoDelay(v) => Ok(v),
+            _ => unreachable!(),
+        }
+    }
+}
+
+fn noop_cx() -> Context<'static> {
+    Context::from_waker(Waker::noop())
 }
 
 impl Drop for TcpStream {
@@ -120,7 +174,7 @@ impl AsyncRead for TcpStream {
     ) -> Poll<io::Result<()>> {
         let fd = self.fd;
         let unfilled = buf.initialize_unfilled();
-        match sys(|k| k.poll_read(fd, cx, unfilled)) {
+        match sys(|k| k.poll_recv(fd, cx, unfilled)) {
             Poll::Ready(Ok(n)) => {
                 buf.advance(n);
                 Poll::Ready(Ok(()))
@@ -138,7 +192,7 @@ impl AsyncWrite for TcpStream {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         let fd = self.fd;
-        sys(|k| k.poll_write(fd, cx, buf))
+        sys(|k| k.poll_send(fd, cx, buf))
     }
 
     /// No-op — bytes are copied into the kernel's send buffer in

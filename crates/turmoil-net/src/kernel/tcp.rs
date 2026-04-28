@@ -773,7 +773,7 @@ fn initial_sequence(k: &mut Kernel) -> u32 {
 /// capacity. Returns `Pending` (parking `write_waker`) when the buffer
 /// is already full. Segmentation and the actual wire emit happen later,
 /// in `segment_all` during `egress`.
-pub(super) fn poll_write(
+pub(super) fn poll_send(
     k: &mut Kernel,
     fd: Fd,
     cx: &mut Context<'_>,
@@ -851,7 +851,7 @@ pub(super) fn poll_shutdown_write(
 /// `Pending` (parking `read_waker`) when the buffer is empty. An ACK
 /// is emitted afterward if the drain opened enough window to be worth
 /// advertising — avoids silly-window syndrome on tiny reads.
-pub(super) fn poll_read(
+pub(super) fn poll_recv(
     k: &mut Kernel,
     fd: Fd,
     cx: &mut Context<'_>,
@@ -936,6 +936,45 @@ pub(super) fn poll_read(
         );
     }
 
+    Poll::Ready(Ok(n))
+}
+
+/// Like [`poll_read`] but leaves `recv_buf` intact. No window update
+/// is emitted — we haven't actually freed any buffer space.
+pub(super) fn poll_peek(
+    k: &mut Kernel,
+    fd: Fd,
+    cx: &mut Context<'_>,
+    buf: &mut [u8],
+) -> Poll<Result<usize>> {
+    let st = match k.lookup_mut(fd) {
+        Ok(st) => st,
+        Err(e) => return Poll::Ready(Err(e)),
+    };
+    let Some(tcb) = st.tcb.as_ref() else {
+        return Poll::Ready(Err(Error::from(ErrorKind::NotConnected)));
+    };
+    if tcb.reset {
+        return Poll::Ready(Err(Error::from(ErrorKind::ConnectionReset)));
+    }
+    if tcb.recv_buf.is_empty() {
+        if tcb.peer_fin {
+            return Poll::Ready(Ok(0));
+        }
+        if !matches!(
+            tcb.state,
+            TcpState::Established
+                | TcpState::FinWait1
+                | TcpState::FinWait2
+                | TcpState::CloseWait
+        ) {
+            return Poll::Ready(Err(Error::from(ErrorKind::NotConnected)));
+        }
+        st.read_waker = Some(cx.waker().clone());
+        return Poll::Pending;
+    }
+    let n = tcb.recv_buf.len().min(buf.len());
+    buf[..n].copy_from_slice(&tcb.recv_buf[..n]);
     Poll::Ready(Ok(n))
 }
 

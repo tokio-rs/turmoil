@@ -67,15 +67,7 @@ impl UdpSocket {
     }
 
     pub async fn recv(&self, buf: &mut [u8]) -> io::Result<usize> {
-        poll_fn(|cx| {
-            let mut rb = ReadBuf::new(buf);
-            match sys(|k| k.poll_recv(self.fd, cx, &mut rb)) {
-                Poll::Ready(Ok(())) => Poll::Ready(Ok(rb.filled().len())),
-                Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
-                Poll::Pending => Poll::Pending,
-            }
-        })
-        .await
+        poll_fn(|cx| sys(|k| k.poll_recv(self.fd, cx, buf))).await
     }
 
     pub async fn peek_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
@@ -102,10 +94,8 @@ impl UdpSocket {
     }
 
     pub fn try_recv(&self, buf: &mut [u8]) -> io::Result<usize> {
-        let mut rb = ReadBuf::new(buf);
-        match sys(|k| k.poll_recv(self.fd, &mut noop_cx(), &mut rb)) {
-            Poll::Ready(Ok(())) => Ok(rb.filled().len()),
-            Poll::Ready(Err(e)) => Err(e),
+        match sys(|k| k.poll_recv(self.fd, &mut noop_cx(), buf)) {
+            Poll::Ready(r) => r,
             Poll::Pending => Err(io::ErrorKind::WouldBlock.into()),
         }
     }

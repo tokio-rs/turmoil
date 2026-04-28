@@ -340,6 +340,65 @@ async fn tcp_inbound_rst_wakes_parked_read() {
 }
 
 #[tokio::test]
+async fn tcp_stream_options_roundtrip() {
+    let _guard = Net::new().enter();
+    let listener = TcpListener::bind("127.0.0.1:8600").await.unwrap();
+    let accept = tokio::spawn(async move { listener.accept().await });
+    let connect = tokio::spawn(TcpStream::connect("127.0.0.1:8600"));
+    step_n(8).await;
+    let client = connect.await.unwrap().unwrap();
+    let (_server, _) = accept.await.unwrap().unwrap();
+
+    assert_eq!(client.ttl().unwrap(), 64);
+    client.set_ttl(16).unwrap();
+    assert_eq!(client.ttl().unwrap(), 16);
+
+    assert!(!client.nodelay().unwrap());
+    client.set_nodelay(true).unwrap();
+    assert!(client.nodelay().unwrap());
+}
+
+#[tokio::test]
+async fn tcp_try_read_would_block_on_empty() {
+    let _guard = Net::new().enter();
+    let listener = TcpListener::bind("127.0.0.1:8700").await.unwrap();
+    let accept = tokio::spawn(async move { listener.accept().await });
+    let connect = tokio::spawn(TcpStream::connect("127.0.0.1:8700"));
+    step_n(8).await;
+    let client = connect.await.unwrap().unwrap();
+    let (_server, _) = accept.await.unwrap().unwrap();
+
+    let mut buf = [0u8; 8];
+    assert_eq!(
+        client.try_read(&mut buf).unwrap_err().kind(),
+        ErrorKind::WouldBlock
+    );
+}
+
+#[tokio::test]
+async fn tcp_peek_leaves_data_for_read() {
+    let _guard = Net::new().enter();
+    let listener = TcpListener::bind("127.0.0.1:8800").await.unwrap();
+    let accept = tokio::spawn(async move { listener.accept().await });
+    let connect = tokio::spawn(TcpStream::connect("127.0.0.1:8800"));
+    step_n(8).await;
+    let mut client = connect.await.unwrap().unwrap();
+    let (mut server, _) = accept.await.unwrap().unwrap();
+
+    client.write_all(b"PING").await.unwrap();
+    step_n(8).await;
+
+    let mut p = [0u8; 4];
+    let n = server.peek(&mut p).await.unwrap();
+    assert_eq!(&p[..n], b"PING");
+
+    // Same bytes still there for a real read.
+    let mut r = [0u8; 4];
+    server.read_exact(&mut r).await.unwrap();
+    assert_eq!(&r, b"PING");
+}
+
+#[tokio::test]
 async fn tcp_listener_ttl_roundtrips() {
 
     let _guard = Net::new().enter();
