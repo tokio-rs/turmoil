@@ -18,11 +18,6 @@ use crate::shim::tokio::net::addr::sealed::Sealed;
 use crate::shim::tokio::net::ToSocketAddrs;
 use crate::sys;
 
-/// Matches Linux's `SOMAXCONN` default — we don't enforce it, but we
-/// pick a sensible value when the caller doesn't specify one via
-/// `listen()`.
-const DEFAULT_BACKLOG: usize = 1024;
-
 pub struct TcpListener {
     fd: Fd,
 }
@@ -31,8 +26,9 @@ impl TcpListener {
     pub async fn bind<A: ToSocketAddrs>(addr: A) -> io::Result<Self> {
         let addr = Sealed::to_socket_addr(&addr)?;
         let fd = sys(|k| {
+            let backlog = k.default_backlog;
             let fd = k.bind(&Addr::Inet(addr), Type::Stream)?;
-            k.listen(fd, DEFAULT_BACKLOG)?;
+            k.listen(fd, backlog)?;
             Ok::<_, io::Error>(fd)
         })?;
         Ok(Self { fd })
@@ -107,6 +103,7 @@ impl TcpStream {
             Addr::Unix(_) => panic!("TcpStream is Addr::Inet"),
         }
     }
+
 }
 
 impl Drop for TcpStream {
@@ -151,11 +148,9 @@ impl AsyncWrite for TcpStream {
         Poll::Ready(Ok(()))
     }
 
-    /// TODO: emit FIN and transition through the close states. For v1
-    /// this just reports success — callers that rely on half-close
-    /// semantics will notice the absence once we add FIN.
-    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Poll::Ready(Ok(()))
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let fd = self.fd;
+        sys(|k| k.poll_shutdown_write(fd, cx))
     }
 }
 

@@ -14,17 +14,15 @@ use bytes::{Bytes, BytesMut};
 /// Linux default `ip_local_port_range`.
 pub const DEFAULT_EPHEMERAL_PORTS: RangeInclusive<u16> = 49152..=65535;
 
-/// Per-socket TCP send buffer cap (bytes). Bounds the sum of
+/// Default per-socket TCP send buffer cap (bytes). Bounds the sum of
 /// queued-but-unsent and sent-but-unACK'd data, matching Linux
-/// `SO_SNDBUF` semantics.
-///
-/// TODO: move to a `KernelBuilder` (along with `RECV_BUF_CAP` and MTU)
-/// so tests can drive backpressure behavior without patching the const.
-pub const SEND_BUF_CAP: usize = 64 * 1024;
+/// `SO_SNDBUF` semantics. Overridable via [`KernelConfig`].
+pub const DEFAULT_SEND_BUF_CAP: usize = 64 * 1024;
 
-/// Per-socket TCP receive buffer cap (bytes). Advertised as the TCP
-/// window in outgoing segments.
-pub const RECV_BUF_CAP: usize = 64 * 1024;
+/// Default per-socket TCP receive buffer cap (bytes). Advertised as
+/// the TCP window in outgoing segments. Overridable via
+/// [`KernelConfig`].
+pub const DEFAULT_RECV_BUF_CAP: usize = 64 * 1024;
 
 /// Communication domain — POSIX `socket(2)`'s first argument.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -150,13 +148,43 @@ pub enum SocketOptionKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Fd(u64);
 
-/// TCP connection state. Only the states v1 needs — close states
-/// (`FinWait*`, `CloseWait`, `TimeWait`, etc.) come with `shutdown`.
+/// TCP connection state.
+///
+/// We intentionally skip `TimeWait` and go straight from
+/// `FinWait2`/`LastAck` to `Closed`. Its two jobs in real TCP — late-
+/// duplicate protection on 4-tuple reuse and re-ACKing a retransmitted
+/// FIN — only matter on an unreliable transport. The simulated fabric
+/// doesn't lose or duplicate packets, and we have no simulated clock
+/// to run a 2×MSL timer against.
+///
+/// Once the fabric grows drop/duplicate faults or a virtual clock,
+/// revisit this: `TimeWait` is additive (new state + timer) and won't
+/// break existing transitions. The other user-visible effect — that
+/// `bind()` to a recently-closed 4-tuple returns `EADDRINUSE` without
+/// `SO_REUSEADDR` — isn't modeled either, and can be bolted on via a
+/// "recently closed" bit on the bind table without a full state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TcpState {
     SynSent,
     SynReceived,
     Established,
+    /// We sent FIN, waiting for its ACK and/or the peer's FIN. From
+    /// here either `FinWait2` (peer ACK'd our FIN) or `Closing` (peer
+    /// sent FIN before ACKing ours).
+    FinWait1,
+    /// Peer ACK'd our FIN; still waiting for the peer's FIN.
+    FinWait2,
+    /// Peer sent FIN; we've ACK'd it and may still write until the app
+    /// calls `shutdown(Write)` or closes.
+    CloseWait,
+    /// Both sides have sent FIN; we're waiting for the peer's ACK of
+    /// ours.
+    LastAck,
+    /// Simultaneous close — we sent FIN, then received theirs before
+    /// ours was ACK'd. Waiting for our FIN's ACK.
+    Closing,
+    /// Terminal. Resources can be reaped.
+    Closed,
 }
 
 /// TCP control block. Present on a socket once it's paired with a peer
@@ -189,6 +217,19 @@ pub struct Tcb {
     /// Incoming byte queue. App drains via `poll_read`; advertised
     /// window shrinks as this fills.
     pub recv_buf: BytesMut,
+    /// App has closed the write side (FIN sent). Further `poll_write`
+    /// calls return `BrokenPipe`.
+    pub wr_closed: bool,
+    /// Peer has sent FIN. Readers see `Ready(0)` after `recv_buf`
+    /// drains.
+    pub peer_fin: bool,
+    /// Sequence number occupied by our FIN — ACK of `fin_seq + 1`
+    /// confirms the peer received it. `None` until we emit FIN.
+    pub fin_seq: Option<u32>,
+    /// Connection was aborted by a RST (sent or received). Further ops
+    /// return `ConnectionReset`; distinguishes the error from a clean
+    /// `Closed` transition.
+    pub reset: bool,
 }
 
 /// Listener state. Attached to a socket by `listen(2)`.
@@ -249,6 +290,12 @@ pub struct Socket {
     /// Waker for `poll_write` parked on a full `send_buf`. Fired when
     /// ACK drains in-flight bytes and frees capacity.
     pub write_waker: Option<Waker>,
+    /// The shim dropped its `Fd` handle, but the kernel is still
+    /// draining queued bytes / FIN / waiting for a final ACK. The
+    /// socket is reaped from the table once TCP reaches a terminal
+    /// state. Behaves like Linux's `close(2)` — returns immediately
+    /// but the kernel keeps running the state machine.
+    pub fd_closed: bool,
 }
 
 impl Socket {
@@ -267,6 +314,7 @@ impl Socket {
             connect_waker: None,
             read_waker: None,
             write_waker: None,
+            fd_closed: false,
         }
     }
 

@@ -11,6 +11,7 @@ pub(crate) mod kernel;
 pub mod shim;
 
 use crate::kernel::Kernel;
+pub use crate::kernel::KernelConfig;
 
 thread_local! {
     static CURRENT: RefCell<Option<Net>> = const { RefCell::new(None) };
@@ -34,8 +35,15 @@ pub struct Net {
 
 impl Net {
     pub fn new() -> Self {
+        Self::with_config(KernelConfig::default())
+    }
+
+    /// Build a `Net` with non-default kernel limits (backlog, buffer
+    /// caps, MTU). Useful for tests that want to exercise backpressure
+    /// without pushing through hundreds of KiB of traffic.
+    pub fn with_config(cfg: KernelConfig) -> Self {
         Self {
-            current: Kernel::new(),
+            current: Kernel::with_config(cfg),
         }
     }
 

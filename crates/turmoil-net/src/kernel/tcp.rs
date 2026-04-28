@@ -19,9 +19,7 @@ use std::task::{Context, Poll};
 use bytes::{Bytes, BytesMut};
 
 use crate::kernel::packet::{self, Packet, TcpFlags, TcpSegment, Transport};
-use crate::kernel::socket::{
-    Addr, BindKey, Domain, Fd, Socket, Tcb, TcpState, Type, RECV_BUF_CAP, SEND_BUF_CAP,
-};
+use crate::kernel::socket::{Addr, BindKey, Domain, Fd, Socket, Tcb, TcpState, Type};
 use crate::kernel::Kernel;
 
 /// Drives `Kernel::poll_connect` for `SOCK_STREAM`. First poll builds a
@@ -44,6 +42,14 @@ pub(super) fn poll_connect(
                 park_connect(k, fd, cx);
                 Poll::Pending
             }
+            // Any close state mid-connect means the peer RST'd.
+            // Linux surfaces this as `ConnectionRefused`.
+            TcpState::Closed
+            | TcpState::FinWait1
+            | TcpState::FinWait2
+            | TcpState::CloseWait
+            | TcpState::LastAck
+            | TcpState::Closing => Poll::Ready(Err(Error::from(ErrorKind::ConnectionRefused))),
         };
     }
 
@@ -64,6 +70,10 @@ pub(super) fn poll_connect(
             rcv_nxt: 0,
             send_buf: BytesMut::new(),
             recv_buf: BytesMut::new(),
+            wr_closed: false,
+            peer_fin: false,
+            fin_seq: None,
+            reset: false,
         });
         st.peer = Some(Addr::Inet(peer));
     }
@@ -88,9 +98,7 @@ pub(super) fn poll_connect(
     Poll::Pending
 }
 
-/// Inbound TCP dispatch. For v1: SYN → listener → SynReceived + SYN-ACK;
-/// SYN-ACK → matching SynSent client → Established + ACK; ACK → matching
-/// SynReceived server → Established + push to listener backlog.
+/// Inbound TCP dispatch.
 pub(super) fn deliver(k: &mut Kernel, pkt: &Packet, s: &TcpSegment) {
     let local = SocketAddr::new(pkt.dst, s.dst_port);
     let remote = SocketAddr::new(pkt.src, s.src_port);
@@ -106,10 +114,52 @@ pub(super) fn deliver(k: &mut Kernel, pkt: &Packet, s: &TcpSegment) {
     if s.flags.syn && !s.flags.ack {
         if let Some(listener) = find_listener(k, local) {
             accept_syn(k, listener, local, remote, s);
+            return;
         }
-        // else: no listener → silently drop. RST-on-closed-port is a
-        // later polish pass.
+        // No listener at this port — reply with RST so the peer sees
+        // `ConnectionRefused` instead of timing out.
+        emit_rst(k, local, remote, s);
+        return;
     }
+
+    // Non-SYN to an unknown 4-tuple. RFC 793 says RST, unless the
+    // segment is itself a RST (that would be infinite ping-pong).
+    if !s.flags.rst {
+        emit_rst(k, local, remote, s);
+    }
+}
+
+/// Emit a RST in response to `s`. Follows RFC 793's ACK/SEQ rules:
+/// if the offending segment carried ACK, reflect `ack` as our `seq`
+/// and leave the RST unacked; otherwise set `ack = seq + segment_len`
+/// and flag ACK.
+fn emit_rst(k: &mut Kernel, local: SocketAddr, remote: SocketAddr, s: &TcpSegment) {
+    let (seq, ack, ack_flag) = if s.flags.ack {
+        (s.ack, 0, false)
+    } else {
+        let seg_len = s.payload.len() as u32
+            + if s.flags.syn { 1 } else { 0 }
+            + if s.flags.fin { 1 } else { 0 };
+        (0, s.seq.wrapping_add(seg_len), true)
+    };
+    emit(
+        k,
+        local,
+        remote,
+        TcpSegment {
+            src_port: local.port(),
+            dst_port: remote.port(),
+            seq,
+            ack,
+            flags: TcpFlags {
+                rst: true,
+                ack: ack_flag,
+                ..TcpFlags::default()
+            },
+            window: 0,
+            payload: Bytes::new(),
+        },
+    );
 }
 
 fn handle_on_connection(
@@ -119,6 +169,13 @@ fn handle_on_connection(
     remote: SocketAddr,
     s: &TcpSegment,
 ) {
+    // RST trumps all other processing. Tear the connection down and
+    // wake every parked task with ConnectionReset.
+    if s.flags.rst {
+        abort_connection(k, fd);
+        return;
+    }
+
     let state = k
         .lookup(fd)
         .expect("fd present")
@@ -129,12 +186,13 @@ fn handle_on_connection(
     match state {
         // Client received SYN-ACK. Move to Established and ACK.
         TcpState::SynSent if s.flags.syn && s.flags.ack => {
+            let recv_cap = k.recv_buf_cap;
             let (snd_nxt, rcv_nxt, window) = {
                 let tcb = k.lookup_mut(fd).unwrap().tcb.as_mut().unwrap();
                 tcb.state = TcpState::Established;
                 tcb.rcv_nxt = s.seq.wrapping_add(1);
                 tcb.snd_wnd = s.window;
-                (tcb.snd_nxt, tcb.rcv_nxt, advertised_window(0))
+                (tcb.snd_nxt, tcb.rcv_nxt, advertised_window(recv_cap, 0))
             };
             wake_connect(k, fd);
             emit(
@@ -169,17 +227,28 @@ fn handle_on_connection(
             }
             push_to_listener(k, fd, local);
         }
-        // Data / ACK on an open connection.
-        TcpState::Established => handle_established(k, fd, local, remote, s),
-        _ => {
-            // Anything else is out of scope for v1 (FIN, RST,
-            // duplicate SYN). Drop silently.
+        // Data / ACK / FIN on an open or half-closed connection.
+        TcpState::Established
+        | TcpState::FinWait1
+        | TcpState::FinWait2
+        | TcpState::CloseWait
+        | TcpState::Closing
+        | TcpState::LastAck => handle_established(k, fd, local, remote, s),
+        TcpState::Closed => {
+            // Socket is torn down but the TCB lingers until the shim
+            // drops its Fd. Ignore any late inbound traffic.
+        }
+        TcpState::SynSent | TcpState::SynReceived => {
+            // Handshake still in progress but segment doesn't match
+            // the expected SYN-ACK / ACK. Drop for v1 — RST-on-
+            // unexpected is a polish pass.
         }
     }
 }
 
-/// ACK processing, in-order data receipt, and waker plumbing. Out-of-
-/// order segments are dropped — v1's fabric is reliable.
+/// ACK processing, in-order data receipt, FIN handling, and waker
+/// plumbing. Out-of-order segments are dropped — v1's fabric is
+/// reliable.
 fn handle_established(
     k: &mut Kernel,
     fd: Fd,
@@ -190,6 +259,7 @@ fn handle_established(
     let mut write_waker = None;
     let mut read_waker = None;
     let mut send_ack = false;
+    let recv_cap = k.recv_buf_cap;
 
     {
         let st = k.lookup_mut(fd).unwrap();
@@ -202,8 +272,28 @@ fn handle_established(
             let acked = s.ack.wrapping_sub(tcb.snd_una);
             let in_flight = tcb.snd_nxt.wrapping_sub(tcb.snd_una);
             if acked > 0 && acked <= in_flight {
-                let _ = tcb.send_buf.split_to(acked as usize);
+                // FIN (if sent) sits at `fin_seq` and consumes one seq
+                // past the data. Don't try to drain buffer bytes for
+                // the FIN's byte.
+                let fin_acked = tcb
+                    .fin_seq
+                    .map(|fs| s.ack == fs.wrapping_add(1))
+                    .unwrap_or(false);
+                let data_bytes = if fin_acked { acked - 1 } else { acked };
+                if data_bytes > 0 {
+                    let _ = tcb.send_buf.split_to(data_bytes as usize);
+                }
                 tcb.snd_una = s.ack;
+
+                // Advance state machine on FIN-ACK.
+                if fin_acked {
+                    tcb.state = match tcb.state {
+                        TcpState::FinWait1 => TcpState::FinWait2,
+                        TcpState::Closing => TcpState::Closed,
+                        TcpState::LastAck => TcpState::Closed,
+                        other => other,
+                    };
+                }
             }
             tcb.snd_wnd = s.window;
             write_waker = st.write_waker.take();
@@ -212,14 +302,38 @@ fn handle_established(
         // Data: accept if it lands exactly at rcv_nxt and fits under
         // the receive cap. Gaps, overlaps, and overruns all drop.
         let tcb = st.tcb.as_mut().unwrap();
-        if !s.payload.is_empty() && s.seq == tcb.rcv_nxt {
-            let room = RECV_BUF_CAP.saturating_sub(tcb.recv_buf.len());
+        if !s.payload.is_empty() && s.seq == tcb.rcv_nxt && !tcb.peer_fin {
+            let room = recv_cap.saturating_sub(tcb.recv_buf.len());
             let n = s.payload.len().min(room);
             if n > 0 {
                 tcb.recv_buf.extend_from_slice(&s.payload[..n]);
                 tcb.rcv_nxt = tcb.rcv_nxt.wrapping_add(n as u32);
                 read_waker = st.read_waker.take();
                 send_ack = true;
+            }
+        }
+
+        // FIN: consumes one sequence number right after any payload.
+        // Accept only if it lands in order.
+        let tcb = st.tcb.as_mut().unwrap();
+        if s.flags.fin && !tcb.peer_fin {
+            let fin_seq = s.seq.wrapping_add(s.payload.len() as u32);
+            if fin_seq == tcb.rcv_nxt {
+                tcb.peer_fin = true;
+                tcb.rcv_nxt = tcb.rcv_nxt.wrapping_add(1);
+                send_ack = true;
+                // Wake any parked reader so it can observe EOF once
+                // the buffer drains.
+                if read_waker.is_none() {
+                    read_waker = st.read_waker.take();
+                }
+                let tcb = st.tcb.as_mut().unwrap();
+                tcb.state = match tcb.state {
+                    TcpState::Established => TcpState::CloseWait,
+                    TcpState::FinWait1 => TcpState::Closing,
+                    TcpState::FinWait2 => TcpState::Closed,
+                    other => other,
+                };
             }
         }
     }
@@ -237,7 +351,7 @@ fn handle_established(
             (
                 tcb.snd_nxt,
                 tcb.rcv_nxt,
-                advertised_window(tcb.recv_buf.len()),
+                advertised_window(recv_cap, tcb.recv_buf.len()),
             )
         };
         emit(
@@ -315,6 +429,10 @@ fn accept_syn(
             rcv_nxt: s.seq.wrapping_add(1),
             send_buf: BytesMut::new(),
             recv_buf: BytesMut::new(),
+            wr_closed: false,
+            peer_fin: false,
+            fin_seq: None,
+            reset: false,
         });
     }
     emit(
@@ -364,6 +482,142 @@ fn park_connect(k: &mut Kernel, fd: Fd, cx: &mut Context<'_>) {
 
 fn wake_connect(k: &mut Kernel, fd: Fd) {
     if let Some(w) = k.lookup_mut(fd).unwrap().connect_waker.take() {
+        w.wake();
+    }
+}
+
+/// Decide how to close a TCP socket being dropped by the shim. Returns
+/// `true` if the caller should reap the table entry immediately; `false`
+/// means "leave the entry alive so the kernel can keep draining queued
+/// bytes / FIN / ACKs, reap later via `reap_closed`".
+///
+/// RST-worthy cases (unread bytes, or dropping with a live write side)
+/// get an immediate RST and are reaped here. Clean drops on a
+/// still-active connection queue FIN (if not already) and leave the
+/// TCB alive through its close states. Non-TCP / listener / already
+/// terminal sockets are reaped immediately.
+pub(super) fn on_close(k: &mut Kernel, fd: Fd) -> bool {
+    enum Action {
+        Reap,
+        Linger,
+        Rst { local: SocketAddr, remote: SocketAddr },
+    }
+
+    let action = {
+        let Some(st) = k.sockets.get(fd) else {
+            return true;
+        };
+        match (st.ty, st.tcb.as_ref()) {
+            (Type::Stream, Some(tcb))
+                if !tcb.reset
+                    && tcb.state != TcpState::Closed
+                    && tcb.state != TcpState::SynSent
+                    && tcb.state != TcpState::SynReceived =>
+            {
+                if !tcb.recv_buf.is_empty() {
+                    // Unread bytes on drop → RST (Linux behavior).
+                    Action::Rst {
+                        local: bound_endpoint(st),
+                        remote: tcb.peer,
+                    }
+                } else {
+                    // Clean drop: let TCP finish closing in the
+                    // background. Our helper path below queues FIN if
+                    // the app never called shutdown.
+                    Action::Linger
+                }
+            }
+            _ => Action::Reap,
+        }
+    };
+
+    match action {
+        Action::Reap => true,
+        Action::Rst { local, remote } => {
+            let (seq, ack) = {
+                let tcb = k.lookup(fd).unwrap().tcb.as_ref().unwrap();
+                (tcb.snd_nxt, tcb.rcv_nxt)
+            };
+            emit(
+                k,
+                local,
+                remote,
+                TcpSegment {
+                    src_port: local.port(),
+                    dst_port: remote.port(),
+                    seq,
+                    ack,
+                    flags: TcpFlags {
+                        rst: true,
+                        ack: true,
+                        ..TcpFlags::default()
+                    },
+                    window: 0,
+                    payload: Bytes::new(),
+                },
+            );
+            true
+        }
+        Action::Linger => {
+            // Mark the socket as fd-closed and, if the app hasn't
+            // shut the write side yet, queue a FIN. The TCB stays in
+            // the table so egress / deliver can finish the close
+            // handshake. `reap_closed` reaps once TCP reaches a
+            // terminal state.
+            let st = k.sockets.get_mut(fd).unwrap();
+            st.fd_closed = true;
+            let tcb = st.tcb.as_mut().unwrap();
+            if !tcb.wr_closed {
+                let fin_seq = tcb.snd_una.wrapping_add(tcb.send_buf.len() as u32);
+                tcb.fin_seq = Some(fin_seq);
+                tcb.wr_closed = true;
+                tcb.state = match tcb.state {
+                    TcpState::Established => TcpState::FinWait1,
+                    TcpState::CloseWait => TcpState::LastAck,
+                    other => other,
+                };
+            }
+            false
+        }
+    }
+}
+
+/// Reap any sockets the shim has dropped that have now reached a
+/// terminal TCP state. Called at the end of each `egress` pass.
+pub(super) fn reap_closed(k: &mut Kernel) {
+    let victims: Vec<Fd> = k
+        .sockets
+        .iter()
+        .filter(|(_, s)| {
+            s.fd_closed
+                && s.tcb
+                    .as_ref()
+                    .map(|t| t.state == TcpState::Closed || t.reset)
+                    .unwrap_or(true)
+        })
+        .map(|(fd, _)| fd)
+        .collect();
+    for fd in victims {
+        k.sockets.remove(fd);
+    }
+}
+
+/// Mark a connection as aborted. Buffers are cleared (post-RST reads
+/// should see the error, not stale data), state moves to `Closed`,
+/// `reset` is set so subsequent ops return `ConnectionReset`, and all
+/// parked tasks wake so they can observe the new state.
+fn abort_connection(k: &mut Kernel, fd: Fd) {
+    let st = k.lookup_mut(fd).unwrap();
+    if let Some(tcb) = st.tcb.as_mut() {
+        tcb.state = TcpState::Closed;
+        tcb.reset = true;
+        tcb.send_buf.clear();
+        tcb.recv_buf.clear();
+    }
+    let connect = st.connect_waker.take();
+    let read = st.read_waker.take();
+    let write = st.write_waker.take();
+    for w in [connect, read, write].into_iter().flatten() {
         w.wake();
     }
 }
@@ -525,6 +779,7 @@ pub(super) fn poll_write(
     cx: &mut Context<'_>,
     buf: &[u8],
 ) -> Poll<Result<usize>> {
+    let send_cap = k.send_buf_cap;
     let st = match k.lookup_mut(fd) {
         Ok(st) => st,
         Err(e) => return Poll::Ready(Err(e)),
@@ -532,12 +787,19 @@ pub(super) fn poll_write(
     let Some(tcb) = st.tcb.as_ref() else {
         return Poll::Ready(Err(Error::from(ErrorKind::NotConnected)));
     };
-    if tcb.state != TcpState::Established {
-        // Mid-handshake writes could be spec-legal in some states, but
-        // for v1 we only allow writes on an open connection.
+    if tcb.reset {
+        return Poll::Ready(Err(Error::from(ErrorKind::ConnectionReset)));
+    }
+    if tcb.wr_closed {
+        return Poll::Ready(Err(Error::from(ErrorKind::BrokenPipe)));
+    }
+    // Accept writes while the connection is open for sending. CloseWait
+    // means the peer finished but we can keep sending until the app
+    // closes too.
+    if !matches!(tcb.state, TcpState::Established | TcpState::CloseWait) {
         return Poll::Ready(Err(Error::from(ErrorKind::NotConnected)));
     }
-    let space = SEND_BUF_CAP.saturating_sub(tcb.send_buf.len());
+    let space = send_cap.saturating_sub(tcb.send_buf.len());
     if space == 0 {
         st.write_waker = Some(cx.waker().clone());
         return Poll::Pending;
@@ -551,6 +813,40 @@ pub(super) fn poll_write(
     Poll::Ready(Ok(n))
 }
 
+/// Close the write side. Queues a FIN to ride out after any buffered
+/// data drains; state advances on FIN-ACK. Idempotent on an already-
+/// shut side.
+pub(super) fn poll_shutdown_write(
+    k: &mut Kernel,
+    fd: Fd,
+    _cx: &mut Context<'_>,
+) -> Poll<Result<()>> {
+    let st = match k.lookup_mut(fd) {
+        Ok(st) => st,
+        Err(e) => return Poll::Ready(Err(e)),
+    };
+    let Some(tcb) = st.tcb.as_mut() else {
+        return Poll::Ready(Err(Error::from(ErrorKind::NotConnected)));
+    };
+    if tcb.reset {
+        return Poll::Ready(Err(Error::from(ErrorKind::ConnectionReset)));
+    }
+    if tcb.wr_closed {
+        return Poll::Ready(Ok(()));
+    }
+    // FIN rides out after any queued bytes — its seq sits right past
+    // the last byte the app accepted into send_buf.
+    let fin_seq = tcb.snd_una.wrapping_add(tcb.send_buf.len() as u32);
+    tcb.fin_seq = Some(fin_seq);
+    tcb.wr_closed = true;
+    tcb.state = match tcb.state {
+        TcpState::Established => TcpState::FinWait1,
+        TcpState::CloseWait => TcpState::LastAck,
+        other => other,
+    };
+    Poll::Ready(Ok(()))
+}
+
 /// Drain bytes from the socket's `recv_buf` into `buf`. Returns
 /// `Pending` (parking `read_waker`) when the buffer is empty. An ACK
 /// is emitted afterward if the drain opened enough window to be worth
@@ -561,22 +857,40 @@ pub(super) fn poll_read(
     cx: &mut Context<'_>,
     buf: &mut [u8],
 ) -> Poll<Result<usize>> {
+    let recv_cap = k.recv_buf_cap;
     let (n, should_update_window, local, remote) = {
         let st = match k.lookup_mut(fd) {
             Ok(st) => st,
             Err(e) => return Poll::Ready(Err(e)),
         };
         // Inspect without holding a borrow across the mutable ops.
-        let (empty, established, peer) = match st.tcb.as_ref() {
+        let (empty, peer_fin, reset, readable_state, peer) = match st.tcb.as_ref() {
             None => return Poll::Ready(Err(Error::from(ErrorKind::NotConnected))),
             Some(t) => (
                 t.recv_buf.is_empty(),
-                t.state == TcpState::Established,
+                t.peer_fin,
+                t.reset,
+                matches!(
+                    t.state,
+                    TcpState::Established
+                        | TcpState::FinWait1
+                        | TcpState::FinWait2
+                        | TcpState::CloseWait
+                ),
                 t.peer,
             ),
         };
+        // RST wins over buffered data — callers need the error.
+        if reset {
+            return Poll::Ready(Err(Error::from(ErrorKind::ConnectionReset)));
+        }
         if empty {
-            if !established {
+            // Clean EOF — peer sent FIN and we've drained everything.
+            // `Ready(Ok(0))` is the standard EOF signal.
+            if peer_fin {
+                return Poll::Ready(Ok(0));
+            }
+            if !readable_state {
                 return Poll::Ready(Err(Error::from(ErrorKind::NotConnected)));
             }
             st.read_waker = Some(cx.waker().clone());
@@ -590,7 +904,7 @@ pub(super) fn poll_read(
         // Window-update trigger: if we freed ≥ half the recv cap,
         // advertise. Crude SWS avoidance; refine alongside real flow
         // control.
-        let should_update = n >= RECV_BUF_CAP / 2;
+        let should_update = n >= recv_cap / 2;
         (n, should_update, local, peer)
     };
 
@@ -600,7 +914,7 @@ pub(super) fn poll_read(
             (
                 tcb.snd_nxt,
                 tcb.rcv_nxt,
-                advertised_window(tcb.recv_buf.len()),
+                advertised_window(recv_cap, tcb.recv_buf.len()),
             )
         };
         emit(
@@ -625,11 +939,11 @@ pub(super) fn poll_read(
     Poll::Ready(Ok(n))
 }
 
-/// Sweep all established TCP sockets and chop queued bytes (the tail of
-/// `send_buf` past `snd_nxt - snd_una`) into MSS-sized segments bounded
-/// by the peer's advertised window. Invoked by `egress` before the
-/// outbound drain, so newly-segmented packets ride the same pump that
-/// handles UDP and handshake traffic.
+/// Sweep all TCP sockets with transmittable bytes or a pending FIN
+/// and chop them into MSS-sized segments bounded by the peer's
+/// advertised window. Invoked by `egress` before the outbound drain,
+/// so newly-segmented packets ride the same pump that handles UDP and
+/// handshake traffic.
 pub(super) fn segment_all(k: &mut Kernel) {
     let candidates: Vec<Fd> = k
         .sockets
@@ -638,8 +952,21 @@ pub(super) fn segment_all(k: &mut Kernel) {
             s.tcb
                 .as_ref()
                 .map(|t| {
-                    t.state == TcpState::Established
-                        && t.send_buf.len() > (t.snd_nxt.wrapping_sub(t.snd_una)) as usize
+                    let transmittable = matches!(
+                        t.state,
+                        TcpState::Established
+                            | TcpState::CloseWait
+                            | TcpState::FinWait1
+                            | TcpState::Closing
+                            | TcpState::LastAck
+                    );
+                    let has_data = t.send_buf.len()
+                        > (t.snd_nxt.wrapping_sub(t.snd_una)) as usize;
+                    let fin_pending = t
+                        .fin_seq
+                        .map(|fs| t.snd_nxt == fs)
+                        .unwrap_or(false);
+                    transmittable && (has_data || fin_pending)
                 })
                 .unwrap_or(false)
         })
@@ -657,31 +984,38 @@ fn segment_one(k: &mut Kernel, fd: Fd) {
         bound_endpoint(st)
     };
     let mss = mss_for(k, local.ip());
+    let recv_cap = k.recv_buf_cap;
 
     loop {
-        let (seq, payload) = {
+        let (seq, payload, is_fin) = {
             let tcb = k.lookup_mut(fd).unwrap().tcb.as_mut().unwrap();
             let in_flight = tcb.snd_nxt.wrapping_sub(tcb.snd_una) as usize;
             let unsent = tcb.send_buf.len().saturating_sub(in_flight);
-            if unsent == 0 {
-                return;
-            }
             let wnd_remaining = (tcb.snd_wnd as usize).saturating_sub(in_flight);
-            if wnd_remaining == 0 {
+            let fin_pending = tcb.fin_seq.map(|fs| tcb.snd_nxt == fs).unwrap_or(false);
+
+            if unsent > 0 && wnd_remaining > 0 {
+                let n = unsent.min(mss).min(wnd_remaining);
+                let start = in_flight;
+                let end = start + n;
+                let payload = Bytes::copy_from_slice(&tcb.send_buf[start..end]);
+                let seq = tcb.snd_nxt;
+                tcb.snd_nxt = tcb.snd_nxt.wrapping_add(n as u32);
+                (seq, payload, false)
+            } else if fin_pending && wnd_remaining > 0 {
+                // Emit the FIN. It occupies one sequence number but
+                // carries no payload.
+                let seq = tcb.snd_nxt;
+                tcb.snd_nxt = tcb.snd_nxt.wrapping_add(1);
+                (seq, Bytes::new(), true)
+            } else {
                 return;
             }
-            let n = unsent.min(mss).min(wnd_remaining);
-            let start = in_flight;
-            let end = start + n;
-            let payload = Bytes::copy_from_slice(&tcb.send_buf[start..end]);
-            let seq = tcb.snd_nxt;
-            tcb.snd_nxt = tcb.snd_nxt.wrapping_add(n as u32);
-            (seq, payload)
         };
         let remote = k.lookup(fd).unwrap().tcb.as_ref().unwrap().peer;
-        let window = {
+        let (rcv_nxt, window) = {
             let tcb = k.lookup(fd).unwrap().tcb.as_ref().unwrap();
-            advertised_window(tcb.recv_buf.len())
+            (tcb.rcv_nxt, advertised_window(recv_cap, tcb.recv_buf.len()))
         };
         emit(
             k,
@@ -691,10 +1025,11 @@ fn segment_one(k: &mut Kernel, fd: Fd) {
                 src_port: local.port(),
                 dst_port: remote.port(),
                 seq,
-                ack: k.lookup(fd).unwrap().tcb.as_ref().unwrap().rcv_nxt,
+                ack: rcv_nxt,
                 flags: TcpFlags {
                     ack: true,
-                    psh: true,
+                    psh: !is_fin && !payload.is_empty(),
+                    fin: is_fin,
                     ..TcpFlags::default()
                 },
                 window,
@@ -729,8 +1064,8 @@ fn bound_endpoint(st: &Socket) -> SocketAddr {
     SocketAddr::new(bind.local_addr, bind.local_port)
 }
 
-fn advertised_window(recv_buf_len: usize) -> u16 {
-    RECV_BUF_CAP
+fn advertised_window(recv_buf_cap: usize, recv_buf_len: usize) -> u16 {
+    recv_buf_cap
         .saturating_sub(recv_buf_len)
         .min(u16::MAX as usize) as u16
 }

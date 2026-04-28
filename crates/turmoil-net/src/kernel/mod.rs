@@ -19,7 +19,9 @@ use std::task::{Context, Poll};
 use tokio::io::ReadBuf;
 
 use crate::kernel::packet::{Packet, Transport};
-use crate::kernel::socket::{BindKey, ListenState, Socket, SocketTable};
+use crate::kernel::socket::{
+    BindKey, ListenState, Socket, SocketTable, DEFAULT_RECV_BUF_CAP, DEFAULT_SEND_BUF_CAP,
+};
 
 mod packet;
 mod socket;
@@ -51,9 +53,59 @@ pub use socket::{Addr, Domain, Fd, SocketOption, SocketOptionKind, Type};
 // we write tests that rely on back-and-forth request/response.
 
 /// Default MTU for non-loopback traffic (bytes). Matches standard Ethernet.
-const DEFAULT_MTU: u32 = 1500;
+pub const DEFAULT_MTU: u32 = 1500;
 /// Default MTU for loopback (bytes). Matches Linux `lo`.
-const DEFAULT_LOOPBACK_MTU: u32 = 65536;
+pub const DEFAULT_LOOPBACK_MTU: u32 = 65536;
+/// Default backlog for `TcpListener::bind` when the caller doesn't
+/// specify one. Mirrors Linux's `SOMAXCONN`.
+pub const DEFAULT_BACKLOG: usize = 1024;
+
+/// Tunable limits for a [`Kernel`]. Constructed via [`Self::default`]
+/// and adjusted with the builder-style setters. Pass to
+/// `Net::with_config` to apply.
+#[derive(Debug, Clone)]
+pub struct KernelConfig {
+    pub mtu: u32,
+    pub loopback_mtu: u32,
+    pub send_buf_cap: usize,
+    pub recv_buf_cap: usize,
+    pub default_backlog: usize,
+}
+
+impl Default for KernelConfig {
+    fn default() -> Self {
+        Self {
+            mtu: DEFAULT_MTU,
+            loopback_mtu: DEFAULT_LOOPBACK_MTU,
+            send_buf_cap: DEFAULT_SEND_BUF_CAP,
+            recv_buf_cap: DEFAULT_RECV_BUF_CAP,
+            default_backlog: DEFAULT_BACKLOG,
+        }
+    }
+}
+
+impl KernelConfig {
+    pub fn mtu(mut self, v: u32) -> Self {
+        self.mtu = v;
+        self
+    }
+    pub fn loopback_mtu(mut self, v: u32) -> Self {
+        self.loopback_mtu = v;
+        self
+    }
+    pub fn send_buf_cap(mut self, v: usize) -> Self {
+        self.send_buf_cap = v;
+        self
+    }
+    pub fn recv_buf_cap(mut self, v: usize) -> Self {
+        self.recv_buf_cap = v;
+        self
+    }
+    pub fn default_backlog(mut self, v: usize) -> Self {
+        self.default_backlog = v;
+        self
+    }
+}
 
 /// Linux errno for `EAFNOSUPPORT`. Used where we want `kind() ==
 /// Uncategorized` to match what `tokio::net` surfaces for
@@ -71,8 +123,11 @@ const EAFNOSUPPORT: i32 = 97;
 pub struct Kernel {
     sockets: SocketTable,
     addresses: Vec<IpAddr>,
-    mtu: u32,
-    loopback_mtu: u32,
+    pub(crate) mtu: u32,
+    pub(crate) loopback_mtu: u32,
+    pub(crate) send_buf_cap: usize,
+    pub(crate) recv_buf_cap: usize,
+    pub(crate) default_backlog: usize,
     /// Packets queued by `poll_send_*` awaiting `egress()`.
     outbound: VecDeque<Packet>,
     /// Monotonic TCP initial-sequence-number source. Deterministic by
@@ -81,14 +136,21 @@ pub struct Kernel {
 }
 
 impl Kernel {
-    /// Construct a fresh kernel with default MTU settings and no
+    /// Construct a fresh kernel with default settings and no
     /// configured addresses beyond implicit loopback.
     pub fn new() -> Self {
+        Self::with_config(KernelConfig::default())
+    }
+
+    pub fn with_config(cfg: KernelConfig) -> Self {
         Self {
             sockets: SocketTable::new(),
             addresses: Vec::new(),
-            mtu: DEFAULT_MTU,
-            loopback_mtu: DEFAULT_LOOPBACK_MTU,
+            mtu: cfg.mtu,
+            loopback_mtu: cfg.loopback_mtu,
+            send_buf_cap: cfg.send_buf_cap,
+            recv_buf_cap: cfg.recv_buf_cap,
+            default_backlog: cfg.default_backlog,
             outbound: VecDeque::new(),
             tcp_isn: 0x0100_0000,
         }
@@ -106,10 +168,23 @@ impl Kernel {
     }
 
     /// `close(2)`. Removes the entry from the socket table along with
-    /// any binding. Idempotent — closing an already-closed socket is a
-    /// no-op.
+    /// any binding. For an active TCP connection, decides between a
+    /// clean close (silent) and an abortive close (emits RST):
+    ///
+    /// - RST if the app drops with unread bytes still queued in
+    ///   `recv_buf`, or with a live write side that never sent FIN.
+    ///   Matches Linux behavior and the `tokio::net::TcpStream` Drop
+    ///   semantics the upstream crate recently fixed.
+    /// - Silent close otherwise — the connection already reached a
+    ///   clean terminal state via FIN exchange.
+    ///
+    /// Idempotent on an already-closed fd.
     pub fn close(&mut self, fd: Fd) {
-        self.sockets.remove(fd);
+        if tcp::on_close(self, fd) {
+            self.sockets.remove(fd);
+        }
+        // else: lingering — `reap_closed` at the end of each egress
+        // pass will clean up once the TCP state reaches `Closed`.
     }
 
     pub(crate) fn lookup(&self, fd: Fd) -> std::io::Result<&Socket> {
@@ -433,6 +508,22 @@ impl Kernel {
         tcp::poll_write(self, fd, cx, buf)
     }
 
+    /// `shutdown(SHUT_WR)` for TCP. Queues a FIN behind any buffered
+    /// data. Poll shape for symmetry with `poll_write`; the
+    /// implementation is synchronous today.
+    pub fn poll_shutdown_write(
+        &mut self,
+        fd: Fd,
+        cx: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let ty = match self.lookup(fd) {
+            Ok(st) => st.ty,
+            Err(e) => return Poll::Ready(Err(e)),
+        };
+        assert_eq!(ty, Type::Stream, "poll_shutdown_write on non-Stream fd");
+        tcp::poll_shutdown_write(self, fd, cx)
+    }
+
     /// `recv(2)` for TCP. Drains from the socket's receive buffer.
     pub fn poll_read(
         &mut self,
@@ -516,6 +607,8 @@ impl Kernel {
                 }
             }
         }
+        // Reap any `fd_closed` sockets that have finished closing.
+        tcp::reap_closed(self);
         leaving
     }
 }
