@@ -500,7 +500,10 @@ pub(super) fn on_close(k: &mut Kernel, fd: Fd) -> bool {
     enum Action {
         Reap,
         Linger,
-        Rst { local: SocketAddr, remote: SocketAddr },
+        Rst {
+            local: SocketAddr,
+            remote: SocketAddr,
+        },
     }
 
     let action = {
@@ -963,10 +966,7 @@ pub(super) fn poll_peek(
         }
         if !matches!(
             tcb.state,
-            TcpState::Established
-                | TcpState::FinWait1
-                | TcpState::FinWait2
-                | TcpState::CloseWait
+            TcpState::Established | TcpState::FinWait1 | TcpState::FinWait2 | TcpState::CloseWait
         ) {
             return Poll::Ready(Err(Error::from(ErrorKind::NotConnected)));
         }
@@ -999,12 +999,8 @@ pub(super) fn segment_all(k: &mut Kernel) {
                             | TcpState::Closing
                             | TcpState::LastAck
                     );
-                    let has_data = t.send_buf.len()
-                        > (t.snd_nxt.wrapping_sub(t.snd_una)) as usize;
-                    let fin_pending = t
-                        .fin_seq
-                        .map(|fs| t.snd_nxt == fs)
-                        .unwrap_or(false);
+                    let has_data = t.send_buf.len() > (t.snd_nxt.wrapping_sub(t.snd_una)) as usize;
+                    let fin_pending = t.fin_seq.map(|fs| t.snd_nxt == fs).unwrap_or(false);
                     transmittable && (has_data || fin_pending)
                 })
                 .unwrap_or(false)

@@ -100,8 +100,6 @@ impl TcpStream {
         }
     }
 
-    /// Non-blocking read. Returns `WouldBlock` when `recv_buf` is
-    /// empty and the connection is still open.
     pub fn try_read(&self, buf: &mut [u8]) -> io::Result<usize> {
         match sys(|k| k.poll_recv(self.fd, &mut noop_cx(), buf)) {
             Poll::Ready(r) => r,
@@ -109,8 +107,6 @@ impl TcpStream {
         }
     }
 
-    /// Non-blocking write. Returns `WouldBlock` when `send_buf` is at
-    /// cap (the peer hasn't drained enough to make room).
     pub fn try_write(&self, buf: &[u8]) -> io::Result<usize> {
         match sys(|k| k.poll_send(self.fd, &mut noop_cx(), buf)) {
             Poll::Ready(r) => r,
@@ -118,12 +114,25 @@ impl TcpStream {
         }
     }
 
-    /// Async peek — returns buffered bytes without draining `recv_buf`.
-    /// Callers typically use this to sniff a protocol prefix (TLS
-    /// ClientHello, HTTP/2 preface) without committing to a specific
-    /// parser.
     pub async fn peek(&self, buf: &mut [u8]) -> io::Result<usize> {
         poll_fn(|cx| sys(|k| k.poll_peek(self.fd, cx, buf))).await
+    }
+
+    pub fn poll_peek(
+        &self,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<usize>> {
+        let fd = self.fd;
+        let unfilled = buf.initialize_unfilled();
+        match sys(|k| k.poll_peek(fd, cx, unfilled)) {
+            Poll::Ready(Ok(n)) => {
+                buf.advance(n);
+                Poll::Ready(Ok(n))
+            }
+            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+            Poll::Pending => Poll::Pending,
+        }
     }
 
     pub fn set_ttl(&self, ttl: u32) -> io::Result<()> {

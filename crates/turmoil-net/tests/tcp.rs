@@ -400,7 +400,6 @@ async fn tcp_peek_leaves_data_for_read() {
 
 #[tokio::test]
 async fn tcp_listener_ttl_roundtrips() {
-
     let _guard = Net::new().enter();
     let listener = TcpListener::bind("127.0.0.1:7300").await.unwrap();
     assert_eq!(listener.ttl().unwrap(), 64);
