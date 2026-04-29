@@ -17,6 +17,8 @@ use std::net::IpAddr;
 
 use crate::{KernelConfig, Net};
 
+const NO_ADDRS: [IpAddr; 0] = [];
+
 mod client_server;
 pub use client_server::ClientServer;
 
@@ -39,7 +41,7 @@ where
         .expect("build current_thread runtime");
 
     let mut net = Net::with_config(cfg);
-    net.add_host(std::iter::empty::<IpAddr>());
+    net.add_host(NO_ADDRS);
     let guard = net.enter();
 
     let result = rt.block_on(async move {

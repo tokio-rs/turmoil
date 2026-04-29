@@ -10,7 +10,6 @@ use std::task::{Context, Poll, Waker};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::kernel::{Addr, Domain, Fd, SocketOption, SocketOptionKind, Type};
-use crate::shim::tokio::net::addr::sealed::Sealed;
 use crate::shim::tokio::net::ToSocketAddrs;
 use crate::sys;
 
@@ -20,7 +19,7 @@ pub struct TcpListener {
 
 impl TcpListener {
     pub async fn bind<A: ToSocketAddrs>(addr: A) -> io::Result<Self> {
-        let addr = Sealed::to_socket_addr(&addr)?;
+        let addr = addr.to_socket_addr()?;
         let fd = sys(|k| {
             let backlog = k.default_backlog;
             let fd = k.bind(&Addr::Inet(addr), Type::Stream)?;
@@ -76,7 +75,7 @@ pub struct TcpStream {
 
 impl TcpStream {
     pub async fn connect<A: ToSocketAddrs>(addr: A) -> io::Result<Self> {
-        let peer = Sealed::to_socket_addr(&addr)?;
+        let peer = addr.to_socket_addr()?;
         let fd = sys(|k| k.open(domain_of(&peer), Type::Stream));
         let res = poll_fn(|cx| sys(|k| k.poll_connect(fd, cx, &Addr::Inet(peer)))).await;
         if let Err(e) = res {

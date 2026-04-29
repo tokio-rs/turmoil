@@ -8,7 +8,6 @@ use std::task::{Context, Poll, Waker};
 use tokio::io::ReadBuf;
 
 use crate::kernel::{Addr, Fd, SocketOption, SocketOptionKind, Type};
-use crate::shim::tokio::net::addr::sealed::Sealed;
 use crate::shim::tokio::net::ToSocketAddrs;
 use crate::sys;
 
@@ -18,7 +17,7 @@ pub struct UdpSocket {
 
 impl UdpSocket {
     pub async fn bind<A: ToSocketAddrs>(addr: A) -> io::Result<Self> {
-        let addr = Sealed::to_socket_addr(&addr)?;
+        let addr = addr.to_socket_addr()?;
         let fd = sys(|k| k.bind(&Addr::Inet(addr), Type::Dgram))?;
         Ok(Self { fd })
     }
@@ -38,12 +37,12 @@ impl UdpSocket {
     }
 
     pub async fn connect<A: ToSocketAddrs>(&self, addr: A) -> io::Result<()> {
-        let addr = Sealed::to_socket_addr(&addr)?;
+        let addr = addr.to_socket_addr()?;
         poll_fn(|cx| sys(|k| k.poll_connect(self.fd, cx, &Addr::Inet(addr)))).await
     }
 
     pub async fn send_to<A: ToSocketAddrs>(&self, buf: &[u8], target: A) -> io::Result<usize> {
-        let target = Sealed::to_socket_addr(&target)?;
+        let target = target.to_socket_addr()?;
         poll_fn(|cx| sys(|k| k.poll_send_to(self.fd, cx, buf, &Addr::Inet(target)))).await
     }
 

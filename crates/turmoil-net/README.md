@@ -61,21 +61,22 @@ use turmoil_net::shim::tokio::net::{TcpListener, TcpStream};
 
 #[test]
 fn tcp_across_hosts() {
-    let server_ip: std::net::IpAddr = "10.0.0.1".parse().unwrap();
-    let client_ip: std::net::IpAddr = "10.0.0.2".parse().unwrap();
-
     ClientServer::new()
-        .server([server_ip], async {
-            let listener = TcpListener::bind("10.0.0.1:9000").await.unwrap();
+        .server("server", async {
+            let listener = TcpListener::bind("0.0.0.0:9000").await.unwrap();
             let (stream, _) = listener.accept().await.unwrap();
             // ...
         })
-        .run([client_ip], async {
-            let stream = TcpStream::connect("10.0.0.1:9000").await.unwrap();
+        .run("client", async {
+            let stream = TcpStream::connect("server:9000").await.unwrap();
             // ...
         });
 }
 ```
+
+Hostnames are resolved against an in-memory DNS — each new name gets an
+IP in `192.168.0.0/16` on first sight. Pass literal `IpAddr`s if you
+need a specific address.
 
 Beyond these, reach for `Net`, `add_host`, `enter`, and drive `fabric.step()` on whatever cadence your test needs.
 

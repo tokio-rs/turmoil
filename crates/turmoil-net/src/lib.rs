@@ -1,13 +1,15 @@
 //! Deterministic network simulation for turmoil.
 
 use std::cell::RefCell;
-use std::net::IpAddr;
 
+pub(crate) mod dns;
 pub(crate) mod fabric;
 pub mod fixture;
 pub(crate) mod kernel;
 pub mod shim;
 
+use crate::dns::Dns;
+pub use crate::dns::{ToIpAddr, ToIpAddrs};
 use crate::fabric::Fabric;
 pub use crate::fabric::HostId;
 use crate::kernel::Kernel;
@@ -20,6 +22,7 @@ thread_local! {
 #[derive(Debug)]
 pub struct Net {
     fabric: Fabric,
+    dns: Dns,
     current: Option<HostId>,
 }
 
@@ -32,23 +35,31 @@ impl Net {
     pub fn with_config(cfg: KernelConfig) -> Self {
         Self {
             fabric: Fabric::new(cfg),
+            dns: Dns::new(),
             current: None,
         }
     }
 
-    /// Loopback (127.0.0.1, ::1) is implicit — omit it from `addrs`.
+    /// Register a host. `addrs` accepts hostnames (auto-allocated to
+    /// 192.168.x.x on first sight, idempotent on reuse) or literal
+    /// IPs. Loopback (127.0.0.1, ::1) is implicit — do not pass it.
     /// Panics if an address is already claimed by another host, or
     /// if loopback is passed explicitly. The first host added becomes
     /// current.
-    pub fn add_host<I>(&mut self, addrs: I) -> HostId
-    where
-        I: IntoIterator<Item = IpAddr>,
-    {
-        let id = self.fabric.add_host(addrs.into_iter().collect());
+    pub fn add_host<A: ToIpAddrs>(&mut self, addrs: A) -> HostId {
+        let ips = addrs.to_ip_addrs(&mut self.dns);
+        let id = self.fabric.add_host(ips);
         if self.current.is_none() {
             self.current = Some(id);
         }
         id
+    }
+
+    /// Resolve `name` to its registered IP, allocating if unseen.
+    /// Mirrors the name resolution used by [`Net::add_host`] and the
+    /// shim's hostname-aware socket addrs.
+    pub fn lookup(&mut self, name: &str) -> std::net::IpAddr {
+        self.dns.resolve(name)
     }
 
     pub fn host_ids(&self) -> impl Iterator<Item = HostId> + '_ {
@@ -116,4 +127,12 @@ pub(crate) fn sys<R>(f: impl FnOnce(&mut Kernel) -> R) -> R {
             .expect("no current host — register one with Net::add_host()");
         f(net.fabric.kernel_mut(id))
     })
+}
+
+/// Resolve `name` against the installed `Net`'s DNS without allocating.
+/// Returns `None` if there is no `Net` installed, or if the name isn't
+/// registered and can't be parsed as an IP literal. Shim-side helper
+/// for `ToSocketAddrs` impls that accept hostnames.
+pub(crate) fn lookup_host(name: &str) -> Option<std::net::IpAddr> {
+    CURRENT.with(|c| c.borrow().as_ref().and_then(|net| net.dns.lookup(name)))
 }

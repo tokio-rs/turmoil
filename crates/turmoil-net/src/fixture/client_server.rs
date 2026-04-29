@@ -1,13 +1,12 @@
 //! Multi-host client/server fixture.
 
 use std::future::{poll_fn, Future};
-use std::net::IpAddr;
 use std::pin::Pin;
 use std::task::Poll;
 
 use tokio::task::LocalSet;
 
-use crate::{HostId, Net};
+use crate::{HostId, Net, ToIpAddrs};
 
 type BoxFut = Pin<Box<dyn Future<Output = ()>>>;
 
@@ -28,12 +27,13 @@ impl ClientServer {
         }
     }
 
-    /// Register a server. `addrs` are the public IPs for its host;
+    /// Register a server. `addrs` accepts hostnames or literal IPs;
     /// loopback is implicit. `fut` runs inside that host's scope —
     /// every `sys()` call from its socket operations sees this host
     /// as `current`.
-    pub fn server<F>(mut self, addrs: impl IntoIterator<Item = IpAddr>, fut: F) -> Self
+    pub fn server<A, F>(mut self, addrs: A, fut: F) -> Self
     where
+        A: ToIpAddrs,
         F: Future<Output = ()> + 'static,
     {
         let id = self.net.add_host(addrs);
@@ -44,8 +44,9 @@ impl ClientServer {
     /// Run the fixture with `fut` as the client. Every server is
     /// driven in parallel; the fixture returns `fut`'s output as
     /// soon as it resolves.
-    pub fn run<T, F>(self, addrs: impl IntoIterator<Item = IpAddr>, fut: F) -> T
+    pub fn run<A, T, F>(self, addrs: A, fut: F) -> T
     where
+        A: ToIpAddrs,
         F: Future<Output = T> + 'static,
         T: 'static,
     {
