@@ -366,6 +366,12 @@ pub struct SocketTable {
     /// (not single `Fd`) because `SO_REUSEPORT` permits multiple
     /// sockets to share the exact same tuple.
     bindings: IndexMap<BindKey, Vec<Fd>>,
+    /// 4-tuple index for TCP inbound demux: (local, remote) → fd.
+    /// Populated by `poll_connect` and `accept_syn`, cleared on
+    /// socket removal. Never contains wildcard locals — client
+    /// sockets auto-bind concretely, and listener children inherit
+    /// the concrete accepted local address.
+    connections: IndexMap<(SocketAddr, SocketAddr), Fd>,
     ports: PortAllocator,
 }
 
@@ -375,6 +381,7 @@ impl SocketTable {
             next_id: 1,
             sockets: IndexMap::new(),
             bindings: IndexMap::new(),
+            connections: IndexMap::new(),
             ports: PortAllocator::new(DEFAULT_EPHEMERAL_PORTS),
         }
     }
@@ -398,13 +405,14 @@ impl SocketTable {
         self.sockets.get_mut(&fd)
     }
 
-    /// Remove a socket from the table, also clearing any binding that
-    /// points at it.
+    /// Remove a socket from the table, also clearing any binding or
+    /// 4-tuple connection entry that points at it.
     pub fn remove(&mut self, fd: Fd) -> Option<Socket> {
         self.bindings.retain(|_, fds| {
             fds.retain(|&f| f != fd);
             !fds.is_empty()
         });
+        self.connections.retain(|_, f| *f != fd);
         self.sockets.shift_remove(&fd)
     }
 
@@ -427,6 +435,33 @@ impl SocketTable {
                 self.bindings.shift_remove(key);
             }
         }
+    }
+
+    /// Index a TCP connection by 4-tuple. Panics if `local` is
+    /// unspecified — the index invariant requires concrete addrs.
+    pub fn insert_connection(&mut self, local: SocketAddr, remote: SocketAddr, fd: Fd) {
+        assert!(
+            !local.ip().is_unspecified(),
+            "connection index requires concrete local addr"
+        );
+        self.connections.insert((local, remote), fd);
+    }
+
+    /// Look up a connected socket by its 4-tuple.
+    pub fn find_connection(&self, local: SocketAddr, remote: SocketAddr) -> Option<Fd> {
+        self.connections.get(&(local, remote)).copied()
+    }
+
+    /// Iterate connections matching `local` — any remote. Used to
+    /// count in-flight children of a listener.
+    pub fn connections_on(
+        &self,
+        local: SocketAddr,
+    ) -> impl Iterator<Item = (SocketAddr, Fd)> + '_ {
+        self.connections
+            .iter()
+            .filter(move |((l, _), _)| *l == local)
+            .map(|((_, r), fd)| (*r, *fd))
     }
 
     /// Iterate all bindings on `(domain, ty, port)` regardless of local

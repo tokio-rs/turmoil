@@ -5,12 +5,10 @@
 //! dropping retransmit for now is safe.
 //!
 //! # Perf TODO
-//! - `find_by_peer`, `count_children`, and `segment_all` sweep every
-//!   socket via `SocketTable::iter`. Real kernels demux by 4-tuple
-//!   hash. Replace with `HashMap<(local, remote), Fd>` on `SocketTable`
-//!   before we take on TCP-heavy benchmarks — the old `turmoil` crate's
-//!   per-packet overhead is partly the thing this rewrite is trying
-//!   to beat.
+//! - `segment_all` still sweeps every socket via `SocketTable::iter`
+//!   each egress to find ones with transmittable bytes. A dirty-set
+//!   (fd pushed whenever send_buf grows or a FIN becomes pending) would
+//!   cut that to an O(writers) scan.
 
 use std::io::{Error, ErrorKind, Result};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -77,6 +75,7 @@ pub(super) fn poll_connect(
         });
         st.peer = Some(Addr::Inet(peer));
     }
+    k.sockets.insert_connection(src, peer, fd);
     emit(
         k,
         src,
@@ -105,7 +104,7 @@ pub(super) fn deliver(k: &mut Kernel, pkt: &Packet, s: &TcpSegment) {
 
     // First try to demux to an established/in-progress connection by
     // 4-tuple. Listener fallback only runs if that misses.
-    if let Some(fd) = find_by_peer(k, local, remote) {
+    if let Some(fd) = k.sockets.find_connection(local, remote) {
         handle_on_connection(k, fd, local, remote, s);
         return;
     }
@@ -390,7 +389,7 @@ fn accept_syn(
     // Count in-progress (SynReceived) children + ready children
     // against backlog. Linux separates SYN backlog from accept backlog;
     // we collapse them for v1.
-    let in_flight = count_children(k, listener_fd, local, remote);
+    let in_flight = count_children(k, listener_fd, local);
     let ready = k
         .lookup(listener_fd)
         .unwrap()
@@ -412,8 +411,8 @@ fn accept_syn(
     };
     // Server child shares the listener's tuple. insert_binding allows
     // multiple fds at one key (REUSEPORT); demux to an accepted child
-    // runs by 4-tuple (find_by_peer) before listener fallback, so this
-    // doesn't cross wires.
+    // runs by 4-tuple (find_connection) before listener fallback, so
+    // this doesn't cross wires.
     k.sockets.insert_binding(bind_key.clone(), child);
     let isn = initial_sequence(k);
     {
@@ -435,6 +434,7 @@ fn accept_syn(
             reset: false,
         });
     }
+    k.sockets.insert_connection(local, remote, child);
     emit(
         k,
         local,
@@ -625,25 +625,6 @@ fn abort_connection(k: &mut Kernel, fd: Fd) {
     }
 }
 
-/// Find a non-listening socket whose `(bound local, tcb.peer)` matches.
-fn find_by_peer(k: &Kernel, local: SocketAddr, remote: SocketAddr) -> Option<Fd> {
-    k.sockets.iter().find_map(|(fd, s)| {
-        let tcb = s.tcb.as_ref()?;
-        if tcb.peer != remote {
-            return None;
-        }
-        let bound = s.bound.as_ref()?;
-        if bound.local_port != local.port() {
-            return None;
-        }
-        if bound.local_addr == local.ip() || bound.local_addr.is_unspecified() {
-            Some(fd)
-        } else {
-            None
-        }
-    })
-}
-
 /// Find a listening socket bound to `local` (or the matching wildcard).
 fn find_listener(k: &Kernel, local: SocketAddr) -> Option<Fd> {
     let domain = match local {
@@ -677,20 +658,20 @@ fn find_listener(k: &Kernel, local: SocketAddr) -> Option<Fd> {
 }
 
 /// Count child sockets owned by `listener_fd`'s tuple that are still
-/// handshaking (SynReceived) with `remote`.
-fn count_children(k: &Kernel, listener_fd: Fd, local: SocketAddr, remote: SocketAddr) -> usize {
+/// handshaking (`SynReceived`). Charged against the listener's backlog
+/// alongside the accept-ready queue.
+fn count_children(k: &Kernel, listener_fd: Fd, local: SocketAddr) -> usize {
     k.sockets
-        .iter()
-        .filter(|(fd, s)| {
-            *fd != listener_fd
-                && s.tcb
-                    .as_ref()
-                    .map(|t| t.state == TcpState::SynReceived && t.peer == remote)
-                    .unwrap_or(false)
-                && s.bound
-                    .as_ref()
-                    .map(|b| b.local_port == local.port())
-                    .unwrap_or(false)
+        .connections_on(local)
+        .filter(|(_, fd)| {
+            if *fd == listener_fd {
+                return false;
+            }
+            k.sockets
+                .get(*fd)
+                .and_then(|s| s.tcb.as_ref())
+                .map(|t| t.state == TcpState::SynReceived)
+                .unwrap_or(false)
         })
         .count()
 }
