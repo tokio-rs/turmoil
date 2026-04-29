@@ -19,9 +19,7 @@ use std::task::{Context, Poll};
 use tokio::io::ReadBuf;
 
 use crate::kernel::packet::{Packet, Transport};
-use crate::kernel::socket::{
-    BindKey, ListenState, Socket, SocketTable, DEFAULT_RECV_BUF_CAP, DEFAULT_SEND_BUF_CAP,
-};
+use crate::kernel::socket::{BindKey, SocketTable, DEFAULT_RECV_BUF_CAP, DEFAULT_SEND_BUF_CAP};
 
 mod packet;
 mod socket;
@@ -31,6 +29,8 @@ mod uds;
 
 // for shims
 pub use socket::{Addr, Domain, Fd, SocketOption, SocketOptionKind, Type};
+// for netstat
+pub use socket::{ListenState, Socket, Tcb, TcpState};
 
 // TODO: cooperative yielding on loopback.
 //
@@ -198,6 +198,11 @@ impl Kernel {
         }
         // else: lingering — `reap_closed` at the end of each egress
         // pass will clean up once the TCP state reaches `Closed`.
+    }
+
+    /// Iterate every socket in the table, in insertion order.
+    pub fn sockets(&self) -> impl Iterator<Item = (Fd, &Socket)> {
+        self.sockets.iter()
     }
 
     pub(crate) fn lookup(&self, fd: Fd) -> std::io::Result<&Socket> {

@@ -81,6 +81,20 @@ impl Fabric {
             .kernel
     }
 
+    pub fn kernel(&self, id: HostId) -> &Kernel {
+        &self
+            .hosts
+            .get(&id)
+            .expect("HostId points at a live host")
+            .kernel
+    }
+
+    /// Reverse the IP→host mapping. Returns `None` for loopback (which
+    /// every host implicitly owns) and for unclaimed IPs.
+    pub fn host_for_ip(&self, ip: IpAddr) -> Option<HostId> {
+        self.ip_to_host.get(&ip).copied()
+    }
+
     // TODO: synthetic latency. Today packets delivered in the same
     // step are observed in the same scheduler turn. Once the fabric
     // has a clock, stamp each packet with a `deliver_after: Instant`

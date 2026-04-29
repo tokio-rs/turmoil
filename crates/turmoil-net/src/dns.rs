@@ -80,6 +80,13 @@ fn reserved(name: &str) -> Option<IpAddr> {
 pub trait ToIpAddr: sealed::Sealed {
     #[doc(hidden)]
     fn to_ip_addr(&self, dns: &mut Dns) -> IpAddr;
+
+    /// Non-allocating variant — returns `None` if a hostname isn't
+    /// already registered. IP literals and the IP types themselves
+    /// always return `Some`. Used by read-only consumers like
+    /// `netstat` that have no business inventing addresses.
+    #[doc(hidden)]
+    fn try_to_ip_addr(&self, dns: &Dns) -> Option<IpAddr>;
 }
 
 /// A value that resolves to zero or more [`IpAddr`]s. Blanket impl
@@ -93,11 +100,17 @@ impl ToIpAddr for str {
     fn to_ip_addr(&self, dns: &mut Dns) -> IpAddr {
         dns.resolve(self)
     }
+    fn try_to_ip_addr(&self, dns: &Dns) -> Option<IpAddr> {
+        dns.lookup(self)
+    }
 }
 
 impl ToIpAddr for String {
     fn to_ip_addr(&self, dns: &mut Dns) -> IpAddr {
         dns.resolve(self)
+    }
+    fn try_to_ip_addr(&self, dns: &Dns) -> Option<IpAddr> {
+        dns.lookup(self)
     }
 }
 
@@ -105,11 +118,17 @@ impl ToIpAddr for &str {
     fn to_ip_addr(&self, dns: &mut Dns) -> IpAddr {
         dns.resolve(self)
     }
+    fn try_to_ip_addr(&self, dns: &Dns) -> Option<IpAddr> {
+        dns.lookup(self)
+    }
 }
 
 impl ToIpAddr for IpAddr {
     fn to_ip_addr(&self, _: &mut Dns) -> IpAddr {
         *self
+    }
+    fn try_to_ip_addr(&self, _: &Dns) -> Option<IpAddr> {
+        Some(*self)
     }
 }
 
@@ -117,11 +136,17 @@ impl ToIpAddr for Ipv4Addr {
     fn to_ip_addr(&self, _: &mut Dns) -> IpAddr {
         IpAddr::V4(*self)
     }
+    fn try_to_ip_addr(&self, _: &Dns) -> Option<IpAddr> {
+        Some(IpAddr::V4(*self))
+    }
 }
 
 impl ToIpAddr for Ipv6Addr {
     fn to_ip_addr(&self, _: &mut Dns) -> IpAddr {
         IpAddr::V6(*self)
+    }
+    fn try_to_ip_addr(&self, _: &Dns) -> Option<IpAddr> {
+        Some(IpAddr::V6(*self))
     }
 }
 

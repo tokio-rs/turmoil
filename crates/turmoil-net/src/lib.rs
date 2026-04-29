@@ -2,10 +2,11 @@
 
 use std::cell::RefCell;
 
-pub(crate) mod dns;
-pub(crate) mod fabric;
+mod dns;
+mod fabric;
 pub mod fixture;
-pub(crate) mod kernel;
+mod kernel;
+mod netstat;
 pub mod shim;
 
 use crate::dns::Dns;
@@ -14,6 +15,7 @@ use crate::fabric::Fabric;
 pub use crate::fabric::HostId;
 use crate::kernel::Kernel;
 pub use crate::kernel::KernelConfig;
+pub use crate::netstat::{Netstat, NetstatEntry, NetstatState, Proto};
 
 thread_local! {
     static CURRENT: RefCell<Option<Net>> = const { RefCell::new(None) };
@@ -135,4 +137,26 @@ pub(crate) fn sys<R>(f: impl FnOnce(&mut Kernel) -> R) -> R {
 /// for `ToSocketAddrs` impls that accept hostnames.
 pub(crate) fn lookup_host(name: &str) -> Option<std::net::IpAddr> {
     CURRENT.with(|c| c.borrow().as_ref().and_then(|net| net.dns.lookup(name)))
+}
+
+/// Snapshot a host's socket table, Linux `netstat`-style. `host`
+/// accepts a hostname (resolved via DNS like [`Net::add_host`]) or a
+/// literal IP. Panics if no `Net` is installed, or if the address
+/// doesn't match a registered host. Loopback isn't routable on its
+/// own — pass a hostname or the host's configured IP.
+pub fn netstat<H: ToIpAddr>(host: H) -> Netstat {
+    CURRENT.with(|c| {
+        let cell = c.borrow();
+        let net = cell
+            .as_ref()
+            .expect("no Net installed — call Net::enter() first");
+        let ip = host
+            .try_to_ip_addr(&net.dns)
+            .expect("hostname not registered");
+        let id = net
+            .fabric
+            .host_for_ip(ip)
+            .unwrap_or_else(|| panic!("no host registered for {ip}"));
+        netstat::snapshot(net.fabric.kernel(id))
+    })
 }
