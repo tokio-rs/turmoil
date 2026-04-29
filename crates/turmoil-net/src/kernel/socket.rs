@@ -2,7 +2,9 @@
 
 #![allow(dead_code, unused_variables)]
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
+
+use indexmap::IndexMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::ops::RangeInclusive;
 use std::path::PathBuf;
@@ -359,11 +361,11 @@ pub struct BindKey {
 #[derive(Debug)]
 pub struct SocketTable {
     next_id: u64,
-    sockets: HashMap<Fd, Socket>,
+    sockets: IndexMap<Fd, Socket>,
     /// Reverse index for inbound demux: bound tuple → sockets. List
     /// (not single `Fd`) because `SO_REUSEPORT` permits multiple
     /// sockets to share the exact same tuple.
-    bindings: HashMap<BindKey, Vec<Fd>>,
+    bindings: IndexMap<BindKey, Vec<Fd>>,
     ports: PortAllocator,
 }
 
@@ -371,8 +373,8 @@ impl SocketTable {
     pub fn new() -> Self {
         Self {
             next_id: 1,
-            sockets: HashMap::new(),
-            bindings: HashMap::new(),
+            sockets: IndexMap::new(),
+            bindings: IndexMap::new(),
             ports: PortAllocator::new(DEFAULT_EPHEMERAL_PORTS),
         }
     }
@@ -403,7 +405,7 @@ impl SocketTable {
             fds.retain(|&f| f != fd);
             !fds.is_empty()
         });
-        self.sockets.remove(&fd)
+        self.sockets.shift_remove(&fd)
     }
 
     /// All sockets bound to `key`, in bind order.
@@ -422,7 +424,7 @@ impl SocketTable {
         if let Some(fds) = self.bindings.get_mut(key) {
             fds.retain(|&f| f != fd);
             if fds.is_empty() {
-                self.bindings.remove(key);
+                self.bindings.shift_remove(key);
             }
         }
     }

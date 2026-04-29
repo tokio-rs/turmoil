@@ -1,8 +1,9 @@
 //! Inter-host packet routing.
 
-use std::collections::HashMap;
 use std::io::{Error, ErrorKind};
 use std::net::IpAddr;
+
+use indexmap::IndexMap;
 
 use crate::kernel::{Kernel, KernelConfig};
 
@@ -18,8 +19,8 @@ pub struct Host {
 
 #[derive(Debug)]
 pub struct Fabric {
-    hosts: HashMap<HostId, Host>,
-    ip_to_host: HashMap<IpAddr, HostId>,
+    hosts: IndexMap<HostId, Host>,
+    ip_to_host: IndexMap<IpAddr, HostId>,
     next_id: u32,
     default_cfg: KernelConfig,
 }
@@ -27,8 +28,8 @@ pub struct Fabric {
 impl Fabric {
     pub fn new(cfg: KernelConfig) -> Self {
         Self {
-            hosts: HashMap::new(),
-            ip_to_host: HashMap::new(),
+            hosts: IndexMap::new(),
+            ip_to_host: IndexMap::new(),
             next_id: 0,
             default_cfg: cfg,
         }
