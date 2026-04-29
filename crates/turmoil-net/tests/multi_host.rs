@@ -4,8 +4,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use turmoil_net::fixture::ClientServer;
 use turmoil_net::shim::tokio::net::{TcpListener, TcpStream, UdpSocket};
 
-#[tokio::test]
-async fn udp_across_two_hosts() {
+#[test]
+fn udp_across_two_hosts() {
     let a: std::net::IpAddr = "10.0.0.1".parse().unwrap();
     let b: std::net::IpAddr = "10.0.0.2".parse().unwrap();
 
@@ -23,12 +23,11 @@ async fn udp_across_two_hosts() {
             let (n, from) = c.recv_from(&mut buf).await.unwrap();
             assert_eq!(&buf[..n], b"hi");
             assert_eq!(from.ip(), a);
-        })
-        .await;
+        });
 }
 
-#[tokio::test]
-async fn tcp_across_two_hosts() {
+#[test]
+fn tcp_across_two_hosts() {
     let a: std::net::IpAddr = "10.0.0.1".parse().unwrap();
     let b: std::net::IpAddr = "10.0.0.2".parse().unwrap();
 
@@ -48,6 +47,5 @@ async fn tcp_across_two_hosts() {
             c.read_exact(&mut buf).await.unwrap();
             assert_eq!(&buf, b"hello");
             assert_eq!(c.peer_addr().unwrap().ip(), a);
-        })
-        .await;
+        });
 }

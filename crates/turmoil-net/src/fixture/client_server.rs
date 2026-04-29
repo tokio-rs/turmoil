@@ -44,7 +44,7 @@ impl ClientServer {
     /// Run the fixture with `fut` as the client. Every server is
     /// driven in parallel; the fixture returns `fut`'s output as
     /// soon as it resolves.
-    pub async fn run<T, F>(self, addrs: impl IntoIterator<Item = IpAddr>, fut: F) -> T
+    pub fn run<T, F>(self, addrs: impl IntoIterator<Item = IpAddr>, fut: F) -> T
     where
         F: Future<Output = T> + 'static,
         T: 'static,
@@ -53,48 +53,67 @@ impl ClientServer {
         let client_id = net.add_host(addrs);
         let guard = net.enter();
 
-        // One LocalSet per host. Each server's future is spawned
-        // onto its own set; the client's future we drive ourselves
-        // so we can observe completion.
-        let server_sets: Vec<(HostId, LocalSet)> = servers
-            .into_iter()
-            .map(|(id, fut)| {
-                let set = LocalSet::new();
-                set.spawn_local(fut);
-                (id, set)
-            })
-            .collect();
-        let client_set = LocalSet::new();
-        let mut client_fut = Box::pin(fut);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build current_thread runtime");
 
-        loop {
-            guard.step();
+        let result = rt.block_on(async move {
+            // One LocalSet per host. Each server's future is spawned
+            // onto its own set; the client's future we drive ourselves
+            // so we can observe completion.
+            let server_sets: Vec<(HostId, LocalSet)> = servers
+                .into_iter()
+                .map(|(id, fut)| {
+                    let set = LocalSet::new();
+                    set.spawn_local(fut);
+                    (id, set)
+                })
+                .collect();
+            let client_set = LocalSet::new();
+            let mut client_fut = Box::pin(fut);
 
-            for (id, set) in &server_sets {
-                guard.set_current(*id);
-                set.run_until(tokio::task::yield_now()).await;
-            }
+            loop {
+                crate::CURRENT.with(|c| {
+                    c.borrow_mut()
+                        .as_mut()
+                        .expect("guard is live")
+                        .fabric
+                        .step();
+                });
 
-            guard.set_current(client_id);
-            let completed = client_set
-                .run_until(async {
-                    let mut out = None;
-                    poll_fn(|cx| match client_fut.as_mut().poll(cx) {
-                        Poll::Ready(v) => {
-                            out = Some(v);
-                            Poll::Ready(())
-                        }
-                        Poll::Pending => Poll::Ready(()),
+                for (id, set) in &server_sets {
+                    crate::CURRENT.with(|c| {
+                        c.borrow_mut().as_mut().expect("guard is live").current = Some(*id);
+                    });
+                    set.run_until(tokio::task::yield_now()).await;
+                }
+
+                crate::CURRENT.with(|c| {
+                    c.borrow_mut().as_mut().expect("guard is live").current = Some(client_id);
+                });
+                let completed = client_set
+                    .run_until(async {
+                        let mut out = None;
+                        poll_fn(|cx| match client_fut.as_mut().poll(cx) {
+                            Poll::Ready(v) => {
+                                out = Some(v);
+                                Poll::Ready(())
+                            }
+                            Poll::Pending => Poll::Ready(()),
+                        })
+                        .await;
+                        out
                     })
                     .await;
-                    out
-                })
-                .await;
-            if let Some(out) = completed {
-                return out;
+                if let Some(out) = completed {
+                    return out;
+                }
+                tokio::task::yield_now().await;
             }
-            tokio::task::yield_now().await;
-        }
+        });
+        drop(guard);
+        result
     }
 }
 
