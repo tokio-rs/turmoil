@@ -52,6 +52,19 @@ pub use socket::{Addr, Domain, Fd, SocketOption, SocketOptionKind, Type};
 // Not urgent while nothing loops tightly, but pick an answer before
 // we write tests that rely on back-and-forth request/response.
 
+// TODO: SYN retransmit.
+//
+// A SYN dropped by the listener's backlog cap (or, eventually, by a
+// link filter) is lost forever — the connecting socket sits in
+// SynSent with no retry. Real TCP retransmits SYN with exponential
+// backoff (Linux: tcp_syn_retries, default 6). We should:
+//   1. Stash a retransmit deadline on the TCB when SYN is emitted.
+//   2. On each egress pass (or a dedicated timer tick), re-emit SYN
+//      if the deadline has passed and we're still in SynSent.
+//   3. Give up after N attempts, surface as ConnectionRefused /
+//      TimedOut.
+// Same machinery will eventually cover data retransmit.
+
 /// Default MTU for non-loopback traffic (bytes). Matches standard Ethernet.
 pub const DEFAULT_MTU: u32 = 1500;
 /// Default MTU for loopback (bytes). Matches Linux `lo`.
@@ -707,6 +720,53 @@ mod tests {
         k.add_address("10.0.0.2".parse().unwrap());
         k.bind(&inet("10.0.0.1:5000"), Type::Dgram).unwrap();
         k.bind(&inet("10.0.0.2:5000"), Type::Dgram).unwrap();
+    }
+
+    // Helpers for driving poll_* directly. Kernel-level tests don't
+    // have a tokio runtime — noop waker is enough because we never
+    // expect `Pending` from these specific syscalls (send to a
+    // configured local IP with a valid target succeeds immediately).
+    fn noop_cx() -> Context<'static> {
+        use std::task::Waker;
+        Context::from_waker(Waker::noop())
+    }
+
+    #[test]
+    fn udp_broadcast_send_requires_broadcast_option() {
+        // Send to a broadcast destination fails with PermissionDenied
+        // unless SO_BROADCAST is set — Linux behavior.
+        let mut k = Kernel::new();
+        k.add_address("10.0.0.1".parse().unwrap());
+        let s = k.bind(&inet("10.0.0.1:0"), Type::Dgram).unwrap();
+
+        let dst = Addr::Inet("255.255.255.255:9000".parse().unwrap());
+        let Poll::Ready(Err(e)) = k.poll_send_to(s, &mut noop_cx(), b"x", &dst) else {
+            panic!("expected broadcast rejection");
+        };
+        assert_eq!(e.kind(), ErrorKind::PermissionDenied);
+
+        k.set_option(s, SocketOption::Broadcast(true)).unwrap();
+        let Poll::Ready(Ok(_)) = k.poll_send_to(s, &mut noop_cx(), b"x", &dst) else {
+            panic!("broadcast send should succeed with SO_BROADCAST");
+        };
+    }
+
+    #[test]
+    fn bind_zero_avoids_ports_taken_on_other_ips() {
+        // Linux: `:0` picks a port not in use at any IP for the same
+        // (domain, ty). The allocator cursor starts at 49152, so that
+        // would be the first port handed out. Squatting it on 10.0.0.1
+        // should force the next `:0` bind to pick a different port
+        // rather than colliding.
+        let mut k = Kernel::new();
+        k.add_address("10.0.0.1".parse().unwrap());
+
+        k.bind(&inet("10.0.0.1:49152"), Type::Dgram).unwrap();
+        let s = k.bind(&inet("127.0.0.1:0"), Type::Dgram).unwrap();
+        let Addr::Inet(sa) = k.local_addr(s).unwrap() else {
+            panic!("v4 expected")
+        };
+        assert_ne!(sa.port(), 49152);
     }
 
     #[test]
