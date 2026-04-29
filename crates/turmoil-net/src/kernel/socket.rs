@@ -454,10 +454,7 @@ impl SocketTable {
 
     /// Iterate connections matching `local` — any remote. Used to
     /// count in-flight children of a listener.
-    pub fn connections_on(
-        &self,
-        local: SocketAddr,
-    ) -> impl Iterator<Item = (SocketAddr, Fd)> + '_ {
+    pub fn connections_on(&self, local: SocketAddr) -> impl Iterator<Item = (SocketAddr, Fd)> + '_ {
         self.connections
             .iter()
             .filter(move |((l, _), _)| *l == local)

@@ -5,14 +5,17 @@ use std::pin::Pin;
 use std::task::Poll;
 
 use tokio::task::LocalSet;
+use tokio::time::sleep;
 
+use crate::fixture::TICK;
 use crate::{HostId, Net, ToIpAddrs};
 
 type BoxFut = Pin<Box<dyn Future<Output = ()>>>;
 
 /// Multi-host fixture with N servers plus one client. Each role runs
 /// as its own host on its own [`LocalSet`]; the fabric is stepped
-/// between turns. The run finishes the moment the client's future
+/// between drains. See the [module docs](super) for the scheduling
+/// approach. The run finishes the moment the client's future
 /// resolves — any server futures still running are aborted.
 pub struct ClientServer {
     net: Net,
@@ -55,10 +58,12 @@ impl ClientServer {
         let guard = net.enter();
 
         let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
+            .enable_time()
+            .start_paused(true)
             .build()
             .expect("build current_thread runtime");
 
+        let guard_ref = &guard;
         let result = rt.block_on(async move {
             // One LocalSet per host. Each server's future is spawned
             // onto its own set; the client's future we drive ourselves
@@ -75,24 +80,12 @@ impl ClientServer {
             let mut client_fut = Box::pin(fut);
 
             loop {
-                crate::CURRENT.with(|c| {
-                    c.borrow_mut()
-                        .as_mut()
-                        .expect("guard is live")
-                        .fabric
-                        .step();
-                });
-
                 for (id, set) in &server_sets {
-                    crate::CURRENT.with(|c| {
-                        c.borrow_mut().as_mut().expect("guard is live").current = Some(*id);
-                    });
-                    set.run_until(tokio::task::yield_now()).await;
+                    guard_ref.set_current(*id);
+                    set.run_until(sleep(TICK)).await;
                 }
 
-                crate::CURRENT.with(|c| {
-                    c.borrow_mut().as_mut().expect("guard is live").current = Some(client_id);
-                });
+                guard_ref.set_current(client_id);
                 let completed = client_set
                     .run_until(async {
                         let mut out = None;
@@ -104,13 +97,17 @@ impl ClientServer {
                             Poll::Pending => Poll::Ready(()),
                         })
                         .await;
+                        if out.is_none() {
+                            sleep(TICK).await;
+                        }
                         out
                     })
                     .await;
                 if let Some(out) = completed {
                     return out;
                 }
-                tokio::task::yield_now().await;
+
+                guard_ref.step();
             }
         });
         drop(guard);
