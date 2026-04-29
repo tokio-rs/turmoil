@@ -1,12 +1,13 @@
 use std::io::ErrorKind;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use turmoil_net::fixture;
 use turmoil_net::shim::tokio::net::{TcpListener, TcpStream};
-use turmoil_net::{KernelConfig, Net};
+use turmoil_net::KernelConfig;
 
 #[tokio::test]
 async fn tcp_accept_completes_handshake() {
-    Net::lo(async {
+    fixture::lo(async {
         let listener = TcpListener::bind("127.0.0.1:7100").await.unwrap();
         let (client, (server, server_peer)) =
             tokio::try_join!(TcpStream::connect("127.0.0.1:7100"), listener.accept(),).unwrap();
@@ -21,7 +22,7 @@ async fn tcp_accept_completes_handshake() {
 
 #[tokio::test]
 async fn tcp_roundtrip() {
-    Net::lo(async {
+    fixture::lo(async {
         let listener = TcpListener::bind("127.0.0.1:7400").await.unwrap();
         let (mut client, (mut server, _)) =
             tokio::try_join!(TcpStream::connect("127.0.0.1:7400"), listener.accept(),).unwrap();
@@ -36,7 +37,7 @@ async fn tcp_roundtrip() {
 #[tokio::test]
 async fn tcp_read_wakes_on_data() {
     // Parked read registers a waker; a later write must wake it.
-    Net::lo(async {
+    fixture::lo(async {
         let listener = TcpListener::bind("127.0.0.1:7500").await.unwrap();
         let (mut client, (mut server, _)) =
             tokio::try_join!(TcpStream::connect("127.0.0.1:7500"), listener.accept(),).unwrap();
@@ -58,7 +59,7 @@ async fn tcp_write_backpressure() {
     // Send buffer cap is 64 KiB; recv buffer cap is 64 KiB. Writing
     // 256 KiB without the server ever reading must block once both
     // are full. Draining the server releases the writer.
-    Net::lo(async {
+    fixture::lo(async {
         let listener = TcpListener::bind("127.0.0.1:7600").await.unwrap();
         let (mut client, (mut server, _)) =
             tokio::try_join!(TcpStream::connect("127.0.0.1:7600"), listener.accept(),).unwrap();
@@ -89,7 +90,7 @@ async fn tcp_segments_respect_mss() {
     // Loopback MTU is 65536; MSS = 65536 - 20 (IP) - 20 (TCP) = 65496.
     // A 200 KiB write must produce multiple segments. We can't observe
     // the wire but we can confirm the byte stream arrives intact.
-    Net::lo(async {
+    fixture::lo(async {
         let listener = TcpListener::bind("127.0.0.1:7700").await.unwrap();
         let (mut client, (mut server, _)) =
             tokio::try_join!(TcpStream::connect("127.0.0.1:7700"), listener.accept(),).unwrap();
@@ -106,7 +107,7 @@ async fn tcp_segments_respect_mss() {
 
 #[tokio::test]
 async fn tcp_graceful_close_signals_eof() {
-    Net::lo(async {
+    fixture::lo(async {
         let listener = TcpListener::bind("127.0.0.1:7800").await.unwrap();
         let (mut client, (mut server, _)) =
             tokio::try_join!(TcpStream::connect("127.0.0.1:7800"), listener.accept(),).unwrap();
@@ -132,7 +133,7 @@ async fn tcp_accept_backlog_drops_excess_syns() {
     // the backlog cap; we don't model SYN retransmit yet, so the client
     // stays parked forever. After the server accepts one, a fresh
     // connect fits in the freed slot.
-    Net::lo_with_config(KernelConfig::default().default_backlog(2), async {
+    fixture::lo_with_config(KernelConfig::default().default_backlog(2), async {
         let listener = TcpListener::bind("127.0.0.1:8100").await.unwrap();
 
         // Fill the backlog with two handshaked connections. The
@@ -161,7 +162,7 @@ async fn tcp_accept_backlog_drops_excess_syns() {
 
 #[tokio::test]
 async fn tcp_connect_to_closed_port_is_refused() {
-    Net::lo(async {
+    fixture::lo(async {
         let err = match TcpStream::connect("127.0.0.1:9999").await {
             Ok(_) => panic!("connect unexpectedly succeeded"),
             Err(e) => e,
@@ -173,7 +174,7 @@ async fn tcp_connect_to_closed_port_is_refused() {
 
 #[tokio::test]
 async fn tcp_half_close_send_then_peer_writes_back() {
-    Net::lo(async {
+    fixture::lo(async {
         let listener = TcpListener::bind("127.0.0.1:8200").await.unwrap();
         let (mut client, (mut server, _)) =
             tokio::try_join!(TcpStream::connect("127.0.0.1:8200"), listener.accept(),).unwrap();
@@ -207,7 +208,7 @@ async fn tcp_drop_with_unread_bytes_sends_rst() {
     // Server sends bytes to client but client drops without reading.
     // Client's drop emits RST; server observes ConnectionReset on a
     // subsequent write.
-    Net::lo(async {
+    fixture::lo(async {
         let listener = TcpListener::bind("127.0.0.1:8300").await.unwrap();
         let (client, (mut server, _)) =
             tokio::try_join!(TcpStream::connect("127.0.0.1:8300"), listener.accept(),).unwrap();
@@ -245,7 +246,7 @@ async fn tcp_inbound_rst_wakes_parked_read() {
     // Park a reader, then have the peer drop with unread bytes on
     // *its* side — that triggers an abortive close (RST), which our
     // parked reader must observe as ConnectionReset.
-    Net::lo(async {
+    fixture::lo(async {
         let listener = TcpListener::bind("127.0.0.1:8400").await.unwrap();
         let (client, (mut server, _)) =
             tokio::try_join!(TcpStream::connect("127.0.0.1:8400"), listener.accept(),).unwrap();
@@ -274,7 +275,7 @@ async fn tcp_inbound_rst_wakes_parked_read() {
 
 #[tokio::test]
 async fn tcp_stream_options_roundtrip() {
-    Net::lo(async {
+    fixture::lo(async {
         let listener = TcpListener::bind("127.0.0.1:8600").await.unwrap();
         let (client, _) =
             tokio::try_join!(TcpStream::connect("127.0.0.1:8600"), listener.accept(),).unwrap();
@@ -292,7 +293,7 @@ async fn tcp_stream_options_roundtrip() {
 
 #[tokio::test]
 async fn tcp_try_read_would_block_on_empty() {
-    Net::lo(async {
+    fixture::lo(async {
         let listener = TcpListener::bind("127.0.0.1:8700").await.unwrap();
         let (client, _) =
             tokio::try_join!(TcpStream::connect("127.0.0.1:8700"), listener.accept(),).unwrap();
@@ -308,7 +309,7 @@ async fn tcp_try_read_would_block_on_empty() {
 
 #[tokio::test]
 async fn tcp_peek_leaves_data_for_read() {
-    Net::lo(async {
+    fixture::lo(async {
         let listener = TcpListener::bind("127.0.0.1:8800").await.unwrap();
         let (mut client, (mut server, _)) =
             tokio::try_join!(TcpStream::connect("127.0.0.1:8800"), listener.accept(),).unwrap();
@@ -329,7 +330,7 @@ async fn tcp_peek_leaves_data_for_read() {
 
 #[tokio::test]
 async fn tcp_listener_ttl_roundtrips() {
-    Net::lo(async {
+    fixture::lo(async {
         let listener = TcpListener::bind("127.0.0.1:7300").await.unwrap();
         assert_eq!(listener.ttl().unwrap(), 64);
         listener.set_ttl(16).unwrap();
