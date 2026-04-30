@@ -1,5 +1,10 @@
 //! Drop-in replacements for `tokio::net` types.
-//!
-//! TODO: `TcpStream`, `TcpListener`, `UdpSocket`, `UnixStream`,
-//! `UnixListener`, owned split halves. Each implements the same
-//! `AsyncRead`/`AsyncWrite` surface as its tokio counterpart.
+
+mod addr;
+pub mod tcp;
+mod udp;
+
+pub use addr::ToSocketAddrs;
+pub use tcp::listener::TcpListener;
+pub use tcp::stream::TcpStream;
+pub use udp::UdpSocket;

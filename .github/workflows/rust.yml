@@ -54,7 +54,7 @@ jobs:
       - name: Check semver
         uses: obi1kenobi/cargo-semver-checks-action@v2
         with:
-          uses: dtolnay/rust-toolchain@stable
+          package: turmoil
 
   external-types:
     runs-on: ubuntu-latest

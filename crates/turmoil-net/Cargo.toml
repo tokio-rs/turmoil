@@ -1,18 +1,20 @@
 [package]
 name = "turmoil-net"
-version = "0.0.0"
+version = "0.1.0"
 edition = "2021"
 license = "MIT"
 authors = ["Tokio Contributors <team@tokio.rs>"]
-description = "Simulated socket layer for turmoil"
+description = "Simulated socket layer for testing"
 homepage = "https://github.com/tokio-rs/turmoil"
 repository = "https://github.com/tokio-rs/turmoil"
-publish = false
+readme = "README.md"
+keywords = ["Deterministic", "Simulation", "Testing"]
+categories = ["asynchronous", "network-programming", "simulation"]
 
 [dependencies]
-bytes = "1.4"
-tokio = { version = "1.25.0", features = ["io-util", "net", "sync", "time"] }
-tracing = "0.1"
+bytes = "1"
+indexmap = "2"
+tokio = { version = "1", features = ["io-util", "net", "sync", "time", "rt", "macros", "test-util"] }
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tokio_unstable)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tokio_unstable)', 'cfg(parity_tokio)'] }
