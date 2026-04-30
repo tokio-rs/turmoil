@@ -1,5 +1,6 @@
 //! Rule installation and fabric behavior under rules.
 
+use std::io::ErrorKind;
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -42,7 +43,8 @@ fn latency_delays_delivery() {
 
 #[test]
 fn drop_rule_blocks_all_traffic() {
-    // With everything dropped, the TCP handshake can never complete.
+    // With everything dropped, the TCP handshake can't complete. SYN
+    // retx exhausts and connect surfaces TimedOut.
     ClientServer::new()
         .server("server", async move {
             let _l = TcpListener::bind("0.0.0.0:9000").await.unwrap();
@@ -50,14 +52,8 @@ fn drop_rule_blocks_all_traffic() {
         })
         .run("client", async move {
             rule(|_: &_| Verdict::Drop).forget();
-
-            let result =
-                tokio::time::timeout(Duration::from_secs(1), TcpStream::connect("server:9000"))
-                    .await;
-            assert!(
-                result.is_err(),
-                "connect should hang when every packet is dropped"
-            );
+            let err = TcpStream::connect("server:9000").await.unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::TimedOut);
         });
 }
 
@@ -82,12 +78,8 @@ fn rule_guard_uninstalls_on_drop() {
         .run("client", async move {
             {
                 let _g = rule(|_: &_| Verdict::Drop);
-                let result = tokio::time::timeout(
-                    Duration::from_millis(100),
-                    TcpStream::connect("server:9000"),
-                )
-                .await;
-                assert!(result.is_err(), "drop rule should block connect");
+                let err = TcpStream::connect("server:9000").await.unwrap_err();
+                assert_eq!(err.kind(), ErrorKind::TimedOut);
             }
 
             let mut c = TcpStream::connect("server:9000").await.unwrap();
@@ -100,7 +92,8 @@ fn rule_guard_uninstalls_on_drop() {
 
 #[test]
 fn pass_falls_through_to_next_rule() {
-    // First rule always passes, second drops — end state is "dropped".
+    // First rule always passes, second drops — end state is "dropped",
+    // so SYN retx exhausts and connect surfaces TimedOut.
     ClientServer::new()
         .server("server", async move {
             let _l = TcpListener::bind("0.0.0.0:9000").await.unwrap();
@@ -109,20 +102,15 @@ fn pass_falls_through_to_next_rule() {
         .run("client", async move {
             rule(|_: &_| Verdict::Pass).forget();
             rule(|_: &_| Verdict::Drop).forget();
-
-            let result = tokio::time::timeout(
-                Duration::from_millis(100),
-                TcpStream::connect("server:9000"),
-            )
-            .await;
-            assert!(result.is_err(), "second rule's Drop should apply");
+            let err = TcpStream::connect("server:9000").await.unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::TimedOut);
         });
 }
 
 #[test]
 fn first_non_pass_wins() {
     // First rule drops, second never runs. A non-Drop second rule
-    // demonstrates the short-circuit.
+    // demonstrates the short-circuit — Drop wins, connect times out.
     ClientServer::new()
         .server("server", async move {
             let _l = TcpListener::bind("0.0.0.0:9000").await.unwrap();
@@ -131,12 +119,7 @@ fn first_non_pass_wins() {
         .run("client", async move {
             rule(|_: &_| Verdict::Drop).forget();
             rule(|_: &_| Verdict::Deliver(Duration::ZERO)).forget();
-
-            let result = tokio::time::timeout(
-                Duration::from_millis(100),
-                TcpStream::connect("server:9000"),
-            )
-            .await;
-            assert!(result.is_err(), "first Drop wins");
+            let err = TcpStream::connect("server:9000").await.unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::TimedOut);
         });
 }

@@ -198,11 +198,11 @@ pub enum TcpState {
 /// real TCB needs for the pieces we model today; close-state
 /// bookkeeping (`FIN`/`RST` states, `TIME-WAIT`) comes later.
 ///
-/// `send_buf` layout — `[already-ACK'd drained | in-flight | queued]`:
-/// - Bytes 0..(snd_nxt - snd_una) are on the wire, unACK'd. Kept so we
-///   could retransmit, though v1's fabric is reliable.
+/// `send_buf` layout — `[in-flight | queued]`:
+/// - Bytes 0..(snd_nxt - snd_una) are on the wire, unACK'd. Kept so
+///   retransmit can re-emit from `snd_una`.
 /// - Bytes (snd_nxt - snd_una).. are queued for the next egress pass.
-/// - ACK'd bytes are `advance()`d off the front.
+/// - ACK'd bytes are `split_to()`d off the front.
 #[derive(Debug)]
 pub struct Tcb {
     pub state: TcpState,
@@ -236,6 +236,21 @@ pub struct Tcb {
     /// return `ConnectionReset`; distinguishes the error from a clean
     /// `Closed` transition.
     pub reset: bool,
+    /// Connection was aborted by retransmit exhaustion. Further ops
+    /// return `TimedOut`, matching Linux's `ETIMEDOUT` from
+    /// `tcp_retries2`. Distinct from `reset` because retx exhaustion
+    /// doesn't send a RST (it can't — the fabric is dropping our
+    /// traffic), it just fails locally.
+    pub timed_out: bool,
+    /// Egress passes observed since `snd_una` last advanced. When it
+    /// crosses the retx threshold we rewind `snd_nxt = snd_una` and
+    /// re-emit (go-back-N). Count-based rather than time-based so the
+    /// mechanism is harness-agnostic.
+    pub egress_since_ack: u32,
+    /// Retransmit attempts for the current unacked window. Reset on
+    /// any ACK that advances `snd_una`. When it hits the max the
+    /// connection is aborted with `TimedOut`.
+    pub retx_attempts: u32,
 }
 
 /// Listener state. Attached to a socket by `listen(2)`.

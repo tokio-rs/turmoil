@@ -1,8 +1,28 @@
 //! TCP state machine.
 //!
-//! v1 scope: handshake + streaming data. FIN/RST, half-close, and
-//! retransmit still come later — the simulated fabric is reliable, so
-//! dropping retransmit for now is safe.
+//! Handshake, streaming data, FIN/RST, half-close, and go-back-N
+//! retransmit. Retransmit is count-based — see [`check_retx`] — so
+//! the mechanism stays harness-agnostic; time-driven RTO with
+//! SRTT/RTTVAR is a later concern once flow/congestion control is on
+//! the table.
+//!
+//! ## Go-back-N, not SACK
+//!
+//! On retransmit we rewind `snd_nxt = snd_una` and re-emit the entire
+//! unacked window. Real TCP typically negotiates SACK and resends
+//! only the gaps. We don't, for two reasons:
+//!
+//! - **No reassembly on receive.** Our receiver accepts segments
+//!   strictly in order (`seq == rcv_nxt`, else drop). Selective retx
+//!   would only pay off if the receiver buffered out-of-order
+//!   segments; without that, resending the tail is necessary anyway.
+//! - **Simpler state.** No per-segment tracking, no retx queue, no
+//!   SACK option parsing.
+//!
+//! App-visible behavior is identical: bytes arrive in-order and
+//! intact. The cost is wire inefficiency under loss — a test that
+//! counts packets could tell the difference, but the socket API
+//! can't.
 //!
 //! # Perf TODO
 //! - `segment_all` still sweeps every socket via `SocketTable::iter`
@@ -40,14 +60,21 @@ pub(super) fn poll_connect(
                 park_connect(k, fd, cx);
                 Poll::Pending
             }
-            // Any close state mid-connect means the peer RST'd.
-            // Linux surfaces this as `ConnectionRefused`.
+            // Close mid-connect: SYN retx exhaustion surfaces as
+            // TimedOut (Linux's ETIMEDOUT); anything else is the
+            // peer RST'ing, which Linux reports as ECONNREFUSED.
             TcpState::Closed
             | TcpState::FinWait1
             | TcpState::FinWait2
             | TcpState::CloseWait
             | TcpState::LastAck
-            | TcpState::Closing => Poll::Ready(Err(Error::from(ErrorKind::ConnectionRefused))),
+            | TcpState::Closing => {
+                if tcb.timed_out {
+                    Poll::Ready(Err(Error::from(ErrorKind::TimedOut)))
+                } else {
+                    Poll::Ready(Err(Error::from(ErrorKind::ConnectionRefused)))
+                }
+            }
         };
     }
 
@@ -72,6 +99,9 @@ pub(super) fn poll_connect(
             peer_fin: false,
             fin_seq: None,
             reset: false,
+            timed_out: false,
+            egress_since_ack: 0,
+            retx_attempts: 0,
         });
         st.peer = Some(Addr::Inet(peer));
     }
@@ -283,6 +313,9 @@ fn handle_established(
                     let _ = tcb.send_buf.split_to(data_bytes as usize);
                 }
                 tcb.snd_una = s.ack;
+                // Progress — retx machinery resets.
+                tcb.egress_since_ack = 0;
+                tcb.retx_attempts = 0;
 
                 // Advance state machine on FIN-ACK.
                 if fin_acked {
@@ -430,6 +463,9 @@ fn accept_syn(
             peer_fin: false,
             fin_seq: None,
             reset: false,
+            timed_out: false,
+            egress_since_ack: 0,
+            retx_attempts: 0,
         });
     }
     k.sockets.insert_connection(local, remote, child);
@@ -522,6 +558,7 @@ pub(super) fn on_close(k: &mut Kernel, fd: Fd) -> bool {
             }
             (Type::Stream, Some(tcb), _)
                 if !tcb.reset
+                    && !tcb.timed_out
                     && tcb.state != TcpState::Closed
                     && tcb.state != TcpState::SynSent
                     && tcb.state != TcpState::SynReceived =>
@@ -685,10 +722,44 @@ pub(super) fn reap_closed(k: &mut Kernel) {
 /// `reset` is set so subsequent ops return `ConnectionReset`, and all
 /// parked tasks wake so they can observe the new state.
 fn abort_connection(k: &mut Kernel, fd: Fd) {
+    abort_with(k, fd, AbortReason::Reset);
+}
+
+/// Abort via retransmit exhaustion. Same flush/wake as
+/// [`abort_connection`] but surfaces as `TimedOut` rather than
+/// `ConnectionReset`, matching Linux's `ETIMEDOUT` from
+/// `tcp_retries2`. No RST is emitted — exhaustion means packets
+/// weren't reaching the peer, so another RST would fare no better.
+fn abort_timed_out(k: &mut Kernel, fd: Fd) {
+    abort_with(k, fd, AbortReason::TimedOut);
+}
+
+enum AbortReason {
+    Reset,
+    TimedOut,
+}
+
+/// Returns the post-abort error a syscall should surface, if any.
+/// `reset` wins over `timed_out` when both somehow land — RST is the
+/// stronger signal — but in practice only one ever fires per TCB.
+fn abort_error(tcb: &Tcb) -> Option<Error> {
+    if tcb.reset {
+        Some(Error::from(ErrorKind::ConnectionReset))
+    } else if tcb.timed_out {
+        Some(Error::from(ErrorKind::TimedOut))
+    } else {
+        None
+    }
+}
+
+fn abort_with(k: &mut Kernel, fd: Fd, reason: AbortReason) {
     let st = k.lookup_mut(fd).unwrap();
     if let Some(tcb) = st.tcb.as_mut() {
         tcb.state = TcpState::Closed;
-        tcb.reset = true;
+        match reason {
+            AbortReason::Reset => tcb.reset = true,
+            AbortReason::TimedOut => tcb.timed_out = true,
+        }
         tcb.send_buf.clear();
         tcb.recv_buf.clear();
     }
@@ -845,8 +916,8 @@ pub(super) fn poll_send(
     let Some(tcb) = st.tcb.as_ref() else {
         return Poll::Ready(Err(Error::from(ErrorKind::NotConnected)));
     };
-    if tcb.reset {
-        return Poll::Ready(Err(Error::from(ErrorKind::ConnectionReset)));
+    if let Some(e) = abort_error(tcb) {
+        return Poll::Ready(Err(e));
     }
     if tcb.wr_closed {
         return Poll::Ready(Err(Error::from(ErrorKind::BrokenPipe)));
@@ -886,8 +957,8 @@ pub(super) fn poll_shutdown_write(
     let Some(tcb) = st.tcb.as_mut() else {
         return Poll::Ready(Err(Error::from(ErrorKind::NotConnected)));
     };
-    if tcb.reset {
-        return Poll::Ready(Err(Error::from(ErrorKind::ConnectionReset)));
+    if let Some(e) = abort_error(tcb) {
+        return Poll::Ready(Err(e));
     }
     if tcb.wr_closed {
         return Poll::Ready(Ok(()));
@@ -922,12 +993,12 @@ pub(super) fn poll_recv(
             Err(e) => return Poll::Ready(Err(e)),
         };
         // Inspect without holding a borrow across the mutable ops.
-        let (empty, peer_fin, reset, readable_state, peer) = match st.tcb.as_ref() {
+        let (empty, peer_fin, abort_err, readable_state, peer) = match st.tcb.as_ref() {
             None => return Poll::Ready(Err(Error::from(ErrorKind::NotConnected))),
             Some(t) => (
                 t.recv_buf.is_empty(),
                 t.peer_fin,
-                t.reset,
+                abort_error(t),
                 matches!(
                     t.state,
                     TcpState::Established
@@ -938,9 +1009,9 @@ pub(super) fn poll_recv(
                 t.peer,
             ),
         };
-        // RST wins over buffered data — callers need the error.
-        if reset {
-            return Poll::Ready(Err(Error::from(ErrorKind::ConnectionReset)));
+        // Abort wins over buffered data — callers need the error.
+        if let Some(e) = abort_err {
+            return Poll::Ready(Err(e));
         }
         if empty {
             // Clean EOF — peer sent FIN and we've drained everything.
@@ -1012,8 +1083,8 @@ pub(super) fn poll_peek(
     let Some(tcb) = st.tcb.as_ref() else {
         return Poll::Ready(Err(Error::from(ErrorKind::NotConnected)));
     };
-    if tcb.reset {
-        return Poll::Ready(Err(Error::from(ErrorKind::ConnectionReset)));
+    if let Some(e) = abort_error(tcb) {
+        return Poll::Ready(Err(e));
     }
     if tcb.recv_buf.is_empty() {
         if tcb.peer_fin {
@@ -1031,6 +1102,113 @@ pub(super) fn poll_peek(
     let n = tcb.recv_buf.len().min(buf.len());
     buf[..n].copy_from_slice(&tcb.recv_buf[..n]);
     Poll::Ready(Ok(n))
+}
+
+/// Count-based retransmit sweep. For each TCB with unacked data,
+/// increment the "egress passes since ACK progress" counter. Once it
+/// crosses `retx_threshold`, rewind `snd_nxt = snd_una` so the next
+/// `segment_all` pass re-emits from the oldest unacked byte
+/// (go-back-N — see the module-level doc for why we don't do SACK).
+/// After `retx_max` attempts, abort with `ConnectionReset`.
+///
+/// Count-based (not time-based) so the mechanism is harness-agnostic:
+/// harnesses with fixed-width ticks translate N ticks to sim time,
+/// interleaving harnesses see it as a quantum count. Tests care about
+/// "dropped packet → retx eventually happens," not exact timing.
+pub(super) fn check_retx(k: &mut Kernel) {
+    let threshold = k.retx_threshold;
+    let max = k.retx_max;
+    let candidates: Vec<Fd> = k
+        .sockets
+        .iter()
+        .filter_map(|(fd, st)| {
+            let tcb = st.tcb.as_ref()?;
+            // Handshake states have implicit in-flight (the SYN or
+            // SYN-ACK). Data states use snd_una != snd_nxt.
+            let handshake = matches!(tcb.state, TcpState::SynSent | TcpState::SynReceived);
+            let data = matches!(
+                tcb.state,
+                TcpState::Established
+                    | TcpState::CloseWait
+                    | TcpState::FinWait1
+                    | TcpState::Closing
+                    | TcpState::LastAck
+            ) && tcb.snd_una != tcb.snd_nxt;
+            if handshake || data {
+                Some(fd)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let mut abort: Vec<Fd> = Vec::new();
+    let mut resend_handshake: Vec<Fd> = Vec::new();
+    for fd in candidates {
+        let tcb = k.sockets.get_mut(fd).unwrap().tcb.as_mut().unwrap();
+        tcb.egress_since_ack += 1;
+        if tcb.egress_since_ack < threshold {
+            continue;
+        }
+        if tcb.retx_attempts >= max {
+            abort.push(fd);
+            continue;
+        }
+        tcb.retx_attempts += 1;
+        tcb.egress_since_ack = 0;
+        match tcb.state {
+            TcpState::SynSent | TcpState::SynReceived => resend_handshake.push(fd),
+            _ => {
+                // Rewind to oldest unacked byte. `segment_all` below
+                // will re-chop from snd_una; any in-flight tail gets
+                // re-sent too (go-back-N) — wasteful but correct
+                // without an out-of-order receive queue on the peer
+                // side.
+                tcb.snd_nxt = tcb.snd_una;
+            }
+        }
+    }
+    for fd in resend_handshake {
+        emit_handshake(k, fd);
+    }
+    for fd in abort {
+        abort_timed_out(k, fd);
+    }
+}
+
+/// Re-emit the SYN (client, `SynSent`) or SYN-ACK (server,
+/// `SynReceived`) for a handshake that's been stuck. Reuses
+/// `snd_una - 1` as the seq — matches the ISN used at initial emit,
+/// since `snd_una` was set to `isn + 1` there.
+fn emit_handshake(k: &mut Kernel, fd: Fd) {
+    let st = k.lookup(fd).expect("retx candidate");
+    let tcb = st.tcb.as_ref().expect("handshake state has tcb");
+    let local = bound_endpoint(st);
+    let remote = tcb.peer;
+    let seq = tcb.snd_una.wrapping_sub(1);
+    let (ack_flag, ack) = match tcb.state {
+        TcpState::SynSent => (false, 0),
+        TcpState::SynReceived => (true, tcb.rcv_nxt),
+        _ => unreachable!("emit_handshake only called for SynSent/SynReceived"),
+    };
+    emit(
+        k,
+        local,
+        remote,
+        TcpSegment {
+            src_port: local.port(),
+            dst_port: remote.port(),
+            seq,
+            ack,
+            flags: TcpFlags {
+                syn: true,
+                ack: ack_flag,
+                ..TcpFlags::default()
+            },
+            window: DEFAULT_WINDOW,
+            payload: Bytes::new(),
+        },
+    );
 }
 
 /// Sweep all TCP sockets with transmittable bytes or a pending FIN

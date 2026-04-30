@@ -31,19 +31,6 @@ pub use socket::{ListenState, Socket, Tcb, TcpState};
 // for rules
 pub use packet::{Packet, TcpFlags, TcpSegment, Transport, UdpDatagram};
 
-// TODO: SYN retransmit.
-//
-// A SYN dropped by the listener's backlog cap (or, eventually, by a
-// link filter) is lost forever — the connecting socket sits in
-// SynSent with no retry. Real TCP retransmits SYN with exponential
-// backoff (Linux: tcp_syn_retries, default 6). We should:
-//   1. Stash a retransmit deadline on the TCB when SYN is emitted.
-//   2. On each egress pass (or a dedicated timer tick), re-emit SYN
-//      if the deadline has passed and we're still in SynSent.
-//   3. Give up after N attempts, surface as ConnectionRefused /
-//      TimedOut.
-// Same machinery will eventually cover data retransmit.
-
 /// Default MTU for non-loopback traffic (bytes). Matches standard Ethernet.
 pub const DEFAULT_MTU: u32 = 1500;
 /// Default MTU for loopback (bytes). Matches Linux `lo`.
@@ -51,6 +38,21 @@ pub const DEFAULT_LOOPBACK_MTU: u32 = 65536;
 /// Default backlog for `TcpListener::bind` when the caller doesn't
 /// specify one. Mirrors Linux's `SOMAXCONN`.
 pub const DEFAULT_BACKLOG: usize = 1024;
+
+/// Default number of egress passes without ACK progress before TCP
+/// retransmits. Real Linux uses a time-based RTO; we count egress
+/// ticks to stay harness-agnostic (harnesses with fixed-width ticks
+/// translate this to sim time; interleaving harnesses see it as a
+/// quantum count). Three is small enough that tests don't wait
+/// forever, large enough that a reliable loopback doesn't spuriously
+/// retransmit.
+pub const DEFAULT_RETX_THRESHOLD: u32 = 3;
+
+/// Default retransmit attempts before a TCP connection is aborted
+/// with `ConnectionReset`. Roughly analogous to Linux's
+/// `tcp_retries2` (default 15) but tuned for count-based retx — we
+/// don't need the long tail, tests want to observe failure quickly.
+pub const DEFAULT_RETX_MAX: u32 = 5;
 
 /// Tunable limits for a [`Kernel`]. Constructed via [`Self::default`]
 /// and adjusted with the builder-style setters. Pass to
@@ -62,6 +64,8 @@ pub struct KernelConfig {
     pub send_buf_cap: usize,
     pub recv_buf_cap: usize,
     pub default_backlog: usize,
+    pub retx_threshold: u32,
+    pub retx_max: u32,
 }
 
 impl Default for KernelConfig {
@@ -72,6 +76,8 @@ impl Default for KernelConfig {
             send_buf_cap: DEFAULT_SEND_BUF_CAP,
             recv_buf_cap: DEFAULT_RECV_BUF_CAP,
             default_backlog: DEFAULT_BACKLOG,
+            retx_threshold: DEFAULT_RETX_THRESHOLD,
+            retx_max: DEFAULT_RETX_MAX,
         }
     }
 }
@@ -95,6 +101,14 @@ impl KernelConfig {
     }
     pub fn default_backlog(mut self, v: usize) -> Self {
         self.default_backlog = v;
+        self
+    }
+    pub fn retx_threshold(mut self, v: u32) -> Self {
+        self.retx_threshold = v;
+        self
+    }
+    pub fn retx_max(mut self, v: u32) -> Self {
+        self.retx_max = v;
         self
     }
 }
@@ -125,6 +139,8 @@ pub struct Kernel {
     pub(crate) send_buf_cap: usize,
     pub(crate) recv_buf_cap: usize,
     pub(crate) default_backlog: usize,
+    pub(crate) retx_threshold: u32,
+    pub(crate) retx_max: u32,
     /// Packets queued by `poll_send_*` awaiting `egress()`.
     outbound: VecDeque<Packet>,
     /// Monotonic TCP initial-sequence-number source. Deterministic by
@@ -148,6 +164,8 @@ impl Kernel {
             send_buf_cap: cfg.send_buf_cap,
             recv_buf_cap: cfg.recv_buf_cap,
             default_backlog: cfg.default_backlog,
+            retx_threshold: cfg.retx_threshold,
+            retx_max: cfg.retx_max,
             outbound: VecDeque::new(),
             tcp_isn: 0x0100_0000,
         }
@@ -586,6 +604,10 @@ impl Kernel {
     /// the next segmentation pass pick up queued bytes.
     pub fn egress(&mut self) -> Vec<Packet> {
         let mut leaving = Vec::new();
+        // Count-based retx check runs once per egress, before
+        // segmentation — if it rewinds snd_nxt for a socket, this
+        // call's segment_all pass picks up the re-emission.
+        tcp::check_retx(self);
         loop {
             tcp::segment_all(self);
             if self.outbound.is_empty() {

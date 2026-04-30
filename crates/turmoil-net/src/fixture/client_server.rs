@@ -8,7 +8,7 @@ use tokio::task::LocalSet;
 use tokio::time::sleep;
 
 use crate::fixture::{Scheduler, TICK};
-use crate::{HostId, Net, ToIpAddrs};
+use crate::{HostId, KernelConfig, Net, ToIpAddrs};
 
 type BoxFut = Pin<Box<dyn Future<Output = ()>>>;
 
@@ -22,8 +22,15 @@ pub struct ClientServer {
 
 impl ClientServer {
     pub fn new() -> Self {
+        Self::with_config(KernelConfig::default())
+    }
+
+    /// Construct with a custom `KernelConfig` applied to every host
+    /// added later. Use for tests that need to tweak MTU, buffer caps,
+    /// retx thresholds, etc.
+    pub fn with_config(cfg: KernelConfig) -> Self {
         Self {
-            net: Net::new(),
+            net: Net::with_config(cfg),
             servers: Vec::new(),
         }
     }
