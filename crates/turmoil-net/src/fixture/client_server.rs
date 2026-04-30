@@ -7,7 +7,7 @@ use std::task::{Context, Poll};
 use tokio::task::LocalSet;
 use tokio::time::sleep;
 
-use crate::fixture::TICK;
+use crate::fixture::{Scheduler, TICK};
 use crate::{HostId, Net, ToIpAddrs};
 
 type BoxFut = Pin<Box<dyn Future<Output = ()>>>;
@@ -76,12 +76,13 @@ impl ClientServer {
                 inner: Box::pin(fut),
             });
 
+            let mut scheduler = Scheduler::new();
             loop {
                 // Single LocalSet drain per iter → tokio clock += TICK.
                 set.run_until(sleep(TICK)).await;
-                // Fabric drains host egress, applies rules, delivers
+                // Scheduler drains host egress, applies rules, delivers
                 // scheduled packets. Sim clock += TICK, matching tokio.
-                guard_ref.step(TICK);
+                scheduler.tick(guard_ref, TICK);
 
                 if client_handle.is_finished() {
                     break client_handle.await.unwrap();

@@ -29,7 +29,9 @@ Because the network is simulated and deterministic, you can test the adversarial
 
 ## Composability
 
-The primitives are exposed directly: `Net`, `EnterGuard`, `HostId`, `fabric.step()`. You build the fixture you need. The `fixture` module ships two common shapes — `lo` for single-host tests and `ClientServer` for N-server/1-client topologies — but they're built from the same primitives you can reach for yourself when you outgrow them. If you want custom host topology, per-host clock skew, or a bespoke scheduling loop, you write it against the same API the fixtures use.
+The primitives are exposed directly: `Net`, `EnterGuard`, `HostId`, and the `egress_all` / `evaluate` / `deliver` trio on `EnterGuard`. You build the fixture you need. The `fixture` module ships two common shapes — `lo` for single-host tests and `ClientServer` for N-server/1-client topologies — but they're built from the same primitives you can reach for yourself when you outgrow them. If you want custom host topology, per-host clock skew, or a bespoke scheduling loop, you write it against the same API the fixtures use.
+
+The stack itself is clock-free: `Fabric` routes packets synchronously; time and pending-delivery queues live in the harness. Our tokio fixtures ship a reference `Scheduler` with a sim clock and a sorted pending queue, but alternative runtimes (timer-wheel, interleaving-driven model checkers) can plug in against the same egress/deliver surface with their own scheduling policy.
 
 ## Using it
 
@@ -78,7 +80,7 @@ Hostnames are resolved against an in-memory DNS — each new name gets an
 IP in `192.168.0.0/16` on first sight. Pass literal `IpAddr`s if you
 need a specific address.
 
-Beyond these, reach for `Net`, `add_host`, `enter`, and drive `fabric.step()` on whatever cadence your test needs.
+Beyond these, reach for `Net`, `add_host`, `enter`, and drive the fabric directly via `EnterGuard::egress_all` / `evaluate` / `deliver` on whatever scheduling policy your harness wants.
 
 ## Rules — fault injection
 
@@ -112,7 +114,7 @@ drop(guard);  // partition lifts
 
 Every rule impls the `Rule` trait (`fn on_packet(&mut self, &Packet) -> Verdict`), and there's a blanket impl for `FnMut(&Packet) -> Verdict` so ad-hoc closures work directly.
 
-Fabric time is driven by the caller. `fabric.step(dt)` advances an internal clock by `dt` and delivers any packets whose scheduled arrival has come due. Pass `Duration::ZERO` to pump the fabric without advancing time — useful when you're stepping a multi-host topology and only want to count one "tick" total across hosts. Rules and their delays live in fabric time, not tokio time: a latency of 10ms means ten 1ms `step`s, regardless of what the async scheduler thinks is happening.
+Fabric time is harness-driven. Under the built-in tokio fixtures, the reference `Scheduler` advances a sim clock on each iter and delivers scheduled packets whose deadline has come due. A `Latency::fixed(10ms)` under those fixtures means ten 1ms iters elapse between emission and delivery; under a harness with different tick semantics (or none — bach, shuttle), the same `Duration` is interpreted by that harness's scheduler.
 
 ## Status
 

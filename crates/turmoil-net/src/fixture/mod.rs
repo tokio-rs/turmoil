@@ -42,7 +42,9 @@ const NO_ADDRS: [IpAddr; 0] = [];
 pub(crate) const TICK: Duration = Duration::from_millis(1);
 
 mod client_server;
+mod scheduler;
 pub use client_server::ClientServer;
+pub(crate) use scheduler::Scheduler;
 
 /// Run `fut` against a one-host `Net` with no public IPs — 127.0.0.1
 /// / ::1 only.
@@ -73,9 +75,10 @@ where
     let result = rt.block_on(async {
         let set = LocalSet::new();
         let handle = set.spawn_local(fut);
+        let mut scheduler = Scheduler::new();
         loop {
             set.run_until(sleep(TICK)).await;
-            guard_ref.step(TICK);
+            scheduler.tick(guard_ref, TICK);
             if handle.is_finished() {
                 break handle.await.unwrap();
             }

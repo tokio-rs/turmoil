@@ -15,7 +15,8 @@
 //!   them.
 //! - [`Net`] / [`EnterGuard`] — the primitives the fixtures are built
 //!   on. Build a topology with [`Net::add_host`], install it with
-//!   [`Net::enter`], drive the fabric with [`EnterGuard::step`].
+//!   [`Net::enter`], drive the fabric with [`EnterGuard::egress_all`] /
+//!   [`EnterGuard::evaluate`] / [`EnterGuard::deliver`].
 //! - [`Rule`] / [`Verdict`] / [`rule`] — packet-level fault injection.
 //!   Rules see every non-loopback packet and decide Pass / Deliver
 //!   (with optional delay) / Drop.
@@ -24,6 +25,8 @@
 //! [`tokio::net`]: https://docs.rs/tokio/latest/tokio/net/index.html
 
 use std::cell::RefCell;
+
+use indexmap::IndexMap;
 
 mod dns;
 mod fabric;
@@ -47,11 +50,13 @@ thread_local! {
     static CURRENT: RefCell<Option<Net>> = const { RefCell::new(None) };
 }
 
-#[derive(Debug)]
 pub struct Net {
     fabric: Fabric,
     dns: Dns,
     current: Option<HostId>,
+    /// Installed rules, consulted in insertion order.
+    rules: IndexMap<RuleId, Box<dyn Rule>>,
+    next_rule_id: u64,
 }
 
 impl Net {
@@ -65,6 +70,8 @@ impl Net {
             fabric: Fabric::new(cfg),
             dns: Dns::new(),
             current: None,
+            rules: IndexMap::new(),
+            next_rule_id: 1,
         }
     }
 
@@ -100,7 +107,31 @@ impl Net {
     /// a phase of the test, use the guard-returning [`rule`] free
     /// function from inside the sim instead.
     pub fn rule(&mut self, rule: impl Rule) {
-        self.fabric.install_rule(Box::new(rule));
+        self.install_rule(Box::new(rule));
+    }
+
+    fn install_rule(&mut self, rule: Box<dyn Rule>) -> RuleId {
+        let id = RuleId(self.next_rule_id);
+        self.next_rule_id += 1;
+        self.rules.insert(id, rule);
+        id
+    }
+
+    fn uninstall_rule(&mut self, id: RuleId) {
+        self.rules.shift_remove(&id);
+    }
+
+    /// Walk the installed rules in insertion order; first non-`Pass`
+    /// wins. Harness code calls this once per outbound packet to let
+    /// rules interpose.
+    fn evaluate(&mut self, pkt: &Packet) -> Verdict {
+        for rule in self.rules.values_mut() {
+            match rule.on_packet(pkt) {
+                Verdict::Pass => continue,
+                v => return v,
+            }
+        }
+        Verdict::Pass
     }
 
     /// Panics if another `Net` is already installed on this thread.
@@ -111,6 +142,17 @@ impl Net {
             *slot = Some(self);
         });
         EnterGuard { _priv: () }
+    }
+}
+
+impl std::fmt::Debug for Net {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Net")
+            .field("fabric", &self.fabric)
+            .field("dns", &self.dns)
+            .field("current", &self.current)
+            .field("rules", &format!("{} installed", self.rules.len()))
+            .finish()
     }
 }
 
@@ -126,18 +168,42 @@ pub struct EnterGuard {
 }
 
 impl EnterGuard {
-    /// One fabric tick: advance sim time by `dt`, deliver any packets
-    /// whose scheduled arrival has come due, and pump egress/rules for
-    /// packets emitted this turn. Pass [`Duration::ZERO`] to pump
-    /// without advancing time.
-    pub fn step(&self, dt: std::time::Duration) {
+    /// Drain every host's outbound queue. The caller decides what
+    /// happens next — typically: consult rules via
+    /// [`EnterGuard::evaluate`] for each packet and then
+    /// [`EnterGuard::deliver`] (or schedule for later). See
+    /// [`fixture`] for the default tokio-driven loop.
+    pub fn egress_all(&self) -> Vec<Packet> {
         CURRENT.with(|c| {
             c.borrow_mut()
                 .as_mut()
                 .expect("guard is live")
                 .fabric
-                .step(dt);
+                .egress_all()
+        })
+    }
+
+    /// Route a packet to the host owning its destination IP. Drops
+    /// silently if no host is registered for that IP.
+    pub fn deliver(&self, pkt: Packet) {
+        CURRENT.with(|c| {
+            c.borrow_mut()
+                .as_mut()
+                .expect("guard is live")
+                .fabric
+                .deliver(pkt)
         });
+    }
+
+    /// Walk installed rules for `pkt`. First non-`Pass` verdict wins;
+    /// empty rule chain returns `Verdict::Pass`.
+    pub fn evaluate(&self, pkt: &Packet) -> Verdict {
+        CURRENT.with(|c| {
+            c.borrow_mut()
+                .as_mut()
+                .expect("guard is live")
+                .evaluate(pkt)
+        })
     }
 
     /// Pin which host subsequent `sys()` calls (i.e. socket syscalls
@@ -176,15 +242,25 @@ pub(crate) fn sys<R>(f: impl FnOnce(&mut Kernel) -> R) -> R {
     })
 }
 
-/// Resolve `name` against the installed `Net`'s DNS without allocating.
-/// Returns `None` if there is no `Net` installed, or if the name isn't
-/// registered and can't be parsed as an IP literal. Shim-side helper
-/// for `ToSocketAddrs` impls that accept hostnames.
-pub(crate) fn lookup_host(name: &str) -> Option<std::net::IpAddr> {
+/// Resolve `name` against the installed `Net`'s DNS. Returns `None`
+/// if there is no `Net` installed, or if the name isn't registered
+/// and can't be parsed as an IP literal.
+pub fn lookup_host(name: &str) -> Option<std::net::IpAddr> {
     CURRENT.with(|c| c.borrow().as_ref().and_then(|net| net.dns.lookup(name)))
 }
 
-pub(crate) fn set_current(id: HostId) {
+/// Pin which host subsequent [`sys`](crate) calls (i.e. socket
+/// syscalls from the caller's task) talk to.
+///
+/// This is the free-function form of [`EnterGuard::set_current`], for
+/// use where the guard isn't in scope — typically inside a future
+/// wrapper that rescopes every poll. Harnesses with shared-runtime
+/// fixtures (see [`fixture::ClientServer`] for the canonical pattern)
+/// call this on entry to each task's poll so `sys()` lookups land in
+/// the right kernel.
+///
+/// Panics if no `Net` is installed.
+pub fn set_current(id: HostId) {
     CURRENT.with(|c| {
         c.borrow_mut()
             .as_mut()
@@ -208,7 +284,6 @@ fn install_rule(r: Box<dyn Rule>) -> RuleId {
         c.borrow_mut()
             .as_mut()
             .expect("no Net installed — call Net::enter() first")
-            .fabric
             .install_rule(r)
     })
 }
@@ -218,7 +293,7 @@ fn uninstall_rule(id: RuleId) {
         // Tolerant of the Net already being gone — drop order during
         // teardown isn't guaranteed.
         if let Some(net) = c.borrow_mut().as_mut() {
-            net.fabric.uninstall_rule(id);
+            net.uninstall_rule(id);
         }
     });
 }
