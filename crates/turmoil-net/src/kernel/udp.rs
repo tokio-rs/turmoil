@@ -12,6 +12,11 @@
 //! - **Multicast.** Group membership (`IpAddMembership` /
 //!   `Ipv6JoinGroup`) isn't wired through `set_option`; `deliver`
 //!   doesn't multicast-fan-out; `IP_MULTICAST_LOOP` isn't honored.
+//! - **IP fragmentation.** Oversize datagrams return `EMSGSIZE`,
+//!   matching Linux under `IP_PMTUDISC_DO`. Default Linux
+//!   (`IP_PMTUDISC_WANT`) fragments at the IP layer and reassembles
+//!   at the peer, with any lost fragment dropping the whole datagram.
+//!   QUIC and other PMTU-sensitive workloads want that behavior.
 
 use std::io::{Error, ErrorKind, Result};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -22,7 +27,7 @@ use tokio::io::ReadBuf;
 
 use crate::kernel::packet::{self, Packet, Transport, UdpDatagram};
 use crate::kernel::socket::{Addr, BindKey, Domain, Fd, Socket, Type};
-use crate::kernel::Kernel;
+use crate::kernel::{Kernel, EMSGSIZE};
 
 pub(super) fn recv(
     st: &mut Socket,
@@ -58,10 +63,7 @@ pub(super) fn send_to(
     }
 
     if buf.len() as u32 > max_payload(k, dst_sa) {
-        return Poll::Ready(Err(Error::new(
-            ErrorKind::InvalidInput,
-            "datagram exceeds MTU",
-        )));
+        return Poll::Ready(Err(Error::from_raw_os_error(EMSGSIZE)));
     }
 
     let src_bind = match bound {

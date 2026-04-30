@@ -126,6 +126,11 @@ impl KernelConfig {
 /// this to `Uncategorized`.
 const EAFNOSUPPORT: i32 = 97;
 
+/// Linux errno for `EMSGSIZE`. Surfaced by UDP `sendto` when the
+/// payload exceeds the link MTU under `IP_PMTUDISC_DO` semantics
+/// (real Linux; `ErrorKind::FileTooLarge` is unstable).
+pub(crate) const EMSGSIZE: i32 = 90;
+
 /// A per-host network stack.
 ///
 /// Owns the socket table and the inbound/outbound packet queues. Does

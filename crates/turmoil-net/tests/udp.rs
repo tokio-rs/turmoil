@@ -54,9 +54,11 @@ fn udp_oversized_datagram_rejected() {
     fixture::lo(async {
         let s = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         // Loopback MTU is 65536; 65536 - 20 (IP) - 8 (UDP) = 65508 payload cap.
+        // Mirror Linux: EMSGSIZE (errno 90), which surfaces as raw os error
+        // since the matching `ErrorKind::FileTooLarge` is unstable.
         let too_big = vec![0u8; 65_509];
         let err = s.send_to(&too_big, "127.0.0.1:7000").await.unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::InvalidInput);
+        assert_eq!(err.raw_os_error(), Some(90));
     });
 }
 
