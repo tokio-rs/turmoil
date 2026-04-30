@@ -12,3 +12,4 @@ release = false
 [[package]]
 name = "turmoil-fs"
 release = false
+publish = false
