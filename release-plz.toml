@@ -1,0 +1,14 @@
+[workspace]
+changelog_update = true
+git_release_enable = true
+git_tag_enable = true
+semver_check = true
+publish = true
+
+[[package]]
+name = "turmoil-net"
+release = false
+
+[[package]]
+name = "turmoil-fs"
+release = false
