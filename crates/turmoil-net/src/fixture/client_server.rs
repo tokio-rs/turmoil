@@ -1,8 +1,8 @@
 //! Multi-host client/server fixture.
 
-use std::future::{poll_fn, Future};
+use std::future::Future;
 use std::pin::Pin;
-use std::task::Poll;
+use std::task::{Context, Poll};
 
 use tokio::task::LocalSet;
 use tokio::time::sleep;
@@ -12,11 +12,9 @@ use crate::{HostId, Net, ToIpAddrs};
 
 type BoxFut = Pin<Box<dyn Future<Output = ()>>>;
 
-/// Multi-host fixture with N servers plus one client. Each role runs
-/// as its own host on its own [`LocalSet`]; the fabric is stepped
-/// between drains. See the [module docs](super) for the scheduling
-/// approach. The run finishes the moment the client's future
-/// resolves — any server futures still running are aborted.
+/// Multi-host fixture with N servers plus one client. All host
+/// futures run on a single [`LocalSet`] driven by a single paused
+/// tokio runtime.
 pub struct ClientServer {
     net: Net,
     servers: Vec<(HostId, BoxFut)>,
@@ -54,6 +52,10 @@ impl ClientServer {
         T: 'static,
     {
         let Self { mut net, servers } = self;
+        assert!(
+            !servers.is_empty(),
+            "ClientServer needs at least one server — use fixture::lo for single-host tests"
+        );
         let client_id = net.add_host(addrs);
         let guard = net.enter();
 
@@ -65,49 +67,25 @@ impl ClientServer {
 
         let guard_ref = &guard;
         let result = rt.block_on(async move {
-            // One LocalSet per host. Each server's future is spawned
-            // onto its own set; the client's future we drive ourselves
-            // so we can observe completion.
-            let server_sets: Vec<(HostId, LocalSet)> = servers
-                .into_iter()
-                .map(|(id, fut)| {
-                    let set = LocalSet::new();
-                    set.spawn_local(fut);
-                    (id, set)
-                })
-                .collect();
-            let client_set = LocalSet::new();
-            let mut client_fut = Box::pin(fut);
+            let set = LocalSet::new();
+            for (id, fut) in servers {
+                set.spawn_local(HostScoped { id, inner: fut });
+            }
+            let client_handle = set.spawn_local(HostScoped {
+                id: client_id,
+                inner: Box::pin(fut),
+            });
 
             loop {
-                for (id, set) in &server_sets {
-                    guard_ref.set_current(*id);
-                    set.run_until(sleep(TICK)).await;
-                }
-
-                guard_ref.set_current(client_id);
-                let completed = client_set
-                    .run_until(async {
-                        let mut out = None;
-                        poll_fn(|cx| match client_fut.as_mut().poll(cx) {
-                            Poll::Ready(v) => {
-                                out = Some(v);
-                                Poll::Ready(())
-                            }
-                            Poll::Pending => Poll::Ready(()),
-                        })
-                        .await;
-                        if out.is_none() {
-                            sleep(TICK).await;
-                        }
-                        out
-                    })
-                    .await;
-                if let Some(out) = completed {
-                    return out;
-                }
-
+                // Single LocalSet drain per iter → tokio clock += TICK.
+                set.run_until(sleep(TICK)).await;
+                // Fabric drains host egress, applies rules, delivers
+                // scheduled packets. Sim clock += TICK, matching tokio.
                 guard_ref.step(TICK);
+
+                if client_handle.is_finished() {
+                    break client_handle.await.unwrap();
+                }
             }
         });
         drop(guard);
@@ -118,5 +96,26 @@ impl ClientServer {
 impl Default for ClientServer {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Wraps a host's future so every poll pins the thread-local
+/// `current` to that host before the inner future runs. Without
+/// this, tasks on a shared `LocalSet` would see whichever host was
+/// set last — `sys()` lookups would land in the wrong kernel.
+struct HostScoped<F> {
+    id: HostId,
+    inner: F,
+}
+
+impl<F> Future for HostScoped<F>
+where
+    F: Future + Unpin,
+{
+    type Output = F::Output;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        crate::set_current(self.id);
+        Pin::new(&mut self.inner).poll(cx)
     }
 }

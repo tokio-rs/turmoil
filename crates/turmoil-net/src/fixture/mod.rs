@@ -25,10 +25,8 @@
 //!
 //! [`LocalSet`]: tokio::task::LocalSet
 
-use std::future::{poll_fn, Future};
+use std::future::Future;
 use std::net::IpAddr;
-use std::pin::Pin;
-use std::task::Poll;
 use std::time::Duration;
 
 use tokio::task::LocalSet;
@@ -50,14 +48,16 @@ pub use client_server::ClientServer;
 /// / ::1 only.
 pub fn lo<Fut>(fut: Fut) -> Fut::Output
 where
-    Fut: Future,
+    Fut: Future + 'static,
+    Fut::Output: 'static,
 {
     lo_with_config(KernelConfig::default(), fut)
 }
 
 pub fn lo_with_config<Fut>(cfg: KernelConfig, fut: Fut) -> Fut::Output
 where
-    Fut: Future,
+    Fut: Future + 'static,
+    Fut::Output: 'static,
 {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_time()
@@ -69,32 +69,16 @@ where
     net.add_host(NO_ADDRS);
     let guard = net.enter();
 
-    let set = LocalSet::new();
     let guard_ref = &guard;
     let result = rt.block_on(async {
-        let mut fut: Pin<Box<dyn Future<Output = Fut::Output>>> = Box::pin(fut);
+        let set = LocalSet::new();
+        let handle = set.spawn_local(fut);
         loop {
-            let done = set
-                .run_until(async {
-                    let mut out = None;
-                    poll_fn(|cx| match fut.as_mut().poll(cx) {
-                        Poll::Ready(v) => {
-                            out = Some(v);
-                            Poll::Ready(())
-                        }
-                        Poll::Pending => Poll::Ready(()),
-                    })
-                    .await;
-                    if out.is_none() {
-                        sleep(TICK).await;
-                    }
-                    out
-                })
-                .await;
-            if let Some(out) = done {
-                return out;
-            }
+            set.run_until(sleep(TICK)).await;
             guard_ref.step(TICK);
+            if handle.is_finished() {
+                break handle.await.unwrap();
+            }
         }
     });
     drop(guard);

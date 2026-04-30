@@ -159,15 +159,18 @@ fn udp_try_recv_would_block_when_empty() {
 fn udp_try_send_and_try_recv() {
     // The try_* syscalls are non-blocking; with no awaits between them
     // the stepper never runs, so the sent datagram would still be
-    // queued. One yield hands control to the stepper, which folds the
-    // loopback send back into the server's recv queue.
+    // queued on the sender's outbound. peek_from parks until data
+    // lands in the server's recv queue, which forces a fabric tick —
+    // after that, try_recv_from sees the same bytes.
     fixture::lo(async {
         let server = UdpSocket::bind("127.0.0.1:6200").await.unwrap();
         let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         client
             .try_send_to(b"hi", "127.0.0.1:6200".parse().unwrap())
             .unwrap();
-        tokio::task::yield_now().await;
+
+        let mut peek = [0u8; 16];
+        server.peek_from(&mut peek).await.unwrap();
 
         let mut buf = [0u8; 16];
         let (n, _) = server.try_recv_from(&mut buf).unwrap();

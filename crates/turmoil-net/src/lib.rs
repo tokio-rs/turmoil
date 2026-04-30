@@ -184,6 +184,15 @@ pub(crate) fn lookup_host(name: &str) -> Option<std::net::IpAddr> {
     CURRENT.with(|c| c.borrow().as_ref().and_then(|net| net.dns.lookup(name)))
 }
 
+pub(crate) fn set_current(id: HostId) {
+    CURRENT.with(|c| {
+        c.borrow_mut()
+            .as_mut()
+            .expect("no Net installed — call Net::enter() first")
+            .current = Some(id);
+    });
+}
+
 /// Install a rule and return a guard that uninstalls it on drop.
 /// Callable from any task inside an installed `Net`. Panics if no
 /// `Net` is installed.

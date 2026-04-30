@@ -31,26 +31,6 @@ pub use socket::{ListenState, Socket, Tcb, TcpState};
 // for rules
 pub use packet::{Packet, TcpFlags, TcpSegment, Transport, UdpDatagram};
 
-// TODO: cooperative yielding on loopback.
-//
-// `egress()` folds loopback packets straight back through `deliver`
-// inline — there's no scheduler step between them. A chatty protocol
-// running over `127.0.0.1` (RPC ping/pong, TCP handshake under load,
-// client+server both on one host) can keep egress-then-deliver going
-// indefinitely without ever handing control back to tokio, starving
-// timers, other tasks, and the test's own `step()` loop.
-//
-// Two plausible fixes:
-//   1. Cap `egress()` — deliver up to N loopback packets, park the
-//      rest on `outbound` for the next pump. Cheap, but defines a
-//      somewhat arbitrary boundary.
-//   2. Route loopback through `outbound` → the fabric just like
-//      non-local traffic, and make the fabric responsible for pacing.
-//      More principled once the fabric exists.
-//
-// Not urgent while nothing loops tightly, but pick an answer before
-// we write tests that rely on back-and-forth request/response.
-
 // TODO: SYN retransmit.
 //
 // A SYN dropped by the listener's backlog cap (or, eventually, by a

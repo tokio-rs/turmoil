@@ -9,10 +9,12 @@ use turmoil_net::{rule, Latency, Verdict};
 
 #[test]
 fn latency_delays_delivery() {
-    // With 50ms latency the UDP round-trip still completes — the test
-    // just exercises that delayed packets are scheduled and eventually
-    // arrive. If `Verdict::Deliver(d)` weren't honored, the fixture
-    // would hang on recv_from.
+    // 50ms one-way latency × 2 directions = 100ms RTT floor. The
+    // fixture's tokio clock is 1:1 with fabric time, so elapsed must
+    // be at least the full RTT. Without the rule the same flow
+    // completes in a handful of ticks — the lower bound proves the
+    // rule was honored, not just that the packet eventually arrived.
+    let latency = Duration::from_millis(50);
     ClientServer::new()
         .server("server", async move {
             let s = UdpSocket::bind("0.0.0.0:9000").await.unwrap();
@@ -21,13 +23,20 @@ fn latency_delays_delivery() {
             s.send_to(&buf[..n], from).await.unwrap();
         })
         .run("client", async move {
-            rule(Latency::fixed(Duration::from_millis(50))).forget();
-
+            rule(Latency::fixed(latency)).forget();
             let c = UdpSocket::bind("0.0.0.0:0").await.unwrap();
+            let start = tokio::time::Instant::now();
             c.send_to(b"hi", "server:9000").await.unwrap();
             let mut buf = [0u8; 16];
             let (n, _) = c.recv_from(&mut buf).await.unwrap();
             assert_eq!(&buf[..n], b"hi");
+            let elapsed = start.elapsed();
+            assert!(
+                elapsed >= 2 * latency,
+                "expected ≥ {:?} for one full RTT, got {:?}",
+                2 * latency,
+                elapsed,
+            );
         });
 }
 
