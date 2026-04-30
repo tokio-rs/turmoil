@@ -115,7 +115,3 @@ drop(guard);  // partition lifts
 Every rule impls the `Rule` trait (`fn on_packet(&mut self, &Packet) -> Verdict`), and there's a blanket impl for `FnMut(&Packet) -> Verdict` so ad-hoc closures work directly.
 
 Fabric time is harness-driven. Under the built-in tokio fixtures, the reference `Scheduler` advances a sim clock on each iter and delivers scheduled packets whose deadline has come due. A `Latency::fixed(10ms)` under those fixtures means ten 1ms iters elapse between emission and delivery; under a harness with different tick semantics (or none — bach, shuttle), the same `Duration` is interpreted by that harness's scheduler.
-
-## Status
-
-Experimental. TCP and UDP are functional. TCP retransmit is the next mechanism gap. Higher-level fault primitives — named partitions, reorder, loss distributions — are a `turmoil` concern and will land there, consuming the rule API this crate exposes.
