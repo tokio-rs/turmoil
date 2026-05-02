@@ -465,6 +465,7 @@ impl PageCacheConfig {
 /// - `capacity`: None (unlimited)
 /// - `io_error_probability`: 0.0 (no random I/O errors)
 /// - `corruption_probability`: 0.0 (no silent corruption)
+/// - `short_read_probability`: 0.0 (positional reads always return the full count)
 /// - `noatime`: true (access time not updated on reads)
 /// - `direct_io_alignment`: 512 (minimum kernel alignment for O_DIRECT)
 /// - `block_size`: None (writes are atomic, no torn writes)
@@ -480,6 +481,8 @@ pub struct FsConfig {
     pub(crate) io_error_probability: f64,
     /// Probability of silent data corruption on reads (0.0 - 1.0)
     pub(crate) corruption_probability: f64,
+    /// Probability that a positional read returns a short count (0.0 - 1.0)
+    pub(crate) short_read_probability: f64,
     /// Whether to use noatime semantics (atime not updated on reads)
     pub(crate) noatime: bool,
     /// Required alignment in bytes for O_DIRECT I/O (buffer pointer, offset, and length)
@@ -499,6 +502,7 @@ impl Default for FsConfig {
             capacity: None,
             io_error_probability: 0.0,
             corruption_probability: 0.0,
+            short_read_probability: 0.0,
             noatime: true,
             direct_io_alignment: 512,
             block_size: None,
@@ -569,6 +573,29 @@ impl FsConfig {
             "corruption_probability must be between 0.0 and 1.0"
         );
         self.corruption_probability = value;
+        self
+    }
+
+    /// Set the probability that a positional read returns a short count (0.0 - 1.0).
+    ///
+    /// Default: 0.0 (reads always return the full requested count, subject to EOF).
+    ///
+    /// When set, reads through `File::read`, `File::read_at`, and their async
+    /// equivalents may randomly return fewer bytes than requested, even when
+    /// more data is available. This simulates the short-read behavior of plain
+    /// `pread` on real kernels (e.g., interrupted syscalls, partial reads from
+    /// non-`O_DIRECT` file descriptors).
+    ///
+    /// The tail of the buffer past the returned count is zeroed, so callers
+    /// that incorrectly treat the result as a full buffer observe garbage
+    /// instead of silently-correct data. Callers that loop until the requested
+    /// length is reached (or `Ok(0)` / EOF) keep working.
+    pub fn short_read_probability(&mut self, value: f64) -> &mut Self {
+        assert!(
+            (0.0..=1.0).contains(&value),
+            "short_read_probability must be between 0.0 and 1.0"
+        );
+        self.short_read_probability = value;
         self
     }
 
@@ -982,6 +1009,8 @@ pub(crate) struct Fs {
     pub(crate) io_error_probability: f64,
     /// Probability of silent data corruption on reads (0.0 - 1.0)
     pub(crate) corruption_probability: f64,
+    /// Probability that a positional read returns a short count (0.0 - 1.0)
+    pub(crate) short_read_probability: f64,
     /// Required alignment in bytes for O_DIRECT I/O
     pub(crate) direct_io_alignment: u64,
     /// Block size for torn write simulation (None = atomic writes)
@@ -1013,6 +1042,7 @@ impl Fs {
             capacity: config.capacity,
             io_error_probability: config.io_error_probability,
             corruption_probability: config.corruption_probability,
+            short_read_probability: config.short_read_probability,
             direct_io_alignment: config.direct_io_alignment,
             block_size: config.block_size,
             io_latency: config.io_latency,
