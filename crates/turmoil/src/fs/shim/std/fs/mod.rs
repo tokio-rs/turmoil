@@ -758,8 +758,23 @@ impl File {
                 .ok_or_else(|| Error::new(ErrorKind::NotFound, "file handle not found"))?
                 .clone();
             let corruption_prob = ctx.fs.corruption_probability;
+            let short_read_prob = ctx.fs.short_read_probability;
 
-            let n = ctx.fs.read_file(&path, buf, offset);
+            let mut n = ctx.fs.read_file(&path, buf, offset);
+
+            // Inject a short read: trim the reported count to something strictly
+            // smaller than what was actually filled, and zero the tail so callers
+            // that incorrectly assume full-read semantics observe garbage instead
+            // of silently-correct data. We only do this when at least 2 bytes
+            // were read, so the returned count is still > 0 (a return of 0 means
+            // EOF, which is a distinct signal we don't want to fake). This
+            // applies to O_DIRECT too — signals (EINTR) can short-circuit any
+            // blocking syscall, including aligned O_DIRECT pread.
+            if n > 1 && short_read_prob > 0.0 && ctx.random_bool(short_read_prob) {
+                let short = ctx.random_range(1..n);
+                buf[short..n].fill(0);
+                n = short;
+            }
 
             // Check for random silent corruption
             if n > 0 && corruption_prob > 0.0 && ctx.random_bool(corruption_prob) {

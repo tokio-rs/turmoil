@@ -545,6 +545,109 @@ fn corruption_probability_statistical(prob: f64, expected_rate: f64, tolerance: 
 }
 
 #[test]
+fn short_read_100_percent() -> Result {
+    let mut builder = Builder::new();
+    builder.fs().short_read_probability(1.0);
+    let mut sim = builder.build();
+    sim.client("test", async {
+        create_dir("/data")?;
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open("/data/file.txt")?;
+        file.write_all_at(b"0123456789abcdef", 0)?;
+        let mut buf = [0u8; 16];
+        let n = file.read_at(&mut buf, 0)?;
+        assert!((1..16).contains(&n), "short read produced count {n}");
+        assert_eq!(&buf[..n], &b"0123456789abcdef"[..n]);
+        Ok(())
+    });
+    sim.run()
+}
+
+#[test]
+fn short_read_also_fires_for_direct_io() -> Result {
+    // Signals (EINTR) can interrupt any blocking syscall, including aligned
+    // O_DIRECT pread, so short reads must also be injected on direct_io files.
+    use std::alloc::{alloc_zeroed, dealloc, Layout};
+
+    let mut builder = Builder::new();
+    builder.fs().short_read_probability(1.0);
+    let mut sim = builder.build();
+    sim.client("test", async {
+        create_dir("/data")?;
+        // Seed the file with 512 bytes via a non-direct handle.
+        let writer = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open("/data/file.txt")?;
+        writer.write_all_at(&vec![0xabu8; 512], 0)?;
+        drop(writer);
+
+        let direct = OpenOptions::new()
+            .read(true)
+            .direct_io(true)
+            .open("/data/file.txt")?;
+
+        unsafe {
+            let layout = Layout::from_size_align(512, 512).unwrap();
+            let ptr = alloc_zeroed(layout);
+            assert!(!ptr.is_null());
+            let buf = std::slice::from_raw_parts_mut(ptr, 512);
+            let n = direct.read_at(buf, 0)?;
+            assert!(
+                (1..512).contains(&n),
+                "direct_io read should also see a short count, got {n}"
+            );
+            dealloc(ptr, layout);
+        }
+        Ok(())
+    });
+    sim.run()
+}
+
+#[test_case(0.0, 0.0, 0.05; "no short reads")]
+#[test_case(0.5, 0.5, 0.15; "50 percent short reads")]
+#[test_case(1.0, 1.0, 0.05; "always short reads")]
+fn short_read_probability_statistical(prob: f64, expected_rate: f64, tolerance: f64) -> Result {
+    const ITERATIONS: usize = 100;
+    let mut short_count = 0;
+    for seed in 0..ITERATIONS {
+        let mut builder = Builder::new();
+        builder.rng_seed(seed as u64);
+        builder.fs().short_read_probability(prob);
+        let mut sim = builder.build();
+        let result = std::sync::Arc::new(std::sync::Mutex::new(false));
+        let r = result.clone();
+        sim.client("test", async move {
+            create_dir("/data")?;
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .open("/data/file.txt")?;
+            file.write_all_at(b"0123456789abcdef", 0)?;
+            let mut buf = [0u8; 16];
+            let n = file.read_at(&mut buf, 0)?;
+            *r.lock().unwrap() = n < 16;
+            Ok(())
+        });
+        sim.run()?;
+        if *result.lock().unwrap() {
+            short_count += 1;
+        }
+    }
+    let actual_rate = short_count as f64 / ITERATIONS as f64;
+    assert!(
+        (actual_rate - expected_rate).abs() <= tolerance,
+        "expected rate {expected_rate} +/- {tolerance}, got {actual_rate}"
+    );
+    Ok(())
+}
+
+#[test]
 fn torn_write_partial_data_survives() -> Result {
     // With block_size configured, writes may be partially applied on crash.
     // Run many iterations to statistically verify torn writes occur.
