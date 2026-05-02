@@ -567,9 +567,9 @@ fn short_read_100_percent() -> Result {
 }
 
 #[test]
-fn short_read_skipped_for_direct_io() -> Result {
-    // O_DIRECT with aligned args must return the full count or EOF on real
-    // kernels, so the short-read injection must not fire for direct_io files.
+fn short_read_also_fires_for_direct_io() -> Result {
+    // Signals (EINTR) can interrupt any blocking syscall, including aligned
+    // O_DIRECT pread, so short reads must also be injected on direct_io files.
     use std::alloc::{alloc_zeroed, dealloc, Layout};
 
     let mut builder = Builder::new();
@@ -597,7 +597,10 @@ fn short_read_skipped_for_direct_io() -> Result {
             assert!(!ptr.is_null());
             let buf = std::slice::from_raw_parts_mut(ptr, 512);
             let n = direct.read_at(buf, 0)?;
-            assert_eq!(n, 512, "direct_io read must not be shortened");
+            assert!(
+                (1..512).contains(&n),
+                "direct_io read should also see a short count, got {n}"
+            );
             dealloc(ptr, layout);
         }
         Ok(())

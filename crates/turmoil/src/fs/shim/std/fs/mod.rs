@@ -767,11 +767,10 @@ impl File {
             // that incorrectly assume full-read semantics observe garbage instead
             // of silently-correct data. We only do this when at least 2 bytes
             // were read, so the returned count is still > 0 (a return of 0 means
-            // EOF, which is a distinct signal we don't want to fake). O_DIRECT
-            // paths skip this — aligned O_DIRECT pread on a real kernel returns
-            // either the full count or EOF.
-            if !self.direct_io && n > 1 && short_read_prob > 0.0 && ctx.random_bool(short_read_prob)
-            {
+            // EOF, which is a distinct signal we don't want to fake). This
+            // applies to O_DIRECT too — signals (EINTR) can short-circuit any
+            // blocking syscall, including aligned O_DIRECT pread.
+            if n > 1 && short_read_prob > 0.0 && ctx.random_bool(short_read_prob) {
                 let short = ctx.random_range(1..n);
                 buf[short..n].fill(0);
                 n = short;
