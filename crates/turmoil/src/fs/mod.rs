@@ -582,9 +582,9 @@ impl FsConfig {
     ///
     /// When set, reads through `File::read`, `File::read_at`, and their async
     /// equivalents may randomly return fewer bytes than requested, even when
-    /// more data is available. This simulates the short-read behavior of plain
-    /// `pread` on real kernels (e.g., interrupted syscalls, partial reads from
-    /// non-`O_DIRECT` file descriptors).
+    /// more data is available. This simulates the short-read behavior of
+    /// `pread` on real kernels (e.g., `EINTR` interrupting a blocking syscall).
+    /// O_DIRECT reads are not exempt — signals can short-circuit them too.
     ///
     /// The tail of the buffer past the returned count is zeroed, so callers
     /// that incorrectly treat the result as a full buffer observe garbage
