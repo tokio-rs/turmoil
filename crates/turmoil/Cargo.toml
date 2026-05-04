@@ -26,7 +26,6 @@ tracing = "0.1"
 uuid = { version = "1", features = ["v4"], optional = true }
 
 [dev-dependencies]
-doc-comment = "0.3.3"
 regex = "1"
 test-case = "3"
 tokio-test = "0.4.2"

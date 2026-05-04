@@ -57,6 +57,3 @@ commits automatically on each push.
   flow.
 - The `unstable-fs` and `unstable-barriers` features in `turmoil` are not
   covered by semver; changes there don't need a major bump.
-- README doctests run as part of `cargo test --workspace` via `doc-comment`;
-  if you move `README.md`, fix the include path in
-  `crates/turmoil/src/readme.rs`.

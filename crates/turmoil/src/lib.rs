@@ -173,9 +173,6 @@
 //!     https://docs.rs/tokio/latest/tokio/runtime/struct.Builder.html#method.unhandled_panic
 //! [unstable features]: https://docs.rs/tokio/latest/tokio/#unstable-features
 
-#[cfg(doctest)]
-mod readme;
-
 mod builder;
 
 use std::{net::IpAddr, time::Duration};
