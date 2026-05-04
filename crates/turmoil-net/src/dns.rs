@@ -74,9 +74,11 @@ fn reserved(name: &str) -> Option<IpAddr> {
     }
 }
 
-/// A value that resolves to a single [`IpAddr`] against the current
-/// [`Dns`]. Implemented for string-like types (hostname or literal)
-/// and the IP types themselves.
+/// A value that resolves to a single [`IpAddr`] against the installed
+/// [`Net`](crate::Net)'s name table. Hostnames are allocated from
+/// 192.168.0.0/16 on first sight (idempotent on reuse); IP literals
+/// pass through. Implemented for string-like types and the IP types
+/// themselves.
 pub trait ToIpAddr: sealed::Sealed {
     #[doc(hidden)]
     fn to_ip_addr(&self, dns: &mut Dns) -> IpAddr;

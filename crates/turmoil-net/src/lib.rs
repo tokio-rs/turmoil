@@ -43,8 +43,7 @@ pub use crate::fabric::HostId;
 use crate::kernel::Kernel;
 pub use crate::kernel::{KernelConfig, Packet, TcpFlags, TcpSegment, Transport, UdpDatagram};
 pub use crate::netstat::{Netstat, NetstatEntry, NetstatState, Proto};
-use crate::rule::RuleGuard;
-pub use crate::rule::{Latency, Rule, RuleId, Verdict};
+pub use crate::rule::{Latency, Rule, RuleGuard, RuleId, Verdict};
 
 thread_local! {
     static CURRENT: RefCell<Option<Net>> = const { RefCell::new(None) };

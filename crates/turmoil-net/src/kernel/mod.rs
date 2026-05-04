@@ -54,9 +54,11 @@ pub const DEFAULT_RETX_THRESHOLD: u32 = 3;
 /// don't need the long tail, tests want to observe failure quickly.
 pub const DEFAULT_RETX_MAX: u32 = 5;
 
-/// Tunable limits for a [`Kernel`]. Constructed via [`Self::default`]
+/// Tunable limits for a host's network stack (MTU, buffer caps,
+/// backlog, retransmit thresholds). Constructed via [`Self::default`]
 /// and adjusted with the builder-style setters. Pass to
-/// `Net::with_config` to apply.
+/// [`Net::with_config`](crate::Net::with_config) to apply to every
+/// host added afterwards.
 #[derive(Debug, Clone)]
 pub struct KernelConfig {
     pub mtu: u32,

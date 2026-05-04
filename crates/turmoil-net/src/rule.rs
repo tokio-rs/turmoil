@@ -90,7 +90,8 @@ where
     }
 }
 
-/// RAII handle for a rule installed via [`rule`] or [`EnterGuard::rule`].
+/// RAII handle for a rule installed via [`rule`](crate::rule) or
+/// [`EnterGuard::rule`](crate::EnterGuard::rule).
 /// Drop uninstalls the rule; [`RuleGuard::forget`] leaks it instead,
 /// leaving the rule installed for the rest of the simulation.
 ///

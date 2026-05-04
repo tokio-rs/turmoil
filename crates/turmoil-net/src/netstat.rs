@@ -39,9 +39,8 @@ pub enum Proto {
     Udp,
 }
 
-/// Renderable TCP state. Distinct from [`TcpState`] because real
-/// netstat shows `LISTEN` as a state, but our kernel models listeners
-/// on [`ListenState`] rather than the TCB enum.
+/// Renderable TCP state. Mirrors the state names Linux `netstat`
+/// prints (`LISTEN`, `SYN_SENT`, `ESTABLISHED`, …).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NetstatState {
     Listen,
