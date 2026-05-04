@@ -22,7 +22,7 @@ RNG.
 
 | Crate | Description | |
 |---|---|---|
-| [`turmoil`](crates/turmoil) | Batteries-included simulation-testing framework. Start here. | [![Crates.io][turmoil-crates-badge]][turmoil-crates-url] [![Documentation][turmoil-docs-badge]][turmoil-docs-url] |
+| [`turmoil`](crates/turmoil) | Full simulation-testing framework. Start here. | [![Crates.io][turmoil-crates-badge]][turmoil-crates-url] [![Documentation][turmoil-docs-badge]][turmoil-docs-url] |
 | [`turmoil-net`](crates/turmoil-net) | Deterministic simulated socket stack. Drop-in replacement for `tokio::net`. | [![Crates.io][turmoil-net-crates-badge]][turmoil-net-crates-url] [![Documentation][turmoil-net-docs-badge]][turmoil-net-docs-url] |
 | [`turmoil-fs`](crates/turmoil-fs) | Deterministic simulated filesystem (scaffold — lift in progress). | _unpublished_ |
 

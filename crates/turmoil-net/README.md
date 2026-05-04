@@ -4,7 +4,7 @@ A deterministic networking substrate for testing async Rust.
 
 ## What it is
 
-`turmoil-net` is a simulated socket stack — a POSIX-shaped kernel behind a tokio-compatible shim. The shim mirrors `tokio::net` exactly: same type names, same method signatures, same error semantics. Production code imports `tokio::net`; tests flip the same import to `turmoil_net::shim::tokio::net` behind a `#[cfg]` and the same code runs against a simulated network you control.
+`turmoil-net` is a simulated socket stack. Production code imports `tokio::net`; tests flip the same import to `turmoil_net::shim::tokio::net` behind a `#[cfg]` and the same code runs against a simulated network you control.
 
 ```rust
 #[cfg(not(test))]
@@ -13,25 +13,19 @@ use tokio::net::TcpStream;
 use turmoil_net::shim::tokio::net::TcpStream;
 ```
 
-No wrapper types, no trait objects, no conditional method calls in the code under test.
-
-It is not a full simulation runtime — it doesn't own your scheduler, intercept time, or replay your test from a seed. It's the networking piece. If you want the rest, the `turmoil` crate (one level up in this repo) layers on top once those stories are solid.
-
 ## Why
 
-Tests that touch real sockets are nondeterministic: timing, port assignment, kernel retransmit, and loopback scheduling all vary run to run.
+Tests that touch real sockets are nondeterministic — timing, port assignment, and loopback scheduling all vary run to run.
 
-Mocks are the usual workaround, but they stop one layer too shallow. A mocked `TcpStream` returns the bytes you prime it with — it doesn't model what actually happens between two components on a network. No handshake, no backpressure when the peer stops reading, no FIN/RST when a connection tears down, no partial writes, no reorder under load. The bugs that matter in a distributed system live in those interactions, and mocks paper right over them.
+A mocked `TcpStream` returns the bytes you prime it with; it doesn't model handshake, backpressure, FIN/RST, partial writes, or reordering under load.
 
-`turmoil-net` runs the real protocol — handshake, FIN, RST, MSS, backpressure — between real instances of your components, on a deterministic substrate you drive yourself. Your client and server are the same code that runs in production, talking to each other through a simulated network that behaves like a network.
-
-Because the network is simulated and deterministic, you can test the adversarial cases too — drop packets, partition hosts, inject latency, reorder segments, kill a connection mid-stream. These are the scenarios a distributed system exists to survive, and they're the scenarios that are painful-to-impossible to provoke with real sockets or stub with mocks.
+`turmoil-net` runs a real protocol implementation (handshake, FIN, RST, MSS, backpressure) between real instances of your components, on a deterministic substrate you drive yourself. On top of that substrate, tests can drop packets, partition hosts, inject latency, reorder segments, or tear down connections mid-stream.
 
 ## Composability
 
-The primitives are exposed directly: `Net`, `EnterGuard`, `HostId`, and the `egress_all` / `evaluate` / `deliver` trio on `EnterGuard`. You build the fixture you need. The `fixture` module ships two common shapes — `lo` for single-host tests and `ClientServer` for N-server/1-client topologies — but they're built from the same primitives you can reach for yourself when you outgrow them. If you want custom host topology, per-host clock skew, or a bespoke scheduling loop, you write it against the same API the fixtures use.
+The primitives are public. The `fixture` module ships `lo` for single-host tests and `ClientServer` for N-server/1-client topologies; both are thin wrappers. For custom topologies, per-host clock skew, or a different scheduling loop, build against the primitives directly.
 
-The stack itself is clock-free: `Fabric` routes packets synchronously; time and pending-delivery queues live in the harness. Our tokio fixtures ship a reference `Scheduler` with a sim clock and a sorted pending queue, but alternative runtimes (timer-wheel, interleaving-driven model checkers) can plug in against the same egress/deliver surface with their own scheduling policy.
+The stack is clock-free: packet routing is synchronous, and time plus the pending-delivery queue live in the harness. The built-in tokio fixtures ship a reference scheduler; a custom harness supplies its own.
 
 ## Using it
 
@@ -80,8 +74,6 @@ Hostnames are resolved against an in-memory DNS — each new name gets an
 IP in `192.168.0.0/16` on first sight. Pass literal `IpAddr`s if you
 need a specific address.
 
-Beyond these, reach for `Net`, `add_host`, `enter`, and drive the fabric directly via `EnterGuard::egress_all` / `evaluate` / `deliver` on whatever scheduling policy your harness wants.
-
 ## Rules — fault injection
 
 Every non-loopback packet leaving a host runs through an installed chain of `Rule`s. A rule returns a `Verdict`:
@@ -113,5 +105,3 @@ drop(guard);  // partition lifts
 ```
 
 Every rule impls the `Rule` trait (`fn on_packet(&mut self, &Packet) -> Verdict`), and there's a blanket impl for `FnMut(&Packet) -> Verdict` so ad-hoc closures work directly.
-
-Fabric time is harness-driven. Under the built-in tokio fixtures, the reference `Scheduler` advances a sim clock on each iter and delivers scheduled packets whose deadline has come due. A `Latency::fixed(10ms)` under those fixtures means ten 1ms iters elapse between emission and delivery; under a harness with different tick semantics (or none — bach, shuttle), the same `Duration` is interpreted by that harness's scheduler.
