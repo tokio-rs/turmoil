@@ -168,19 +168,20 @@ pub struct EnterGuard {
 }
 
 impl EnterGuard {
-    /// Drain every host's outbound queue. The caller decides what
-    /// happens next — typically: consult rules via
+    /// Drain every host's outbound queue into `out`. The caller decides
+    /// what happens next — typically: consult rules via
     /// [`EnterGuard::evaluate`] for each packet and then
-    /// [`EnterGuard::deliver`] (or schedule for later). See
-    /// [`fixture`] for the default tokio-driven loop.
-    pub fn egress_all(&self) -> Vec<Packet> {
+    /// [`EnterGuard::deliver`] (or schedule for later). The buffer is
+    /// passed in so the caller can reuse its allocation across ticks.
+    /// See [`fixture`] for the default tokio-driven loop.
+    pub fn egress_all(&self, out: &mut Vec<Packet>) {
         CURRENT.with(|c| {
             c.borrow_mut()
                 .as_mut()
                 .expect("guard is live")
                 .fabric
-                .egress_all()
-        })
+                .egress_all(out)
+        });
     }
 
     /// Route a packet to the host owning its destination IP. Drops

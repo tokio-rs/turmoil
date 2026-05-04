@@ -98,19 +98,16 @@ impl Fabric {
         self.ip_to_host.get(&ip).copied()
     }
 
-    /// Drain outbound packets from every host, in host-insertion order.
-    /// The caller decides what happens to each packet — deliver, drop,
-    /// schedule for later. Loopback packets fold back through the
+    /// Drain outbound packets from every host, in host-insertion order,
+    /// appending to `out`. The caller decides what happens to each
+    /// packet — deliver, drop, schedule for later — and reuses the
+    /// buffer across ticks. Loopback packets fold back through the
     /// source host's `deliver` inline (inside `Kernel::egress`) and
-    /// never appear here.
-    pub fn egress_all(&mut self) -> Vec<Packet> {
-        let mut out = Vec::new();
-        let ids: Vec<_> = self.hosts.keys().copied().collect();
-        for id in ids {
-            let host = self.hosts.get_mut(&id).expect("id from iteration");
-            out.extend(host.kernel.egress());
+    /// never appear in `out`.
+    pub fn egress_all(&mut self, out: &mut Vec<Packet>) {
+        for host in self.hosts.values_mut() {
+            host.kernel.egress(out);
         }
-        out
     }
 
     /// Route a packet to the host bound to its destination IP. Drops
