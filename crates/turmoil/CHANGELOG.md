@@ -1,3 +1,23 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+## [0.7.3](https://github.com/tokio-rs/turmoil/compare/turmoil-v0.7.2...turmoil-v0.7.3) - 2026-05-04
+
+### Fixed
+
+- fix path for README doctest:x
+
+### Other
+
+- automate releases with release-plz ([#276](https://github.com/tokio-rs/turmoil/pull/276))
+- move README.md back to root:x
+- Convert to workspace and scaffold turmoil-net ([#273](https://github.com/tokio-rs/turmoil/pull/273))
 # 0.7.2 (April 24, 2026)
 
 ### Added
