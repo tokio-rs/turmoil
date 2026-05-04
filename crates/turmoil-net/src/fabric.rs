@@ -105,9 +105,7 @@ impl Fabric {
     /// source host's `deliver` inline (inside `Kernel::egress`) and
     /// never appear in `out`.
     pub fn egress_all(&mut self, out: &mut Vec<Packet>) {
-        let ids: Vec<_> = self.hosts.keys().copied().collect();
-        for id in ids {
-            let host = self.hosts.get_mut(&id).expect("id from iteration");
+        for host in self.hosts.values_mut() {
             host.kernel.egress(out);
         }
     }
