@@ -591,19 +591,19 @@ impl Kernel {
         }
     }
 
-    /// Take all packets the stack has produced since the last call.
+    /// Drain packets the stack has produced since the last call,
+    /// appending those leaving this host to `out`. Passing the buffer
+    /// in lets callers amortize the allocation across ticks.
     ///
     /// Runs TCP segmentation first (draining each established socket's
     /// `send_buf` into MSS-sized segments on `outbound`), then drains
     /// `outbound`. Loopback packets fold back through
-    /// [`deliver`](Self::deliver) inline; the returned vec holds only
-    /// packets that need to leave this host.
+    /// [`deliver`](Self::deliver) inline and never reach `out`.
     ///
     /// Loops until a full pass produces no new outbound packets, so
     /// that an ACK folded through `deliver` can open a window and let
     /// the next segmentation pass pick up queued bytes.
-    pub fn egress(&mut self) -> Vec<Packet> {
-        let mut leaving = Vec::new();
+    pub fn egress(&mut self, out: &mut Vec<Packet>) {
         // Count-based retx check runs once per egress, before
         // segmentation — if it rewinds snd_nxt for a socket, this
         // call's segment_all pass picks up the re-emission.
@@ -618,13 +618,12 @@ impl Kernel {
                 if self.is_local(pkt.dst) {
                     self.deliver(pkt);
                 } else {
-                    leaving.push(pkt);
+                    out.push(pkt);
                 }
             }
         }
         // Reap any `fd_closed` sockets that have finished closing.
         tcp::reap_closed(self);
-        leaving
     }
 }
 

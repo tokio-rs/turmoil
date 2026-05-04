@@ -32,11 +32,17 @@ pub(crate) struct Scheduler {
     /// contiguous drain.
     pending: Vec<Scheduled>,
     next_seq: u64,
+    /// Reused egress buffer, refilled each `tick` and drained by end
+    /// of `tick`. Preallocated to skip the first few grows on startup.
+    egress: Vec<Packet>,
 }
 
 impl Scheduler {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            egress: Vec::with_capacity(64),
+            ..Self::default()
+        }
     }
 
     /// One fabric tick:
@@ -57,7 +63,12 @@ impl Scheduler {
             guard.deliver(s.pkt);
         }
 
-        for pkt in guard.egress_all() {
+        // Move the buffer out to a local: `schedule` (below) needs
+        // `&mut self`, which collides with a borrow of `self.egress`.
+        // Swapping it back at the end preserves the allocation.
+        let mut egress = std::mem::take(&mut self.egress);
+        guard.egress_all(&mut egress);
+        for pkt in egress.drain(..) {
             match guard.evaluate(&pkt) {
                 Verdict::Drop => {}
                 Verdict::Deliver(d) if d.is_zero() => guard.deliver(pkt),
@@ -65,6 +76,7 @@ impl Scheduler {
                 Verdict::Pass => guard.deliver(pkt),
             }
         }
+        self.egress = egress;
     }
 
     fn schedule(&mut self, pkt: Packet, delay: Duration) {
