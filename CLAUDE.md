@@ -7,7 +7,7 @@ workflow.
 ## Workspace
 
 - `crates/turmoil` — published core crate (`0.7.x`).
-- `crates/turmoil-net` — scaffold; simulated socket layer. Not yet published.
+- `crates/turmoil-net` — published simulated socket layer (`0.1.x`).
 - `crates/turmoil-fs` — scaffold; simulated filesystem. Not yet published.
 - `examples/*` — non-published example crates that depend on `turmoil` via path.
 
@@ -45,8 +45,8 @@ Automated by release-plz (`.github/workflows/release-plz.yml`,
 - Every push to `main` opens/updates a "release PR" with version bumps +
   `CHANGELOG.md`.
 - Merging that PR publishes to crates.io, tags, and cuts a GitHub Release.
-- `turmoil-net` and `turmoil-fs` are excluded (`release = false`) until their
-  first manual publish to crates.io — release-plz can't create new crates.
+- `turmoil-fs` is excluded (`release = false`) until its first manual publish
+  to crates.io — release-plz can't create new crates.
 
 To group changes into one release: leave the release PR open; it rolls in new
 commits automatically on each push.

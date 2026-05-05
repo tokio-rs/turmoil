@@ -6,10 +6,6 @@ semver_check = true
 publish = true
 
 [[package]]
-name = "turmoil-net"
-release = false
-
-[[package]]
 name = "turmoil-fs"
 release = false
 publish = false
