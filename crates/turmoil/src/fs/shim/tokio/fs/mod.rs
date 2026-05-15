@@ -347,6 +347,16 @@ impl File {
     }
 }
 
+/// Exposes the simulated file descriptor.
+///
+/// See [`sync_fs::File`]'s `AsRawFd` impl for details. The fd is the
+/// hand-off point for the [`crate::io_uring`] shim.
+impl std::os::fd::AsRawFd for File {
+    fn as_raw_fd(&self) -> std::os::fd::RawFd {
+        self.inner.as_raw_fd()
+    }
+}
+
 impl tokio::io::AsyncRead for File {
     fn poll_read(
         mut self: std::pin::Pin<&mut Self>,

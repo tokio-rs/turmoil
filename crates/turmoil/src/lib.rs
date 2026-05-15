@@ -204,6 +204,9 @@ pub mod fs;
 #[cfg(feature = "unstable-fs")]
 pub use fs::FsConfig;
 
+#[cfg(feature = "unstable-io_uring")]
+pub mod io_uring;
+
 #[cfg(feature = "unstable-barriers")]
 pub mod barriers;
 

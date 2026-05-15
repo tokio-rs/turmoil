@@ -31,14 +31,27 @@ test-case = "3"
 tokio-test = "0.4.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+io-uring = "0.7"
+tempfile = "3"
+
 [features]
 default = []
 regex = ["dep:regex"]
 unstable-fs = []
+unstable-io_uring = ["unstable-fs"]
 unstable-barriers = ["dep:uuid"]
+# Dev-only: opts into running the io_uring conformance suite against
+# the real Linux kernel ring (in addition to the sim arm). Enables the
+# `io-uring` dev-dependency so the conformance tests can submit SQEs
+# to a real `IoUring`. Requires `target_os = "linux"`.
+real-uring-conformance = []
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tokio_unstable)'] }
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(tokio_unstable)',
+    'cfg(parity_io_uring)',
+] }
 
 [package.metadata.cargo_check_external_types]
 allowed_external_types = [
