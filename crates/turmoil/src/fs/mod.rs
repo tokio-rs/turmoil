@@ -33,9 +33,18 @@ use rand::{Rng, RngCore};
 use rand_distr::{Distribution, Exp};
 use std::cell::RefCell;
 use std::ops::Range;
+use std::os::fd::RawFd;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+/// Base value for sim-allocated file descriptors.
+///
+/// Far enough above any plausible real fd (typical kernel max is ~1M) that
+/// even if a sim fd accidentally leaked into a real syscall it would
+/// reliably error with `EBADF` rather than silently address a real fd.
+/// Stays inside `i32` to fit `RawFd`.
+pub(crate) const SIM_FD_BASE: RawFd = 1 << 30;
 
 // Thread-local storage for worker thread filesystem context.
 // When a worker thread calls `FsHandle::enter()`, this stores the context
@@ -173,7 +182,7 @@ pub(crate) struct FsContext<'a> {
     /// The filesystem state
     pub fs: &'a mut Fs,
     /// Random number generator for probabilistic behaviors
-    rng: &'a mut dyn RngCore,
+    pub(crate) rng: &'a mut dyn RngCore,
     /// Current simulated time
     pub now: Duration,
 }
@@ -997,10 +1006,30 @@ pub(crate) struct Fs {
     synced_entries: IndexSet<PathBuf>,
     /// Queue of pending operations (lost on crash unless synced)
     pub(crate) pending: Vec<PendingOp>,
-    /// Open file handles: fd -> path
-    pub(crate) open_handles: IndexMap<u64, PathBuf>,
-    /// Next file descriptor to assign
-    next_fd: u64,
+    /// Open file handles: fd -> path.
+    ///
+    /// Allocated `RawFd`s start at [`SIM_FD_BASE`] so they can never collide
+    /// with a real-OS fd if one accidentally leaks across the simulation
+    /// boundary.
+    pub(crate) open_handles: IndexMap<RawFd, PathBuf>,
+    /// Subset of [`Self::open_handles`] opened with O_DIRECT semantics.
+    ///
+    /// Tracked separately so the io_uring shim — which only sees a
+    /// bare `RawFd` on the SQE — can enforce alignment requirements
+    /// and bypass the page cache without plumbing the per-`File`
+    /// `direct_io` flag through the kernel-shaped API.
+    #[cfg(feature = "unstable-io_uring")]
+    pub(crate) direct_io_fds: indexmap::IndexSet<RawFd>,
+    /// Active io_uring rings on this host: ring fd -> ring state.
+    ///
+    /// Keyed by the same sim-allocated `RawFd` space as `open_handles`,
+    /// so a single counter (`next_fd`) covers both. The ring is dropped
+    /// (and its in-flight ops abandoned) when the owning [`crate::io_uring::IoUring`]
+    /// is dropped or the host crashes.
+    #[cfg(feature = "unstable-io_uring")]
+    pub(crate) io_uring_rings: IndexMap<RawFd, crate::io_uring::sim::RingState>,
+    /// Next file descriptor to assign.
+    next_fd: RawFd,
     /// Probability that writes are randomly synced to durable storage (0.0 - 1.0)
     pub(crate) sync_probability: f64,
     /// Disk capacity in bytes (None = unlimited)
@@ -1037,7 +1066,11 @@ impl Fs {
             synced_entries,
             pending: Vec::new(),
             open_handles: IndexMap::new(),
-            next_fd: 0,
+            #[cfg(feature = "unstable-io_uring")]
+            direct_io_fds: indexmap::IndexSet::new(),
+            #[cfg(feature = "unstable-io_uring")]
+            io_uring_rings: IndexMap::new(),
+            next_fd: SIM_FD_BASE,
             sync_probability: config.sync_probability,
             capacity: config.capacity,
             io_error_probability: config.io_error_probability,
@@ -1128,10 +1161,16 @@ impl Fs {
         Ok(())
     }
 
-    /// Allocate a new file descriptor.
-    pub(crate) fn alloc_fd(&mut self) -> u64 {
+    /// Allocate a new sim-side file descriptor.
+    ///
+    /// Returns a `RawFd` from a high range (see [`SIM_FD_BASE`]) so that
+    /// these integers cannot collide with real OS fds.
+    pub(crate) fn alloc_fd(&mut self) -> RawFd {
         let fd = self.next_fd;
-        self.next_fd += 1;
+        self.next_fd = self
+            .next_fd
+            .checked_add(1)
+            .expect("simulated fd counter overflowed RawFd range");
         fd
     }
 
@@ -1166,6 +1205,22 @@ impl Fs {
             .retain(|path, _| self.synced_entries.contains(path));
         self.persisted_symlinks
             .retain(|path, _| self.synced_entries.contains(path));
+
+        // Drop every io_uring ring on the host: in-flight ops vanish
+        // (no CQE will ever be delivered), pending side effects of
+        // not-yet-completed writes were never staged, and after
+        // bounce the consumer must construct a new IoUring.
+        //
+        // Wake AsyncFd waiters first so they observe the empty
+        // registry on their next snapshot instead of sleeping until
+        // their cached deadline.
+        #[cfg(feature = "unstable-io_uring")]
+        {
+            for ring in self.io_uring_rings.values() {
+                ring.cq_notify.notify_waiters();
+            }
+            self.io_uring_rings.clear();
+        }
     }
 
     /// Apply torn writes for pending Write operations.
@@ -1387,18 +1442,20 @@ impl Fs {
                 PendingOp::CreateDir { path: p, .. } if p == path => exists = true,
                 PendingOp::RemoveDir { path: p } if p == path => exists = false,
                 // For renames, we need to check if the source was a directory
-                PendingOp::Rename { from, to: _ } if from == path => {
+                PendingOp::Rename { from, to: _ }
+                    if from == path
                     // Source directory is being renamed away
-                    if self.persisted_dirs.contains_key(from) {
-                        exists = false;
-                    }
+                    && self.persisted_dirs.contains_key(from) =>
+                {
+                    exists = false;
                 }
-                PendingOp::Rename { from, to } if to == path => {
+                PendingOp::Rename { from, to }
+                    if to == path
                     // Something is being renamed to this path - only mark as directory
                     // if the source was a directory
-                    if self.persisted_dirs.contains_key(from) {
-                        exists = true;
-                    }
+                    && self.persisted_dirs.contains_key(from) =>
+                {
+                    exists = true;
                 }
                 _ => {}
             }
@@ -1414,21 +1471,22 @@ impl Fs {
                 PendingOp::CreateSymlink { path: p, .. } if p == path => exists = true,
                 PendingOp::RemoveFile { path: p } if p == path => exists = false,
                 // For renames, we need to check if the source was a symlink
-                PendingOp::Rename { from, to: _ } if from == path => {
+                PendingOp::Rename { from, to: _ }
+                    if from == path
                     // Source symlink is being renamed away - it no longer exists at 'from'
                     // Check both persisted and if 'exists' was set by a prior pending create
-                    if self.persisted_symlinks.contains_key(from) || exists {
-                        exists = false;
-                    }
+                    && (self.persisted_symlinks.contains_key(from) || exists) =>
+                {
+                    exists = false;
                 }
-                PendingOp::Rename { from, to } if to == path => {
+                PendingOp::Rename { from, to }
+                    if to == path
                     // Something is being renamed to this path - only mark as symlink
                     // if the source was a symlink (persisted or pending)
-                    if self.persisted_symlinks.contains_key(from)
-                        || self.was_symlink_created_at(from)
-                    {
-                        exists = true;
-                    }
+                    && (self.persisted_symlinks.contains_key(from)
+                        || self.was_symlink_created_at(from)) =>
+                {
+                    exists = true;
                 }
                 _ => {}
             }
@@ -1465,24 +1523,22 @@ impl Fs {
                     offset,
                     data,
                     ..
-                } => {
+                }
                     // Check if this write applies to the content path
-                    if p == &content_path || self.path_renamed_to(p, &content_path) {
+                    if (p == &content_path || self.path_renamed_to(p, &content_path)) => {
                         let end = offset + data.len() as u64;
                         if end > len {
                             len = end;
                         }
                     }
-                }
                 PendingOp::SetLen {
                     path: p,
                     len: new_len,
                     ..
-                } => {
-                    if p == &content_path || self.path_renamed_to(p, &content_path) {
+                }
+                    if (p == &content_path || self.path_renamed_to(p, &content_path)) => {
                         len = *new_len;
                     }
-                }
                 _ => {}
             }
         }
@@ -1561,20 +1617,20 @@ impl Fs {
         // Check pending creates (using exists checks to account for later removals)
         for op in &self.pending {
             match op {
-                PendingOp::CreateFile { path: p, .. } if p.parent() == Some(path) => {
-                    if self.file_exists(p) {
-                        return true;
-                    }
+                PendingOp::CreateFile { path: p, .. }
+                    if p.parent() == Some(path) && self.file_exists(p) =>
+                {
+                    return true;
                 }
-                PendingOp::CreateDir { path: p, .. } if p.parent() == Some(path) => {
-                    if self.dir_exists(p) {
-                        return true;
-                    }
+                PendingOp::CreateDir { path: p, .. }
+                    if p.parent() == Some(path) && self.dir_exists(p) =>
+                {
+                    return true;
                 }
-                PendingOp::CreateSymlink { path: p, .. } if p.parent() == Some(path) => {
-                    if self.symlink_exists(p) {
-                        return true;
-                    }
+                PendingOp::CreateSymlink { path: p, .. }
+                    if p.parent() == Some(path) && self.symlink_exists(p) =>
+                {
+                    return true;
                 }
                 _ => {}
             }
@@ -2158,13 +2214,12 @@ impl Fs {
                     timestamps = Some((*time, *time, *time));
                 }
                 PendingOp::Write { path: p, time, .. }
-                | PendingOp::SetLen { path: p, time, .. } => {
+                | PendingOp::SetLen { path: p, time, .. }
                     // Writes and truncates update mtime/ctime
-                    if (p == path || self.path_renamed_to(p, path)) && timestamps.is_some() {
+                    if (p == path || self.path_renamed_to(p, path)) && timestamps.is_some() => {
                         let (crtime, _, _) = timestamps.unwrap();
                         timestamps = Some((crtime, *time, *time));
                     }
-                }
                 _ => {}
             }
         }
@@ -2220,14 +2275,13 @@ impl Fs {
                         timestamps = Some((crtime, mtime, mtime));
                     }
                 }
-                PendingOp::Rename { from, to } => {
+                PendingOp::Rename { from, to }
                     // Rename affects both source and destination parent directories
-                    if from.parent() == Some(path) || to.parent() == Some(path) {
+                    if (from.parent() == Some(path) || to.parent() == Some(path)) => {
                         if let Some((crtime, mtime, _)) = timestamps {
                             timestamps = Some((crtime, mtime, mtime));
                         }
                     }
-                }
                 _ => {}
             }
         }
@@ -2287,26 +2341,27 @@ impl Fs {
         // Add pending creations
         for op in &self.pending {
             match op {
-                PendingOp::CreateFile { path: p, .. } if p.parent() == Some(path) => {
-                    if self.file_exists(p) {
-                        entries.insert(p.clone());
-                    }
+                PendingOp::CreateFile { path: p, .. }
+                    if p.parent() == Some(path) && self.file_exists(p) =>
+                {
+                    entries.insert(p.clone());
                 }
-                PendingOp::CreateDir { path: p, .. } if p.parent() == Some(path) => {
-                    if self.dir_exists(p) {
-                        entries.insert(p.clone());
-                    }
+                PendingOp::CreateDir { path: p, .. }
+                    if p.parent() == Some(path) && self.dir_exists(p) =>
+                {
+                    entries.insert(p.clone());
                 }
-                PendingOp::CreateSymlink { path: p, .. } if p.parent() == Some(path) => {
-                    if self.symlink_exists(p) {
-                        entries.insert(p.clone());
-                    }
+                PendingOp::CreateSymlink { path: p, .. }
+                    if p.parent() == Some(path) && self.symlink_exists(p) =>
+                {
+                    entries.insert(p.clone());
                 }
-                PendingOp::Rename { to, .. } if to.parent() == Some(path) => {
+                PendingOp::Rename { to, .. }
+                    if to.parent() == Some(path)
                     // Check if it still exists (wasn't removed later)
-                    if self.file_exists(to) || self.dir_exists(to) || self.symlink_exists(to) {
-                        entries.insert(to.clone());
-                    }
+                    && (self.file_exists(to) || self.dir_exists(to) || self.symlink_exists(to)) =>
+                {
+                    entries.insert(to.clone());
                 }
                 _ => {}
             }

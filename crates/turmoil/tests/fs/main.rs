@@ -19,6 +19,8 @@ mod cache;
 mod direct_io;
 mod dirs;
 mod durability;
+#[cfg(feature = "unstable-io_uring")]
+mod io_uring;
 mod links;
 mod metadata;
 mod threads;

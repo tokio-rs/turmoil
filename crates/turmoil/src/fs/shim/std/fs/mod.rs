@@ -109,6 +109,7 @@
 
 use crate::fs::FsContext;
 use std::io::{Error, ErrorKind, Result};
+use std::os::fd::RawFd;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -513,8 +514,13 @@ impl FileType {
 /// per-host simulated filesystem.
 #[derive(Debug)]
 pub struct File {
-    /// File descriptor used to identify this file in the host's Fs
-    fd: u64,
+    /// File descriptor used to identify this file in the host's Fs.
+    ///
+    /// Allocated from a high range (see [`crate::fs::SIM_FD_BASE`]) so it
+    /// is safe to expose via [`AsRawFd`](std::os::fd::AsRawFd) — the
+    /// io_uring shim resolves these back to paths through the host's
+    /// open-file table.
+    fd: RawFd,
     /// Whether the file is readable
     readable: bool,
     /// Whether the file is writable
@@ -694,6 +700,10 @@ impl File {
             // Allocate new fd and register it
             let new_fd = ctx.fs.alloc_fd();
             ctx.fs.open_handles.insert(new_fd, path);
+            #[cfg(feature = "unstable-io_uring")]
+            if self.direct_io {
+                ctx.fs.direct_io_fds.insert(new_fd);
+            }
 
             Ok(File {
                 fd: new_fd,
@@ -860,7 +870,7 @@ impl File {
 
     /// Create a File from internal state (used by OpenOptions).
     pub(crate) fn from_parts(
-        fd: u64,
+        fd: RawFd,
         readable: bool,
         writable: bool,
         append_mode: bool,
@@ -942,7 +952,24 @@ impl Drop for File {
     fn drop(&mut self) {
         FsContext::current_if_set(|ctx| {
             ctx.fs.open_handles.swap_remove(&self.fd);
+            #[cfg(feature = "unstable-io_uring")]
+            ctx.fs.direct_io_fds.swap_remove(&self.fd);
         });
+    }
+}
+
+/// Exposes the simulated file descriptor.
+///
+/// The returned [`RawFd`] is allocated from a high range
+/// ([`crate::fs::SIM_FD_BASE`]) so it cannot collide with any real OS
+/// fd. It is meaningful only inside the turmoil simulation that minted
+/// it; passing it to a real syscall will reliably fail with `EBADF`.
+///
+/// This impl exists so consumers can hand the fd to the
+/// [`crate::io_uring`] shim.
+impl std::os::fd::AsRawFd for File {
+    fn as_raw_fd(&self) -> RawFd {
+        self.fd
     }
 }
 
@@ -1286,6 +1313,10 @@ impl OpenOptions {
             // Check for direct I/O (bypasses page cache)
             // Can be set via direct_io() method or custom_flags(O_DIRECT)
             let direct_io = self.direct_io || (self.custom_flags & O_DIRECT) != 0;
+            #[cfg(feature = "unstable-io_uring")]
+            if direct_io {
+                ctx.fs.direct_io_fds.insert(fd);
+            }
 
             Ok(File::from_parts(
                 fd,

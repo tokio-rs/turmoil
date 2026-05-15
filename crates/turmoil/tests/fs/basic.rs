@@ -336,3 +336,88 @@ fn per_host_isolation() -> Result {
     });
     sim.run()
 }
+
+#[test]
+fn as_raw_fd_yields_distinct_high_range_values() -> Result {
+    use std::os::fd::AsRawFd;
+    let mut sim = Builder::new().build();
+    sim.client("test", async {
+        create_dir_all("/test")?;
+        let f1 = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open("/test/a")?;
+        let f2 = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open("/test/b")?;
+        // Distinct fds.
+        assert_ne!(f1.as_raw_fd(), f2.as_raw_fd());
+        // Both above SIM_FD_BASE, so they cannot collide with real OS fds.
+        assert!(
+            f1.as_raw_fd() >= 1 << 30,
+            "fd {} below SIM_FD_BASE",
+            f1.as_raw_fd()
+        );
+        assert!(
+            f2.as_raw_fd() >= 1 << 30,
+            "fd {} below SIM_FD_BASE",
+            f2.as_raw_fd()
+        );
+        Ok(())
+    });
+    sim.run()
+}
+
+#[test]
+fn as_raw_fd_isolated_per_host() -> Result {
+    use std::os::fd::AsRawFd;
+    use std::sync::Arc;
+    use tokio::sync::Notify;
+    let mut sim = Builder::new().build();
+    // Each host opens one file; both expect the same fd integer because
+    // the fd table is per-host (two independent counters starting at
+    // SIM_FD_BASE).
+    let n1 = Arc::new(Notify::new());
+    let n2 = Arc::new(Notify::new());
+    let n1h = n1.clone();
+    sim.host("host1", move || {
+        let n = n1h.clone();
+        async move {
+            create_dir_all("/h")?;
+            let f = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .open("/h/f")?;
+            assert_eq!(f.as_raw_fd(), 1 << 30);
+            n.notify_one();
+            std::future::pending::<()>().await;
+            Ok(())
+        }
+    });
+    let n2h = n2.clone();
+    sim.host("host2", move || {
+        let n = n2h.clone();
+        async move {
+            create_dir_all("/h")?;
+            let f = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .open("/h/f")?;
+            assert_eq!(f.as_raw_fd(), 1 << 30);
+            n.notify_one();
+            std::future::pending::<()>().await;
+            Ok(())
+        }
+    });
+    sim.client("test", async move {
+        n1.notified().await;
+        n2.notified().await;
+        Ok(())
+    });
+    sim.run()
+}
