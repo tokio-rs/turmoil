@@ -25,7 +25,7 @@ RNG.
 | [`turmoil`](crates/turmoil) | Full simulation-testing framework. Start here. | [![Crates.io][turmoil-crates-badge]][turmoil-crates-url] [![Documentation][turmoil-docs-badge]][turmoil-docs-url] |
 | [`turmoil-net`](crates/turmoil-net) | Deterministic simulated socket stack. Drop-in replacement for `tokio::net`. | [![Crates.io][turmoil-net-crates-badge]][turmoil-net-crates-url] [![Documentation][turmoil-net-docs-badge]][turmoil-net-docs-url] |
 | [`turmoil-fs`](crates/turmoil-fs) | Deterministic simulated filesystem. Drop-in replacement for `std::fs` / `tokio::fs`. | [![Crates.io][turmoil-fs-crates-badge]][turmoil-fs-crates-url] [![Documentation][turmoil-fs-docs-badge]][turmoil-fs-docs-url] |
-| [`turmoil-io_uring`](crates/turmoil-io_uring) | Deterministic simulated `io_uring`. Optional `fs` feature wires it to `turmoil-fs`. | [![Crates.io][turmoil-io_uring-crates-badge]][turmoil-io_uring-crates-url] [![Documentation][turmoil-io_uring-docs-badge]][turmoil-io_uring-docs-url] |
+| [`turmoil-io-uring`](crates/turmoil-io-uring) | Deterministic simulated `io_uring`. Optional `fs` feature wires it to `turmoil-fs`. | [![Crates.io][turmoil-io-uring-crates-badge]][turmoil-io-uring-crates-url] [![Documentation][turmoil-io-uring-docs-badge]][turmoil-io-uring-docs-url] |
 
 [turmoil-crates-badge]: https://img.shields.io/crates/v/turmoil.svg
 [turmoil-crates-url]: https://crates.io/crates/turmoil
@@ -39,10 +39,10 @@ RNG.
 [turmoil-fs-crates-url]: https://crates.io/crates/turmoil-fs
 [turmoil-fs-docs-badge]: https://docs.rs/turmoil-fs/badge.svg
 [turmoil-fs-docs-url]: https://docs.rs/turmoil-fs
-[turmoil-io_uring-crates-badge]: https://img.shields.io/crates/v/turmoil-io_uring.svg
-[turmoil-io_uring-crates-url]: https://crates.io/crates/turmoil-io_uring
-[turmoil-io_uring-docs-badge]: https://docs.rs/turmoil-io_uring/badge.svg
-[turmoil-io_uring-docs-url]: https://docs.rs/turmoil-io_uring
+[turmoil-io-uring-crates-badge]: https://img.shields.io/crates/v/turmoil-io-uring.svg
+[turmoil-io-uring-crates-url]: https://crates.io/crates/turmoil-io-uring
+[turmoil-io-uring-docs-badge]: https://docs.rs/turmoil-io-uring/badge.svg
+[turmoil-io-uring-docs-url]: https://docs.rs/turmoil-io-uring
 
 ## Examples
 

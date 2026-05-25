@@ -10,7 +10,7 @@ crates/
   turmoil/           # umbrella crate; re-exports the others
   turmoil-net/       # simulated socket stack
   turmoil-fs/        # simulated filesystem
-  turmoil-io_uring/  # simulated io_uring (optional fs feature)
+  turmoil-io-uring/  # simulated io_uring (optional fs feature)
 examples/            # non-published example crates
 ```
 
@@ -20,7 +20,7 @@ Before opening a PR, run:
 
 ```sh
 cargo fmt --check
-cargo clippy -p turmoil -p turmoil-net -p turmoil-fs -p turmoil-io_uring --all-targets -- --deny warnings
+cargo clippy -p turmoil -p turmoil-net -p turmoil-fs -p turmoil-io-uring --all-targets -- --deny warnings
 cargo test --workspace
 cargo test --workspace --features regex
 cargo test -p turmoil --features unstable-fs --test fs

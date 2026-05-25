@@ -1,10 +1,10 @@
-# turmoil-io_uring
+# turmoil-io-uring
 
 Simulated [`io_uring`](https://kernel.dk/io_uring.pdf) for deterministic testing in Rust.
 
 ## What it is
 
-`turmoil-io_uring` mirrors the [`io-uring` 0.7](https://docs.rs/io-uring/0.7) crate's API closely enough that consumers can flip a feature flag and swap their `use io_uring::*` imports for `use turmoil_io_uring::*`, then run the same code on macOS or Windows under a turmoil simulation.
+`turmoil-io-uring` mirrors the [`io-uring` 0.7](https://docs.rs/io-uring/0.7) crate's API closely enough that consumers can flip a feature flag and swap their `use io_uring::*` imports for `use turmoil_io_uring::*`, then run the same code on macOS or Windows under a turmoil simulation.
 
 It is **not** a real `io_uring` — there is no kernel ring, no SQ/CQ mmap, no `io_uring_enter` syscall. SQEs are queued in per-host Rust state, and CQEs become observable as simulated time advances past per-op completion timestamps.
 

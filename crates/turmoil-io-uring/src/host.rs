@@ -14,7 +14,7 @@ use std::time::Duration;
 /// Base for sim-allocated ring fds. Mirrors `turmoil_fs::SIM_FD_BASE`
 /// so both file fds and ring fds occupy distinct subranges of the
 /// "high" sim-fd region — fs takes the bottom, io_uring the bottom +
-/// `IO_URING_FD_OFFSET`. Kept in this crate so `turmoil-io_uring`
+/// `IO_URING_FD_OFFSET`. Kept in this crate so `turmoil-io-uring`
 /// without `fs` still builds.
 const SIM_FD_BASE: RawFd = 1 << 30;
 
@@ -104,7 +104,7 @@ pub fn install_host_accessor(current: AccessorFn, current_if_set: TryAccessorFn)
 fn host_accessor() -> AccessorFn {
     *HOST_ACCESSOR
         .get()
-        .expect("turmoil-io_uring: host accessor not installed (call install_host_accessor)")
+        .expect("turmoil-io-uring: host accessor not installed (call install_host_accessor)")
 }
 
 fn try_host_accessor() -> Option<TryAccessorFn> {
@@ -199,7 +199,7 @@ mod combined {
     fn combined_accessor() -> CombinedFn {
         *COMBINED_ACCESSOR
             .get()
-            .expect("turmoil-io_uring: combined fs+io_uring accessor not installed")
+            .expect("turmoil-io-uring: combined fs+io_uring accessor not installed")
     }
 
     /// Run `f` with mutable borrows of both `Fs` and

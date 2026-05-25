@@ -253,7 +253,7 @@ pub(crate) fn install_fs_host_accessor() {
 #[cfg(feature = "unstable-io_uring")]
 pub use turmoil_io_uring as io_uring;
 
-/// Bridge: hand `turmoil-io_uring`'s context access to the current
+/// Bridge: hand `turmoil-io-uring`'s context access to the current
 /// host's io_uring registry. Walks `World::current`.
 #[cfg(feature = "unstable-io_uring")]
 fn iou_host_accessor_current(f: &mut dyn turmoil_io_uring::host::HostBorrowFn) {
@@ -305,7 +305,7 @@ fn iou_combined_accessor(f: &mut dyn turmoil_io_uring::host::FsIoUringFn) {
     })
 }
 
-/// Install the turmoil-io_uring host accessors. Idempotent.
+/// Install the turmoil-io-uring host accessors. Idempotent.
 #[cfg(feature = "unstable-io_uring")]
 pub(crate) fn install_io_uring_host_accessor() {
     turmoil_io_uring::host::install_host_accessor(

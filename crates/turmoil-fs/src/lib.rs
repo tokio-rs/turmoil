@@ -986,7 +986,7 @@ type PageKey = (PathBuf, u64);
 /// Tracks which (file, page) pairs are "hot" in memory. Cache hits
 /// result in near-instant I/O, while cache misses incur full I/O latency.
 /// Per-host page cache simulation. Tracks recently-touched offsets to
-/// model cache hits in I/O latency. Public so `turmoil-io_uring` can
+/// model cache hits in I/O latency. Public so `turmoil-io-uring` can
 /// probe the cache from `&mut Fs::page_cache`.
 pub struct PageCache {
     /// Pages currently in cache, ordered by recency (most recent at end)
@@ -1234,7 +1234,7 @@ impl Fs {
     /// these integers cannot collide with real OS fds.
     ///
     /// `pub` (rather than `pub(crate)`) so sister crates that hold
-    /// `&mut Fs` (notably `turmoil-io_uring`) can allocate fds — this
+    /// `&mut Fs` (notably `turmoil-io-uring`) can allocate fds — this
     /// is the published-but-unstable API, gated by `unstable-fs` on
     /// `turmoil`.
     pub fn alloc_fd(&mut self) -> RawFd {

@@ -42,8 +42,8 @@ jobs:
         run: cargo check -p turmoil --features unstable-io_uring --tests
         env:
           RUSTFLAGS: --cfg=parity_io_uring
-      - name: turmoil-io_uring without fs feature compiles
-        run: cargo check -p turmoil-io_uring
+      - name: turmoil-io-uring without fs feature compiles
+        run: cargo check -p turmoil-io-uring
 
   fmt:
     runs-on: ubuntu-latest
@@ -65,7 +65,7 @@ jobs:
       - name: Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
       - name: Run cargo clippy
-        run: cargo clippy -p turmoil -p turmoil-net -p turmoil-fs -p turmoil-io_uring --all-targets -- --deny warnings
+        run: cargo clippy -p turmoil -p turmoil-net -p turmoil-fs -p turmoil-io-uring --all-targets -- --deny warnings
 
   semver:
     name: semver

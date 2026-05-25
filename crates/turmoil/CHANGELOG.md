@@ -4,12 +4,12 @@
 
 - The `unstable-fs` and `unstable-io_uring` features now re-export from
   the standalone [`turmoil-fs`](https://crates.io/crates/turmoil-fs) and
-  [`turmoil-io_uring`](https://crates.io/crates/turmoil-io_uring) crates.
+  [`turmoil-io-uring`](https://crates.io/crates/turmoil-io-uring) crates.
   Public API surface is unchanged: code using
   `turmoil::fs::shim::std::fs::*` and `turmoil::io_uring::*` continues to
   compile.
 - `turmoil-fs` is no longer a scaffold; it is published as `0.1.0`.
-- `turmoil-io_uring` is published as `0.1.0`.
+- `turmoil-io-uring` is published as `0.1.0`.
 
 # 0.7.2 (April 24, 2026)
 
