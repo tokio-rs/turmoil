@@ -7,10 +7,11 @@ landing changes in this repo.
 
 ```
 crates/
-  turmoil/       # published core crate
-  turmoil-net/   # scaffold, not yet published
-  turmoil-fs/    # scaffold, not yet published
-examples/        # non-published example crates
+  turmoil/           # umbrella crate; re-exports the others
+  turmoil-net/       # simulated socket stack
+  turmoil-fs/        # simulated filesystem
+  turmoil-io_uring/  # simulated io_uring (optional fs feature)
+examples/            # non-published example crates
 ```
 
 ## Local checks
@@ -19,9 +20,13 @@ Before opening a PR, run:
 
 ```sh
 cargo fmt --check
-cargo clippy -p turmoil -p turmoil-net -p turmoil-fs --all-targets -- --deny warnings
+cargo clippy -p turmoil -p turmoil-net -p turmoil-fs -p turmoil-io_uring --all-targets -- --deny warnings
 cargo test --workspace
 cargo test --workspace --features regex
+cargo test -p turmoil --features unstable-fs --test fs
+cargo test -p turmoil --features unstable-io_uring --test fs --test io_uring_conformance
+cargo test -p turmoil --features unstable-barriers --test barriers
+RUSTFLAGS=--cfg=parity_io_uring cargo check -p turmoil --features unstable-io_uring --tests
 ```
 
 Public-API drift on `turmoil` is gated by `cargo-check-external-types` in CI.
@@ -84,8 +89,7 @@ Releases are automated via [release-plz](https://release-plz.dev/).
 To group multiple changes into one release, just leave the release PR open;
 it updates on each push to `main` and rolls in new commits automatically.
 
-`turmoil-net` and `turmoil-fs` are not yet published — they are excluded from
-the release flow in `release-plz.toml` until their first manual publish.
+All four crates participate in the release flow.
 
 ## License
 

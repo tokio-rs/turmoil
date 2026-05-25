@@ -5,7 +5,7 @@
 //! turmoil's simulated time, so consumers get correct wake
 //! semantics without touching real epoll/kqueue/eventfd.
 
-use crate::fs::FsContext;
+use crate::host::IoUringContext;
 use std::io;
 use std::os::fd::{AsRawFd, RawFd};
 use std::sync::Arc;
@@ -36,9 +36,9 @@ impl<T: AsRawFd> AsyncFd<T> {
     /// models READABLE; other interests are accepted but unused.
     pub fn with_interest(inner: T, _interest: Interest) -> io::Result<Self> {
         let fd = inner.as_raw_fd();
-        let notify = FsContext::current(|ctx| {
-            ctx.fs
-                .io_uring_rings
+        let notify = IoUringContext::current(|ctx| {
+            ctx.io_uring
+                .rings
                 .get(&fd)
                 .map(|r| r.cq_notify.clone())
                 .ok_or_else(|| {
@@ -81,10 +81,10 @@ impl<T: AsRawFd> AsyncFd<T> {
             tokio::pin!(notified);
             notified.as_mut().enable();
 
-            // Snapshot under the fs lock: are we ready right now? If
-            // not, what's the next deadline?
-            let snapshot = FsContext::current(|ctx| -> io::Result<Snapshot> {
-                let ring = ctx.fs.io_uring_rings.get(&fd).ok_or_else(|| {
+            // Snapshot under the io_uring lock: are we ready right
+            // now? If not, what's the next deadline?
+            let snapshot = IoUringContext::current(|ctx| -> io::Result<Snapshot> {
+                let ring = ctx.io_uring.rings.get(&fd).ok_or_else(|| {
                     io::Error::new(
                         io::ErrorKind::NotFound,
                         "AsyncFd: ring is no longer registered",

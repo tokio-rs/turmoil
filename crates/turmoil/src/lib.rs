@@ -200,12 +200,120 @@ mod ip;
 pub use ip::IpVersion;
 
 #[cfg(feature = "unstable-fs")]
-pub mod fs;
+pub use turmoil_fs as fs;
 #[cfg(feature = "unstable-fs")]
-pub use fs::FsConfig;
+pub use turmoil_fs::FsConfig;
+
+/// Bridge: hand `turmoil_fs::FsContext` access to the current host's
+/// filesystem state by walking `World::current`. Installed once from
+/// `Builder::build`.
+#[cfg(feature = "unstable-fs")]
+fn fs_host_accessor_current(f: &mut dyn turmoil_fs::HostBorrowFn) {
+    World::current(|world| {
+        let addr = world.current.expect("current host missing");
+        let now = world.hosts[&addr].timer.since_epoch();
+        let World { hosts, rng, .. } = world;
+        let host = hosts.get_mut(&addr).unwrap();
+        f(turmoil_fs::HostBorrow {
+            fs: &host.fs,
+            now,
+            rng: &mut **rng,
+        });
+    })
+}
+
+/// Same shape, but a no-op when `World` isn't currently set. Used by
+/// drop paths.
+#[cfg(feature = "unstable-fs")]
+fn fs_host_accessor_current_if_set(f: &mut dyn turmoil_fs::HostBorrowFn) {
+    World::current_if_set(|world| {
+        let addr = world.current.expect("current host missing");
+        let now = world.hosts[&addr].timer.since_epoch();
+        let World { hosts, rng, .. } = world;
+        let host = hosts.get_mut(&addr).unwrap();
+        f(turmoil_fs::HostBorrow {
+            fs: &host.fs,
+            now,
+            rng: &mut **rng,
+        });
+    })
+}
+
+/// Install the turmoil-fs host accessor. Called once per process from
+/// `Builder::build`; idempotent thanks to the underlying `OnceLock`.
+#[cfg(feature = "unstable-fs")]
+pub(crate) fn install_fs_host_accessor() {
+    turmoil_fs::install_host_accessor(fs_host_accessor_current, fs_host_accessor_current_if_set);
+    #[cfg(feature = "unstable-barriers")]
+    turmoil_fs::install_corruption_hook(|event| {
+        crate::barriers::trigger_noop(event.clone());
+    });
+}
 
 #[cfg(feature = "unstable-io_uring")]
-pub mod io_uring;
+pub use turmoil_io_uring as io_uring;
+
+/// Bridge: hand `turmoil-io_uring`'s context access to the current
+/// host's io_uring registry. Walks `World::current`.
+#[cfg(feature = "unstable-io_uring")]
+fn iou_host_accessor_current(f: &mut dyn turmoil_io_uring::host::HostBorrowFn) {
+    World::current(|world| {
+        let addr = world.current.expect("current host missing");
+        let now = world.hosts[&addr].timer.since_epoch();
+        let host = world.hosts.get_mut(&addr).unwrap();
+        let mut iou_guard = host.io_uring.lock().unwrap();
+        f(turmoil_io_uring::host::HostBorrow {
+            io_uring: &mut iou_guard,
+            now,
+        });
+    })
+}
+
+#[cfg(feature = "unstable-io_uring")]
+fn iou_host_accessor_current_if_set(f: &mut dyn turmoil_io_uring::host::HostBorrowFn) {
+    World::current_if_set(|world| {
+        let addr = world.current.expect("current host missing");
+        let now = world.hosts[&addr].timer.since_epoch();
+        let host = world.hosts.get_mut(&addr).unwrap();
+        let mut iou_guard = host.io_uring.lock().unwrap();
+        f(turmoil_io_uring::host::HostBorrow {
+            io_uring: &mut iou_guard,
+            now,
+        });
+    })
+}
+
+/// Combined fs+io_uring accessor: locks both host mutexes (fs first,
+/// then io_uring) so call sites that need both can borrow them
+/// simultaneously. Used by submit-time scheduling and CQE-time
+/// execution.
+#[cfg(feature = "unstable-io_uring")]
+fn iou_combined_accessor(f: &mut dyn turmoil_io_uring::host::FsIoUringFn) {
+    World::current(|world| {
+        let addr = world.current.expect("current host missing");
+        let now = world.hosts[&addr].timer.since_epoch();
+        let World { hosts, rng, .. } = world;
+        let host = hosts.get_mut(&addr).unwrap();
+        let mut fs_guard = host.fs.lock().unwrap();
+        let mut iou_guard = host.io_uring.lock().unwrap();
+        f(turmoil_io_uring::host::FsIoUringBorrow {
+            fs: &mut fs_guard,
+            io_uring: &mut iou_guard,
+            rng: &mut **rng,
+            now,
+        });
+    })
+}
+
+/// Install the turmoil-io_uring host accessors. Idempotent.
+#[cfg(feature = "unstable-io_uring")]
+pub(crate) fn install_io_uring_host_accessor() {
+    turmoil_io_uring::host::install_host_accessor(
+        iou_host_accessor_current,
+        iou_host_accessor_current_if_set,
+    );
+    turmoil_io_uring::host::install_combined_accessor(iou_combined_accessor);
+}
 
 #[cfg(feature = "unstable-barriers")]
 pub mod barriers;

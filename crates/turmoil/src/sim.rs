@@ -170,13 +170,18 @@ impl<'a> Sim<'a> {
             World::enter(&self.world, || {
                 rt.crash();
 
-                // Discard pending filesystem operations
+                // Walk the per-subsystem crash hooks in lock order.
+                // Each subsystem owns its own state and exposes a
+                // public `crash` API; sim doesn't need to know what
+                // they do internally.
                 #[cfg(feature = "unstable-fs")]
                 World::current(|world| {
                     let addr = world.current.expect("current host missing");
                     let World { hosts, rng, .. } = world;
                     let host = hosts.get_mut(&addr).unwrap();
-                    host.fs.lock().unwrap().discard_pending(&mut **rng);
+                    host.fs.lock().unwrap().crash(&mut **rng);
+                    #[cfg(feature = "unstable-io_uring")]
+                    host.io_uring.lock().unwrap().crash();
                 });
 
                 tracing::trace!(target: TRACING_TARGET, addr = ?h, "Crash");

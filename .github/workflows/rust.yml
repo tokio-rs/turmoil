@@ -24,6 +24,27 @@ jobs:
       - name: Cargo Test
         run: cargo test --workspace --verbose --features "${{ matrix.features }}"
 
+  unstable-features:
+    name: Test unstable features
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - name: unstable-fs
+        run: cargo test -p turmoil --features unstable-fs --test fs
+      - name: unstable-io_uring (sim)
+        run: cargo test -p turmoil --features unstable-io_uring --test fs --test io_uring_conformance
+      - name: unstable-io_uring (real Linux ring)
+        run: cargo test -p turmoil --features unstable-io_uring,real-uring-conformance --test io_uring_conformance
+      - name: unstable-barriers
+        run: cargo test -p turmoil --features unstable-barriers --test barriers
+      - name: parity check vs real io-uring crate
+        run: cargo check -p turmoil --features unstable-io_uring --tests
+        env:
+          RUSTFLAGS: --cfg=parity_io_uring
+      - name: turmoil-io_uring without fs feature compiles
+        run: cargo check -p turmoil-io_uring
+
   fmt:
     runs-on: ubuntu-latest
     steps:
@@ -44,7 +65,7 @@ jobs:
       - name: Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
       - name: Run cargo clippy
-        run: cargo clippy -p turmoil -p turmoil-net -p turmoil-fs --all-targets -- --deny warnings
+        run: cargo clippy -p turmoil -p turmoil-net -p turmoil-fs -p turmoil-io_uring --all-targets -- --deny warnings
 
   semver:
     name: semver

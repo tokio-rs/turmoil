@@ -6,9 +6,10 @@ workflow.
 
 ## Workspace
 
-- `crates/turmoil` — published core crate (`0.7.x`).
+- `crates/turmoil` — published umbrella crate (`0.7.x`); re-exports the others.
 - `crates/turmoil-net` — published simulated socket layer (`0.1.x`).
-- `crates/turmoil-fs` — scaffold; simulated filesystem. Not yet published.
+- `crates/turmoil-fs` — published simulated filesystem (`0.1.x`).
+- `crates/turmoil-io_uring` — published simulated io_uring (`0.1.x`); optional `fs` feature.
 - `examples/*` — non-published example crates that depend on `turmoil` via path.
 
 ## Commands
@@ -16,8 +17,10 @@ workflow.
 ```sh
 cargo test --workspace
 cargo test --workspace --features regex
+cargo test -p turmoil --features unstable-fs --test fs
+cargo test -p turmoil --features unstable-io_uring --test fs --test io_uring_conformance
 cargo fmt --check
-cargo clippy -p turmoil -p turmoil-net -p turmoil-fs --all-targets -- --deny warnings
+cargo clippy -p turmoil -p turmoil-net -p turmoil-fs -p turmoil-io_uring --all-targets -- --deny warnings
 ```
 
 Public-API drift on `turmoil` is gated by `cargo-check-external-types` (nightly
@@ -45,8 +48,7 @@ Automated by release-plz (`.github/workflows/release-plz.yml`,
 - Every push to `main` opens/updates a "release PR" with version bumps +
   `CHANGELOG.md`.
 - Merging that PR publishes to crates.io, tags, and cuts a GitHub Release.
-- `turmoil-fs` is excluded (`release = false`) until its first manual publish
-  to crates.io — release-plz can't create new crates.
+- All four crates participate in the release flow.
 
 To group changes into one release: leave the release PR open; it rolls in new
 commits automatically on each push.
@@ -55,5 +57,9 @@ commits automatically on each push.
 
 - `examples/*` crates have `publish = false` — never add them to the release
   flow.
-- The `unstable-fs` and `unstable-barriers` features in `turmoil` are not
-  covered by semver; changes there don't need a major bump.
+- The `unstable-fs`, `unstable-io_uring`, and `unstable-barriers` features
+  in `turmoil` are not covered by semver; changes to the lifted crates
+  (`turmoil-fs`, `turmoil-io_uring`) don't need a major bump.
+- `turmoil` widens some `Fs` fields/methods to `pub` so `turmoil-io_uring`
+  (a sister crate) can call them with `&mut Fs`. This is the
+  published-but-unstable surface — do not treat it as stable for end users.

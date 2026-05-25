@@ -212,6 +212,14 @@ impl Builder {
             self.config.tick,
         );
 
+        // Install the turmoil-fs host accessor. Idempotent: only the
+        // first call wins, so repeated `Builder::build()` invocations
+        // (across tests in one process) are fine.
+        #[cfg(feature = "unstable-fs")]
+        crate::install_fs_host_accessor();
+        #[cfg(feature = "unstable-io_uring")]
+        crate::install_io_uring_host_accessor();
+
         Sim::new(self.config.clone(), world)
     }
 }

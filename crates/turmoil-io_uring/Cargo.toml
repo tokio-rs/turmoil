@@ -1,0 +1,29 @@
+[package]
+name = "turmoil-io_uring"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Tokio Contributors <team@tokio.rs>"]
+description = "Simulated io_uring for testing"
+homepage = "https://github.com/tokio-rs/turmoil"
+repository = "https://github.com/tokio-rs/turmoil"
+readme = "README.md"
+keywords = ["Deterministic", "Simulation", "Testing", "io_uring"]
+categories = ["asynchronous", "filesystem", "simulation"]
+
+[features]
+default = []
+# Brings in `turmoil-fs` and enables the runtime types (IoUring,
+# Submitter, AsyncFd, ...). Without this feature, the crate compiles to
+# the type fragments only — Entry, OpKind, opcode builders — useful for
+# downstream parity tests but not runnable.
+fs = ["dep:turmoil-fs"]
+
+[dependencies]
+indexmap = "2"
+rand = "0.9"
+tokio = { version = "1.25.0", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
+turmoil-fs = { version = "0.1.0", path = "../turmoil-fs", optional = true }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(parity_io_uring)'] }

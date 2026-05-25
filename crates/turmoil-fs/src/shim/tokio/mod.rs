@@ -1,3 +1,3 @@
-//! Tokio-shaped shim over the kernel filesystem layer.
+//! Tokio filesystem shims.
 
 pub mod fs;

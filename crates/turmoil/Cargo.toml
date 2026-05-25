@@ -23,6 +23,8 @@ tokio = { version = "1.25.0", features = [
     "rt", "rt-multi-thread", "signal", "sync", "time", "test-util",
 ] }
 tracing = "0.1"
+turmoil-fs = { version = "0.1.0", path = "../turmoil-fs", optional = true }
+turmoil-io_uring = { version = "0.1.0", path = "../turmoil-io_uring", optional = true, features = ["fs"] }
 uuid = { version = "1", features = ["v4"], optional = true }
 
 [dev-dependencies]
@@ -38,8 +40,8 @@ tempfile = "3"
 [features]
 default = []
 regex = ["dep:regex"]
-unstable-fs = []
-unstable-io_uring = ["unstable-fs"]
+unstable-fs = ["dep:turmoil-fs"]
+unstable-io_uring = ["unstable-fs", "dep:turmoil-io_uring"]
 unstable-barriers = ["dep:uuid"]
 # Dev-only: opts into running the io_uring conformance suite against
 # the real Linux kernel ring (in addition to the sim arm). Enables the
@@ -57,4 +59,6 @@ unexpected_cfgs = { level = "warn", check-cfg = [
 allowed_external_types = [
   "bytes::*",
   "tokio::*",
+  "turmoil_fs::*",
+  "turmoil_io_uring::*",
 ]

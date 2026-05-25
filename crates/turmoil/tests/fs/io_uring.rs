@@ -1117,7 +1117,8 @@ fn rings_are_isolated_per_host() {
 
     // Each host opens a ring, records its ring fd, and notifies. fds
     // must be allocated independently per host (both should land at
-    // SIM_FD_BASE since each host has its own `next_fd` counter).
+    // the same starting ring fd since each host has its own
+    // `next_ring_fd` counter on its IoUringHostState).
     let mut sim = Builder::new().build();
     let h1_fd = Arc::new(AtomicI32::new(0));
     let h2_fd = Arc::new(AtomicI32::new(0));
@@ -1154,10 +1155,14 @@ fn rings_are_isolated_per_host() {
         n1.notified().await;
         n2.notified().await;
         // Both hosts allocated the same fd integer because they have
-        // separate fd tables. Confirms registries are not globally
-        // shared.
-        assert_eq!(h1_fd.load(Ordering::SeqCst), 1 << 30);
-        assert_eq!(h2_fd.load(Ordering::SeqCst), 1 << 30);
+        // separate ring registries. Confirms registries are not
+        // globally shared. The exact value (SIM_FD_BASE +
+        // IO_URING_FD_OFFSET) is an implementation detail; what
+        // matters is that h1 and h2 agree on it.
+        let h1 = h1_fd.load(Ordering::SeqCst);
+        let h2 = h2_fd.load(Ordering::SeqCst);
+        assert_eq!(h1, h2);
+        assert!(h1 >= 1 << 30, "ring fd should live above SIM_FD_BASE");
         Ok(())
     });
     sim.run().expect("sim");
