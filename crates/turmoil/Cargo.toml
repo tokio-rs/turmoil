@@ -59,6 +59,7 @@ unexpected_cfgs = { level = "warn", check-cfg = [
 allowed_external_types = [
   "bytes::*",
   "tokio::*",
+  "turmoil_fs",
   "turmoil_fs::*",
-  "turmoil_io_uring::*",
+  "turmoil_io_uring",
 ]
