@@ -173,13 +173,13 @@ impl<'a> Sim<'a> {
                 // Walk the per-subsystem crash hooks in lock order.
                 // Each subsystem owns its own state and exposes a
                 // public `crash` API; sim doesn't need to know what
-                // they do internally.
+                // they do internally. Fs uses its per-host rng
+                // internally — no rng plumbing here.
                 #[cfg(feature = "unstable-fs")]
                 World::current(|world| {
                     let addr = world.current.expect("current host missing");
-                    let World { hosts, rng, .. } = world;
-                    let host = hosts.get_mut(&addr).unwrap();
-                    host.fs.lock().unwrap().crash(&mut **rng);
+                    let host = world.hosts.get_mut(&addr).unwrap();
+                    host.fs.lock().unwrap().crash();
                     #[cfg(feature = "unstable-io_uring")]
                     host.io_uring.lock().unwrap().crash();
                 });
@@ -458,7 +458,43 @@ impl<'a> Sim<'a> {
                 world.current_host_mut().timer.now(rt.now());
             }
 
-            let is_software_finished = World::enter(&self.world, || rt.tick(tick))?;
+            // Pull host's fs/io_uring Arcs (and now) out under a
+            // brief world borrow so we can hold the entered guards
+            // across `rt.tick`. The guards lock the per-host mutexes
+            // for the whole tick; rt.tick's own World::current calls
+            // re-borrow only what they need (rng for net, etc.).
+            #[cfg(feature = "unstable-fs")]
+            let (fs_arc, now) = {
+                let world = self.world.borrow();
+                let host = world.hosts.get(&addr).expect("missing host");
+                (Arc::clone(&host.fs), host.timer.since_epoch())
+            };
+            #[cfg(feature = "unstable-io_uring")]
+            let iou_arc = {
+                let world = self.world.borrow();
+                let host = world.hosts.get(&addr).expect("missing host");
+                Arc::clone(&host.io_uring)
+            };
+
+            let is_software_finished = World::enter(&self.world, || {
+                #[cfg(feature = "unstable-fs")]
+                let _fs_guard = turmoil_fs::enter(
+                    &fs_arc,
+                    turmoil_fs::EnterCtx {
+                        now,
+                        #[cfg(feature = "unstable-barriers")]
+                        on_corruption: Some(&crate::fs_corruption_hook),
+                        #[cfg(not(feature = "unstable-barriers"))]
+                        on_corruption: None,
+                    },
+                );
+                #[cfg(feature = "unstable-io_uring")]
+                let _iou_guard = turmoil_io_uring::host::enter(
+                    &iou_arc,
+                    turmoil_io_uring::host::EnterCtx { now },
+                );
+                rt.tick(tick)
+            })?;
 
             if rt.is_client() {
                 is_finished = is_finished && is_software_finished;

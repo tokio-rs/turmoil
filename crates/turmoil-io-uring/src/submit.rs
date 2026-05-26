@@ -142,7 +142,7 @@ fn schedule_pending(
                     // sensible cache state to consult.
                     false
                 };
-                let latency = fs.calculate_latency(rng, cache_hit);
+                let latency = fs.calculate_latency(cache_hit);
                 let ring = iou.rings.get_mut(&ring_fd).expect("ring vanished");
                 ring.schedule(
                     entry.user_data,
@@ -173,7 +173,7 @@ fn schedule_pending(
                         }
                     }
                 }
-                let latency = fs.calculate_latency(rng, false);
+                let latency = fs.calculate_latency(false);
                 let ring = iou.rings.get_mut(&ring_fd).expect("ring vanished");
                 ring.schedule(
                     entry.user_data,
@@ -187,7 +187,7 @@ fn schedule_pending(
                 );
             }
             OpKind::Fsync { fd } => {
-                let latency = fs.calculate_latency(rng, false);
+                let latency = fs.calculate_latency(false);
                 let ring = iou.rings.get_mut(&ring_fd).expect("ring vanished");
                 ring.schedule(entry.user_data, now + latency, PendingApply::Fsync { fd });
             }

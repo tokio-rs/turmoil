@@ -1,14 +1,17 @@
-//! Per-host io_uring state and context accessor.
+//! Per-host io_uring state and the `enter` thread-local.
 //!
-//! Mirrors [`turmoil_fs::FsContext`] for the ring side: a thread-local
-//! gate into the current host's [`IoUringHostState`], with a parallel
-//! `with_fs_and_io_uring` helper for the call sites that need both at
-//! the same time (CQE drain executes ops against `Fs` while holding
-//! ring state; submit-side schedules a CQE after sampling fs latency).
+//! Mirrors `turmoil_fs::enter`: the embedder calls
+//! [`enter`](super::enter) once per host tick, which locks the
+//! supplied `Arc<Mutex<IoUringHostState>>` and sets a thread-local
+//! pointer. While the returned guard is alive, runtime sites
+//! (`Submitter`, `AsyncFd`, `CompletionQueue`, `IoUring::new`/`Drop`)
+//! reach the current ring state via [`IoUringContext::current`].
 
 use super::sim::RingState;
 use indexmap::IndexMap;
+use std::cell::Cell;
 use std::os::fd::RawFd;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// Base for sim-allocated ring fds. Mirrors `turmoil_fs::SIM_FD_BASE`
@@ -73,47 +76,68 @@ impl Default for IoUringHostState {
     }
 }
 
-// ─── Host accessor: dependency-inversion hook ──────────────────────
+// ─── Enter pattern ──────────────────────────────────────────────────
 //
-// Same shape `turmoil-fs` uses. The embedder (`turmoil`) installs
-// closures once at startup; runtime sites (Submitter, AsyncFd,
-// CompletionQueue, IoUring::new/Drop) call through them.
+// `enter` locks the supplied `Arc<Mutex<IoUringHostState>>` and stores
+// a `*mut IoUringHostState` (plus `now`) in a thread-local. Runtime
+// sites read from there via `IoUringContext::current`. Mirrors
+// `turmoil_fs::enter`.
 
-/// Borrow handed to the io_uring-only accessor closure.
-pub struct HostBorrow<'a> {
-    pub io_uring: &'a mut IoUringHostState,
+thread_local! {
+    /// `Arc<Mutex<IoUringHostState>>` of the entered ring registry.
+    /// Locked on each `IoUringContext::current` call; not held for
+    /// the lifetime of the guard. See `turmoil_fs::enter` for why.
+    static CURRENT_IOU_ARC: std::cell::RefCell<Option<Arc<Mutex<IoUringHostState>>>> =
+        const { std::cell::RefCell::new(None) };
+    static CURRENT_NOW: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+}
+
+/// Per-tick context handed to [`enter`].
+pub struct EnterCtx {
+    /// Simulated time elapsed since unix epoch on the current host.
     pub now: Duration,
 }
 
-/// HRTB-erased closure shape for [`HostBorrow`].
-pub trait HostBorrowFn: for<'a> FnMut(HostBorrow<'a>) {}
-impl<F: for<'a> FnMut(HostBorrow<'a>)> HostBorrowFn for F {}
-
-type AccessorFn = fn(&mut dyn HostBorrowFn);
-type TryAccessorFn = fn(&mut dyn HostBorrowFn);
-
-static HOST_ACCESSOR: std::sync::OnceLock<AccessorFn> = std::sync::OnceLock::new();
-static TRY_HOST_ACCESSOR: std::sync::OnceLock<TryAccessorFn> = std::sync::OnceLock::new();
-
-/// Install the io_uring host accessor. Idempotent.
-pub fn install_host_accessor(current: AccessorFn, current_if_set: TryAccessorFn) {
-    let _ = HOST_ACCESSOR.set(current);
-    let _ = TRY_HOST_ACCESSOR.set(current_if_set);
+/// Guard returned by [`enter`]. While alive, the entered
+/// `IoUringHostState` is the current one for [`IoUringContext::current`]
+/// on this thread.
+///
+/// `enter` does NOT hold the mutex on the entered
+/// `IoUringHostState` — it locks on each call to
+/// `IoUringContext::current`. See `turmoil_fs::enter` for the
+/// rationale.
+#[must_use = "the entered IoUringHostState is only current while the guard is held"]
+pub struct IoUringEnterGuard<'a> {
+    prev_arc: Option<Arc<Mutex<IoUringHostState>>>,
+    prev_now: Duration,
+    _marker: std::marker::PhantomData<&'a ()>,
 }
 
-fn host_accessor() -> AccessorFn {
-    *HOST_ACCESSOR
-        .get()
-        .expect("turmoil-io-uring: host accessor not installed (call install_host_accessor)")
+impl<'a> Drop for IoUringEnterGuard<'a> {
+    fn drop(&mut self) {
+        CURRENT_IOU_ARC.with(|c| *c.borrow_mut() = self.prev_arc.take());
+        CURRENT_NOW.with(|c| c.set(self.prev_now));
+    }
 }
 
-fn try_host_accessor() -> Option<TryAccessorFn> {
-    TRY_HOST_ACCESSOR.get().copied()
+/// Mark `arc`'s `IoUringHostState` as the current one for
+/// [`IoUringContext::current`] on this thread.
+///
+/// `enter` calls nest. The embedder (typically `turmoil`) calls
+/// `io_uring::enter` alongside `turmoil_fs::enter` at the start of
+/// each host tick.
+pub fn enter(arc: &Arc<Mutex<IoUringHostState>>, ctx: EnterCtx) -> IoUringEnterGuard<'_> {
+    let prev_arc = CURRENT_IOU_ARC.with(|c| c.borrow_mut().replace(Arc::clone(arc)));
+    let prev_now = CURRENT_NOW.with(|c| c.replace(ctx.now));
+    IoUringEnterGuard {
+        prev_arc,
+        prev_now,
+        _marker: std::marker::PhantomData,
+    }
 }
 
 /// Borrowed handle to the current host's io_uring state plus the
-/// ambient sim time. Mirrors `turmoil_fs::FsContext` but scoped to
-/// ring state alone — call sites that also need `&mut Fs` use
+/// ambient sim time. Call sites that also need `&mut Fs` use
 /// [`with_fs_and_io_uring`] instead.
 pub(crate) struct IoUringContext<'a> {
     pub(crate) io_uring: &'a mut IoUringHostState,
@@ -123,99 +147,58 @@ pub(crate) struct IoUringContext<'a> {
 impl IoUringContext<'_> {
     /// Run `f` with the current host's io_uring context.
     ///
-    /// Panics if no simulation context is active.
+    /// Panics if no `enter` guard is currently held on this thread.
     pub(crate) fn current<R>(f: impl FnOnce(IoUringContext<'_>) -> R) -> R {
-        let f_cell = std::cell::Cell::new(Some(f));
-        let mut out: Option<R> = None;
-        let mut take = |borrow: HostBorrow<'_>| {
-            let f = f_cell.take().expect("host accessor invoked closure twice");
-            out = Some(f(IoUringContext {
-                io_uring: borrow.io_uring,
-                now: borrow.now,
-            }));
-        };
-        host_accessor()(&mut take);
-        out.expect("host accessor did not run closure")
+        let arc = CURRENT_IOU_ARC
+            .with(|c| c.borrow().as_ref().map(Arc::clone))
+            .expect("turmoil-io-uring: no IoUringHostState is current (call enter first)");
+        let mut lock = arc.lock().expect("IoUringHostState mutex poisoned");
+        let now = CURRENT_NOW.with(|c| c.get());
+        f(IoUringContext {
+            io_uring: &mut lock,
+            now,
+        })
     }
 
-    /// Run `f` if a simulation context is set; otherwise no-op. Used in
-    /// drop paths where the simulation may already be shutting down.
+    /// Run `f` if an `enter` guard is currently held; otherwise no-op.
+    /// Used in drop paths where the simulation may be shutting down.
     pub(crate) fn current_if_set(f: impl FnOnce(IoUringContext<'_>)) {
-        if let Some(accessor) = try_host_accessor() {
-            let f_cell = std::cell::Cell::new(Some(f));
-            let mut take = |borrow: HostBorrow<'_>| {
-                if let Some(f) = f_cell.take() {
-                    f(IoUringContext {
-                        io_uring: borrow.io_uring,
-                        now: borrow.now,
-                    });
-                }
-            };
-            accessor(&mut take);
-        }
+        let Some(arc) = CURRENT_IOU_ARC.with(|c| c.borrow().as_ref().map(Arc::clone)) else {
+            return;
+        };
+        let mut lock = arc.lock().expect("IoUringHostState mutex poisoned");
+        let now = CURRENT_NOW.with(|c| c.get());
+        f(IoUringContext {
+            io_uring: &mut lock,
+            now,
+        });
     }
 }
 
-// ─── Combined fs+io_uring accessor (only available with `fs` feature) ──
+// ─── Combined fs+io_uring borrow (only available with `fs` feature) ──
 //
 // Sites in `submit::schedule_pending` and `cqueue::CompletionQueue::next`
-// need to lock fs and io_uring at the same time: submit walks the SQ
-// and samples fs latency before scheduling; CQE drain executes
-// `PendingApply::execute(&mut Fs, ...)` after popping the matured op.
-//
-// Lock order is fs-first, io_uring-second; any future combined-borrow
-// follows the same order.
+// need to mutate both `Fs` and `IoUringHostState` at once. Both
+// thread-locals are populated by their respective `enter` calls during
+// a host tick, so this just reads from both.
 
 #[cfg(feature = "fs")]
-pub(crate) use combined::with_fs_and_io_uring;
-#[cfg(feature = "fs")]
-pub use combined::{install_combined_accessor, FsIoUringBorrow, FsIoUringFn};
-
-#[cfg(feature = "fs")]
-mod combined {
-    use super::IoUringHostState;
-    use std::time::Duration;
-    use turmoil_fs::Fs;
-
-    /// Borrow handed to the combined fs+io_uring accessor.
-    pub struct FsIoUringBorrow<'a> {
-        pub fs: &'a mut Fs,
-        pub io_uring: &'a mut IoUringHostState,
-        pub rng: &'a mut dyn rand::RngCore,
-        pub now: Duration,
-    }
-
-    pub trait FsIoUringFn: for<'a> FnMut(FsIoUringBorrow<'a>) {}
-    impl<F: for<'a> FnMut(FsIoUringBorrow<'a>)> FsIoUringFn for F {}
-
-    type CombinedFn = fn(&mut dyn FsIoUringFn);
-    static COMBINED_ACCESSOR: std::sync::OnceLock<CombinedFn> = std::sync::OnceLock::new();
-
-    /// Install the combined fs+io_uring accessor. Idempotent.
-    pub fn install_combined_accessor(accessor: CombinedFn) {
-        let _ = COMBINED_ACCESSOR.set(accessor);
-    }
-
-    fn combined_accessor() -> CombinedFn {
-        *COMBINED_ACCESSOR
-            .get()
-            .expect("turmoil-io-uring: combined fs+io_uring accessor not installed")
-    }
-
-    /// Run `f` with mutable borrows of both `Fs` and
-    /// `IoUringHostState` plus the ambient rng and time.
-    pub(crate) fn with_fs_and_io_uring<R>(
-        f: impl FnOnce(&mut Fs, &mut IoUringHostState, &mut dyn rand::RngCore, Duration) -> R,
-    ) -> R {
-        let f_cell = std::cell::Cell::new(Some(f));
-        let mut out: Option<R> = None;
-        let mut take = |borrow: FsIoUringBorrow<'_>| {
-            let f = f_cell
-                .take()
-                .expect("combined accessor invoked closure twice");
-            out = Some(f(borrow.fs, borrow.io_uring, borrow.rng, borrow.now));
-        };
-        combined_accessor()(&mut take);
-        out.expect("combined accessor did not run closure")
-    }
+pub(crate) fn with_fs_and_io_uring<R>(
+    f: impl FnOnce(&mut turmoil_fs::Fs, &mut IoUringHostState, &mut dyn rand::RngCore, Duration) -> R,
+) -> R {
+    // Lock fs first (matches lock order documented elsewhere in this
+    // crate). FsContext::current handles the fs lock; we lock
+    // io_uring inline.
+    turmoil_fs::FsContext::current(|ctx| {
+        let arc = CURRENT_IOU_ARC
+            .with(|c| c.borrow().as_ref().map(Arc::clone))
+            .expect("turmoil-io-uring: no IoUringHostState is current (call enter first)");
+        let mut iou_lock = arc.lock().expect("IoUringHostState mutex poisoned");
+        // Split-borrow rng from `&mut Fs` so the closure can take both
+        // `&mut Fs` and `&mut dyn RngCore`. SAFETY: `rng` is a distinct
+        // field from any other Fs field the closure mutates.
+        let rng_ptr: *mut dyn rand::RngCore = &mut *ctx.fs.rng;
+        let rng = unsafe { &mut *rng_ptr };
+        f(ctx.fs, &mut iou_lock, rng, ctx.now)
+    })
 }

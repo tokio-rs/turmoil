@@ -58,6 +58,7 @@ pub(crate) struct Host {
 
 impl Host {
     #[cfg(feature = "unstable-fs")]
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         nodename: impl Into<String>,
         addr: IpAddr,
@@ -66,13 +67,14 @@ impl Host {
         tcp_capacity: usize,
         udp_capacity: usize,
         fs_config: FsConfig,
+        fs_seed: u64,
     ) -> Host {
         Host {
             nodename: nodename.into(),
             addr,
             udp: Udp::new(udp_capacity),
             tcp: Tcp::new(tcp_capacity),
-            fs: Arc::new(Mutex::new(Fs::new(fs_config))),
+            fs: Arc::new(Mutex::new(Fs::new(fs_config, fs_seed))),
             #[cfg(feature = "unstable-io_uring")]
             io_uring: Arc::new(Mutex::new(IoUringHostState::new())),
             timer,
@@ -618,6 +620,7 @@ mod test {
             1,
             1,
             FsConfig::default(),
+            0,
         );
         #[cfg(not(feature = "unstable-fs"))]
         let mut host = Host::new(

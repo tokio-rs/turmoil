@@ -40,7 +40,7 @@ pub mod shim;
 use indexmap::{IndexMap, IndexSet};
 use rand::{Rng, RngCore};
 use rand_distr::{Distribution, Exp};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ops::Range;
 use std::os::fd::RawFd;
 use std::path::{Path, PathBuf};
@@ -55,80 +55,122 @@ use std::time::Duration;
 /// Stays inside `i32` to fit `RawFd`.
 pub const SIM_FD_BASE: RawFd = 1 << 30;
 
-// ─── Host accessor: dependency-inversion hook ──────────────────────
+// ─── Enter pattern ──────────────────────────────────────────────────
 //
-// `turmoil-fs` doesn't know about `turmoil::World`. Instead, the
-// embedding crate (`turmoil`) installs a pair of function pointers
-// once at startup; FsContext::current then calls through them to
-// reach the current host's filesystem state. Same shape `turmoil-net`
-// uses for its CURRENT thread-local.
+// `Fs::enter(EnterCtx { now, rng })` pushes the current `Fs` plus its
+// per-tick context into a thread-local. While the returned guard is
+// alive, `FsContext::current` reads from that thread-local — no
+// globals, no installed function pointers, just lexically-scoped
+// access. The embedder (`turmoil`) calls `enter` once per host tick.
+//
+// Same shape `turmoil-net` uses for its CURRENT thread-local: the
+// state lives in the entered struct, not in a global registry.
 
-/// Borrow handed to a closure passed via the installed host accessor.
-pub struct HostBorrow<'a> {
-    /// The current host's `Arc<Mutex<Fs>>`. Cloned for `FsHandle::current`,
-    /// locked for `FsContext::current`.
-    pub fs: &'a Arc<Mutex<Fs>>,
+/// Per-tick context handed to [`enter`]. The borrows are valid for
+/// the duration of the returned [`FsEnterGuard`]; dropping the guard
+/// releases them.
+pub struct EnterCtx<'a> {
     /// Simulated time elapsed since unix epoch on the current host.
     pub now: Duration,
-    /// World-level RNG. Single source of randomness for determinism.
-    pub rng: &'a mut dyn RngCore,
+    /// Optional hook fired on every silent-corruption event. Used by
+    /// `turmoil`'s `unstable-barriers` integration; `None` for
+    /// embedders that don't observe corruption.
+    pub on_corruption: Option<&'a dyn Fn(&FsCorruption)>,
 }
 
-/// A closure that accepts a `HostBorrow` for any lifetime. Stored as
-/// a `dyn` so we can erase the closure body's type while keeping the
-/// HRTB on `HostBorrow<'a>`.
-pub trait HostBorrowFn: for<'a> FnMut(HostBorrow<'a>) {}
-impl<F: for<'a> FnMut(HostBorrow<'a>)> HostBorrowFn for F {}
-
-type AccessorFn = fn(&mut dyn HostBorrowFn);
-type TryAccessorFn = fn(&mut dyn HostBorrowFn);
-
-static HOST_ACCESSOR: std::sync::OnceLock<AccessorFn> = std::sync::OnceLock::new();
-static TRY_HOST_ACCESSOR: std::sync::OnceLock<TryAccessorFn> = std::sync::OnceLock::new();
-
-/// Install the host accessor used by [`FsContext::current`] and
-/// [`FsContext::current_if_set`].
-///
-/// `current` runs the supplied closure under the world's exclusive
-/// borrow, panicking if no world is set. `current_if_set` is the same
-/// but a no-op when no world is set — used in drop paths.
-///
-/// Idempotent: only the first call wins. The embedder typically
-/// installs once at simulation construction time.
-pub fn install_host_accessor(current: AccessorFn, current_if_set: TryAccessorFn) {
-    let _ = HOST_ACCESSOR.set(current);
-    let _ = TRY_HOST_ACCESSOR.set(current_if_set);
-}
-
-fn host_accessor() -> AccessorFn {
-    *HOST_ACCESSOR
-        .get()
-        .expect("turmoil-fs: host accessor not installed (call install_host_accessor)")
-}
-
-fn try_host_accessor() -> Option<TryAccessorFn> {
-    TRY_HOST_ACCESSOR.get().copied()
-}
-
-// ─── Corruption hook ───────────────────────────────────────────────
+// Thread-local state set by `enter`, cleared on guard drop.
 //
-// When `turmoil` is built with `unstable-barriers`, it installs a
-// corruption hook that fires `barriers::trigger_noop` so tests can
-// observe per-corruption events. Without the hook installed (e.g.
-// embedders that don't ship barriers), corruption is silent — same
-// as before the lift.
+// We do NOT hold the `Fs` mutex for the duration of the guard:
+// `FsContext::current` locks it on each call and releases between
+// calls. This avoids deadlocks with `FsHandle`-spawned worker
+// threads that synchronously block the main sim thread (e.g.
+// `std::thread::spawn` + `join`) — the worker locks while the main
+// thread is parked, and the lock is contended only at sub-call
+// granularity.
+type CorruptionPtr = Option<*const dyn Fn(&FsCorruption)>;
 
-type CorruptionHook = fn(&FsCorruption);
-static CORRUPTION_HOOK: std::sync::OnceLock<CorruptionHook> = std::sync::OnceLock::new();
+thread_local! {
+    /// `Arc<Mutex<Fs>>` of the entered fs. Locked on each
+    /// `FsContext::current` call, also cloned by `FsHandle::current`.
+    static CURRENT_FS_ARC: RefCell<Option<Arc<Mutex<Fs>>>> = const { RefCell::new(None) };
+    static CURRENT_NOW: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+    static CURRENT_CORRUPTION: Cell<CorruptionPtr> = const { Cell::new(None) };
+}
 
-/// Install a hook fired on every silent-corruption event. Idempotent.
-pub fn install_corruption_hook(hook: CorruptionHook) {
-    let _ = CORRUPTION_HOOK.set(hook);
+/// Guard returned by [`enter`]. While alive, the entered `Fs` is the
+/// current one for [`FsContext::current`] on this thread.
+///
+/// `enter` does NOT hold the `Fs` mutex for the guard's lifetime —
+/// see the docstring on [`enter`] for why. The mutex is locked on
+/// each `FsContext::current` call.
+///
+/// `enter` calls nest, mirroring `tracing::span`.
+#[must_use = "the entered Fs is only current while the guard is held"]
+pub struct FsEnterGuard<'a> {
+    prev_arc: Option<Arc<Mutex<Fs>>>,
+    prev_now: Duration,
+    prev_corruption: CorruptionPtr,
+    _marker: std::marker::PhantomData<&'a ()>,
+}
+
+impl<'a> Drop for FsEnterGuard<'a> {
+    fn drop(&mut self) {
+        CURRENT_FS_ARC.with(|c| *c.borrow_mut() = self.prev_arc.take());
+        CURRENT_NOW.with(|c| c.set(self.prev_now));
+        CURRENT_CORRUPTION.with(|c| c.set(self.prev_corruption));
+    }
+}
+
+/// Mark `arc`'s `Fs` as the current one for [`FsContext::current`] on
+/// this thread, with the supplied per-tick context (sim time, optional
+/// corruption hook).
+///
+/// While the guard is alive, shim operations on this thread
+/// (`turmoil_fs::shim::std::fs::*` etc.) route through this `Fs`. The
+/// embedder (typically `turmoil`) calls `enter` once per host tick.
+///
+/// **Lock-on-demand:** `enter` does not hold the mutex on `arc`. Each
+/// `FsContext::current` call inside the guard locks the mutex for the
+/// duration of the closure body, then releases it. This sidesteps a
+/// deadlock with [`FsHandle`]-spawned OS threads that synchronously
+/// block the main sim thread (e.g. `std::thread::spawn` + `join`).
+///
+/// `enter` calls nest. Dropping the guard restores the previous
+/// current `Fs` (if any).
+pub fn enter<'a>(arc: &'a Arc<Mutex<Fs>>, ctx: EnterCtx<'a>) -> FsEnterGuard<'a> {
+    // SAFETY of the lifetime erasure: the returned `FsEnterGuard<'a>`
+    // borrows the corruption hook in `ctx` for `'a`. On drop we
+    // restore the previous pointer, so the erased pointer never
+    // outlives `'a`.
+    let corruption_ptr: Option<*const dyn Fn(&FsCorruption)> =
+        ctx.on_corruption.map(|f| {
+            let f_ptr: *const (dyn Fn(&FsCorruption) + 'a) = f;
+            unsafe {
+                std::mem::transmute::<
+                    *const (dyn Fn(&FsCorruption) + 'a),
+                    *const dyn Fn(&FsCorruption),
+                >(f_ptr)
+            }
+        });
+
+    let prev_arc = CURRENT_FS_ARC.with(|c| c.borrow_mut().replace(Arc::clone(arc)));
+    let prev_now = CURRENT_NOW.with(|c| c.replace(ctx.now));
+    let prev_corruption = CURRENT_CORRUPTION.with(|c| c.replace(corruption_ptr));
+
+    FsEnterGuard {
+        prev_arc,
+        prev_now,
+        prev_corruption,
+        _marker: std::marker::PhantomData,
+    }
 }
 
 fn fire_corruption(event: &FsCorruption) {
-    if let Some(hook) = CORRUPTION_HOOK.get() {
-        hook(event);
+    if let Some(hook) = CURRENT_CORRUPTION.with(|c| c.get()) {
+        // SAFETY: pointer is valid while the guard that installed it
+        // is alive (single-threaded; we only read on the same thread).
+        let f = unsafe { &*hook };
+        f(event);
     }
 }
 
@@ -140,13 +182,15 @@ thread_local! {
 }
 
 /// Context stored in thread-local for worker threads.
+///
+/// `rng` is not held here — fs owns its own per-host rng on the `Fs`
+/// struct, so a worker thread that locks the `Arc<Mutex<Fs>>` can read
+/// `fs.rng` directly.
 struct WorkerContext {
     /// Shared reference to the filesystem
     fs: Arc<Mutex<Fs>>,
     /// Captured simulated time
     time: Duration,
-    /// RNG for this worker thread (uses its own state for thread safety)
-    rng: Mutex<rand::rngs::ThreadRng>,
 }
 
 /// A handle to the current host's filesystem that can be sent to worker threads.
@@ -205,15 +249,14 @@ impl FsHandle {
     ///
     /// Panics if called outside a turmoil simulation.
     pub fn current() -> Self {
-        let mut out: Option<FsHandle> = None;
-        let mut take = |borrow: HostBorrow<'_>| {
-            out = Some(FsHandle {
-                fs: Arc::clone(borrow.fs),
-                time: borrow.now,
-            });
-        };
-        host_accessor()(&mut take);
-        out.expect("host accessor did not run closure")
+        let fs = CURRENT_FS_ARC.with(|c| {
+            c.borrow()
+                .as_ref()
+                .map(Arc::clone)
+                .expect("turmoil-fs: no Fs is current (call Fs::enter first)")
+        });
+        let time = CURRENT_NOW.with(|c| c.get());
+        FsHandle { fs, time }
     }
 
     /// Enter the filesystem context for this thread.
@@ -235,7 +278,6 @@ impl FsHandle {
             *ctx.borrow_mut() = Some(WorkerContext {
                 fs: Arc::clone(&self.fs),
                 time: self.time,
-                rng: Mutex::new(rand::rng()),
             });
         });
         FsHandleGuard { _private: () }
@@ -263,11 +305,18 @@ impl Drop for FsHandleGuard {
 ///
 /// This abstracts how the filesystem is accessed, allowing future support
 /// for worker threads that aren't running in the main simulation context.
-pub(crate) struct FsContext<'a> {
+/// Borrowed handle to the current host's filesystem state plus the
+/// ambient sim time. Made `pub` so sister crates (notably
+/// `turmoil-io-uring`) can call [`FsContext::current`] when they need
+/// `&mut Fs`. Published-but-unstable surface — not stable for end
+/// users.
+///
+/// RNG is not in the context — fs owns its own per-host rng on the
+/// `Fs` struct (see [`Fs::rng`]). Call `ctx.fs.rng.random_bool(...)`
+/// etc. directly.
+pub struct FsContext<'a> {
     /// The filesystem state
     pub fs: &'a mut Fs,
-    /// Random number generator for probabilistic behaviors
-    pub(crate) rng: &'a mut dyn RngCore,
     /// Current simulated time
     pub now: Duration,
 }
@@ -280,102 +329,74 @@ impl FsContext<'_> {
 
     /// Run `f` with the current host's filesystem context.
     ///
-    /// This checks two sources for the context:
-    /// 1. Thread-local storage (for worker threads using [`FsHandle::enter`])
-    /// 2. The installed host accessor (for the main simulation thread)
+    /// Two sources are checked, in order:
+    /// 1. The worker thread-local set by [`FsHandle::enter`].
+    /// 2. The thread-local set by [`Fs::enter`] (the main sim thread).
     ///
     /// # Panics
     ///
-    /// Panics if called outside both a turmoil simulation and a worker thread context.
+    /// Panics if called outside both a turmoil simulation and a worker
+    /// thread context.
     pub fn current<R>(f: impl FnOnce(FsContext<'_>) -> R) -> R {
-        // Check which context we're in first, then call the appropriate path
         if Self::in_worker_context() {
-            WORKER_FS_CONTEXT.with(|ctx| {
+            return WORKER_FS_CONTEXT.with(|ctx| {
                 let borrowed = ctx.borrow();
                 let worker_ctx = borrowed.as_ref().unwrap();
-
-                // Lock the filesystem mutex
                 let mut fs_guard = worker_ctx.fs.lock().unwrap();
                 let now = worker_ctx.time;
-
-                // Get mutable access to the RNG
-                let mut rng_guard = worker_ctx.rng.lock().unwrap();
-
                 f(FsContext {
                     fs: &mut fs_guard,
-                    rng: &mut rng_guard,
                     now,
                 })
-            })
-        } else {
-            // Defer to the installed host accessor.
-            let f_cell = std::cell::Cell::new(Some(f));
-            let mut out: Option<R> = None;
-            let mut take = |borrow: HostBorrow<'_>| {
-                let mut fs_guard = borrow.fs.lock().unwrap();
-                let f = f_cell.take().expect("host accessor invoked closure twice");
-                out = Some(f(FsContext {
-                    fs: &mut fs_guard,
-                    rng: borrow.rng,
-                    now: borrow.now,
-                }));
-            };
-            host_accessor()(&mut take);
-            out.expect("host accessor did not run closure")
+            });
         }
+
+        let arc = CURRENT_FS_ARC
+            .with(|c| c.borrow().as_ref().map(Arc::clone))
+            .expect("turmoil-fs: no Fs is current (call enter first)");
+        let mut lock = arc.lock().expect("Fs mutex poisoned");
+        let now = CURRENT_NOW.with(|c| c.get());
+        f(FsContext { fs: &mut lock, now })
     }
 
     /// Run `f` if we're in a simulation context, otherwise no-op.
-    ///
     /// Used in drop paths where the simulation may be shutting down.
-    /// Checks both worker thread context and the installed host accessor.
     pub fn current_if_set(f: impl FnOnce(FsContext<'_>)) {
-        // Check which context we're in first
         if Self::in_worker_context() {
             WORKER_FS_CONTEXT.with(|ctx| {
                 let borrowed = ctx.borrow();
                 let worker_ctx = borrowed.as_ref().unwrap();
-
-                // Lock the filesystem mutex
                 let mut fs_guard = worker_ctx.fs.lock().unwrap();
                 let now = worker_ctx.time;
-                let mut rng_guard = worker_ctx.rng.lock().unwrap();
-
                 f(FsContext {
                     fs: &mut fs_guard,
-                    rng: &mut rng_guard,
                     now,
                 });
             });
-        } else if let Some(accessor) = try_host_accessor() {
-            let f_cell = std::cell::Cell::new(Some(f));
-            let mut take = |borrow: HostBorrow<'_>| {
-                let mut fs_guard = borrow.fs.lock().unwrap();
-                if let Some(f) = f_cell.take() {
-                    f(FsContext {
-                        fs: &mut fs_guard,
-                        rng: borrow.rng,
-                        now: borrow.now,
-                    });
-                }
-            };
-            accessor(&mut take);
+            return;
         }
+
+        let Some(arc) = CURRENT_FS_ARC.with(|c| c.borrow().as_ref().map(Arc::clone)) else {
+            return;
+        };
+        let mut lock = arc.lock().expect("Fs mutex poisoned");
+        let now = CURRENT_NOW.with(|c| c.get());
+        f(FsContext { fs: &mut lock, now });
     }
 
     /// Returns true with the given probability (0.0 to 1.0).
     pub fn random_bool(&mut self, probability: f64) -> bool {
-        self.rng.random_bool(probability)
+        self.fs.rng.random_bool(probability)
     }
 
     /// Returns a random value in the given range.
     pub fn random_range(&mut self, range: Range<usize>) -> usize {
-        self.rng.random_range(range)
+        self.fs.rng.random_range(range)
     }
 
     /// Returns a random u8 value.
     pub fn random_u8(&mut self) -> u8 {
-        self.rng.random()
+        self.fs.rng.random()
     }
 }
 
@@ -1073,6 +1094,17 @@ impl PageCache {
 /// On crash, orphaned files (in `persisted_files` but not `synced_entries`) are removed
 /// since they have no directory entry pointing to them.
 pub struct Fs {
+    /// Per-host RNG, seeded from the world rng once at `Fs::new` time.
+    /// Used for all probabilistic faults (sync_probability,
+    /// io_error_probability, corruption_probability, short_read,
+    /// torn writes, page-cache random eviction, latency sampling).
+    ///
+    /// Owning the rng here means fs faults don't shift the world rng
+    /// state — adding a new probabilistic knob in one test no longer
+    /// reorders network packet delivery in another. Replay determinism
+    /// is preserved: same world seed → same per-host fs seed →
+    /// same sequence.
+    pub rng: Box<dyn RngCore + Send>,
     /// File inode data (content, timestamps, mode). Data here survives crash,
     /// but is only reachable if the path is also in `synced_entries`.
     pub(crate) persisted_files: IndexMap<PathBuf, FileData>,
@@ -1121,15 +1153,21 @@ pub struct Fs {
 }
 
 impl Fs {
-    /// Create a new empty filesystem.
-    pub fn new(config: FsConfig) -> Self {
+    /// Create a new empty filesystem with a fresh per-host RNG seeded
+    /// from `seed`. Embedders typically derive `seed` by calling
+    /// `world_rng.next_u64()` at host construction time.
+    pub fn new(config: FsConfig, seed: u64) -> Self {
         let mut persisted_dirs = IndexMap::new();
         let mut synced_entries = IndexSet::new();
         // Root directory exists from the start with epoch timestamp
         persisted_dirs.insert(PathBuf::from("/"), DirData::new(Duration::ZERO));
         synced_entries.insert(PathBuf::from("/"));
 
+        use rand::SeedableRng;
+        let rng: Box<dyn RngCore + Send> = Box::new(rand::rngs::SmallRng::seed_from_u64(seed));
+
         Self {
+            rng,
             persisted_files: IndexMap::new(),
             persisted_dirs,
             persisted_symlinks: IndexMap::new(),
@@ -1156,7 +1194,7 @@ impl Fs {
     /// latency (~100ns) simulating memory access speed.
     ///
     /// Returns `Duration::ZERO` if latency is not configured.
-    pub fn calculate_latency(&self, rng: &mut dyn RngCore, cache_hit: bool) -> Duration {
+    pub fn calculate_latency(&mut self, cache_hit: bool) -> Duration {
         // Cache hits are near-instant (memory speed)
         if cache_hit && self.page_cache.is_some() {
             return Duration::from_nanos(100);
@@ -1166,7 +1204,7 @@ impl Fs {
         match &self.io_latency {
             Some(cfg) => {
                 let range = cfg.max_latency.saturating_sub(cfg.min_latency);
-                let sample: f64 = cfg.distribution.sample(rng);
+                let sample: f64 = cfg.distribution.sample(&mut self.rng);
                 // Clamp sample to [0, 1] range for scaling
                 let scaled = range.mul_f64(sample.min(1.0));
                 cfg.min_latency + scaled
@@ -1259,9 +1297,17 @@ impl Fs {
     /// This also removes "orphaned" files - files whose data was synced (via
     /// `sync_file`) but whose directory entry was not synced (via `sync_dir`).
     /// In POSIX, both are required for a file to survive a crash.
-    pub fn crash(&mut self, rng: &mut dyn RngCore) {
-        // Apply torn writes if block_size is configured
+    pub fn crash(&mut self) {
+        // Apply torn writes if block_size is configured.
+        // Split-borrow: `apply_torn_writes` needs `&mut self.pending`
+        // (and others) plus a separate `&mut rng`. Pulling rng out
+        // first lets the helper take everything else as `&mut self`.
         if let Some(block_size) = self.block_size {
+            // SAFETY: `self.rng` is disjoint from the fields
+            // `apply_torn_writes` mutates (`pending`, `persisted_*`).
+            // Single-threaded simulation; no aliasing.
+            let rng_ptr: *mut dyn RngCore = &mut *self.rng;
+            let rng = unsafe { &mut *rng_ptr };
             self.apply_torn_writes(block_size, rng);
         }
 
@@ -2429,6 +2475,6 @@ impl Fs {
 
 impl Default for Fs {
     fn default() -> Self {
-        Self::new(FsConfig::default())
+        Self::new(FsConfig::default(), 0)
     }
 }
