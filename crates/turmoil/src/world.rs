@@ -232,6 +232,8 @@ impl World {
 
         // Initialize host state
         #[cfg(feature = "unstable-fs")]
+        let fs_seed = self.rng.next_u64();
+        #[cfg(feature = "unstable-fs")]
         self.hosts.insert(
             addr,
             Host::new(
@@ -242,6 +244,7 @@ impl World {
                 config.tcp_capacity,
                 config.udp_capacity,
                 config.fs.clone(),
+                fs_seed,
             ),
         );
         #[cfg(not(feature = "unstable-fs"))]

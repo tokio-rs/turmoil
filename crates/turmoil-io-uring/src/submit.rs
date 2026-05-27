@@ -1,9 +1,9 @@
 //! Submitter handle mirroring [`io_uring::Submitter`](https://docs.rs/io-uring/0.7/io_uring/struct.Submitter.html).
 
+use super::host::{with_fs_and_io_uring, IoUringHostState};
 use super::sim::PendingApply;
 use super::squeue::{Entry, OpKind};
 use super::types::SubmitArgs;
-use crate::fs::FsContext;
 use std::io;
 use std::os::fd::RawFd;
 use std::time::Duration;
@@ -13,7 +13,7 @@ use std::time::Duration;
 /// In the simulation, `submit()` walks the SQ, schedules a per-op
 /// completion timestamp drawn from the configured I/O latency
 /// distribution, and returns. CQEs become observable via the
-/// [`crate::io_uring::cqueue::CompletionQueue`] iterator as simulated
+/// [`crate::cqueue::CompletionQueue`] iterator as simulated
 /// time advances past each timestamp.
 pub struct Submitter<'a> {
     ring_fd: RawFd,
@@ -34,7 +34,7 @@ impl<'a> Submitter<'a> {
     /// which may submit fewer than queued). The simulation always
     /// accepts the entire SQ.
     pub fn submit(&self) -> io::Result<usize> {
-        FsContext::current(|ctx| schedule_pending(ctx.fs, ctx.rng, ctx.now, self.ring_fd))
+        with_fs_and_io_uring(|fs, iou, rng, now| schedule_pending(fs, iou, rng, now, self.ring_fd))
     }
 
     /// `submit()`, then in the real kernel block the calling thread
@@ -44,7 +44,7 @@ impl<'a> Submitter<'a> {
     /// SQ has been scheduled — there is no thread to block, and the
     /// turmoil runtime advances simulated time only on `await`
     /// points. Callers awaiting CQEs should use
-    /// [`crate::io_uring::AsyncFd::readable`] (which honors simulated
+    /// [`crate::AsyncFd::readable`] (which honors simulated
     /// time) instead. The `want` argument is accepted for API
     /// compatibility but has no in-sim effect.
     pub fn submit_and_wait(&self, want: usize) -> io::Result<usize> {
@@ -55,7 +55,7 @@ impl<'a> Submitter<'a> {
     /// `Submitter::submit_with_args`. `args.timeout` is recorded but
     /// not honored: the simulation cannot block sync code on
     /// simulated time. If a test needs a timeout, await
-    /// [`crate::io_uring::AsyncFd::readable`] inside a
+    /// [`crate::AsyncFd::readable`] inside a
     /// `tokio::time::timeout` — both fire under simulated time and
     /// give the same observable behavior as the real kernel call.
     pub fn submit_with_args(&self, _want: usize, args: &SubmitArgs<'_>) -> io::Result<usize> {
@@ -70,7 +70,7 @@ impl<'a> Submitter<'a> {
                 ));
             }
         }
-        FsContext::current(|ctx| schedule_pending(ctx.fs, ctx.rng, ctx.now, self.ring_fd))
+        with_fs_and_io_uring(|fs, iou, rng, now| schedule_pending(fs, iou, rng, now, self.ring_fd))
     }
 }
 
@@ -78,15 +78,17 @@ impl<'a> Submitter<'a> {
 /// schedule a future CQE or post an immediate `EINVAL` CQE for
 /// unsupported ops.
 fn schedule_pending(
-    fs: &mut crate::fs::Fs,
+    fs: &mut turmoil_fs::Fs,
+    iou: &mut IoUringHostState,
     rng: &mut dyn rand::RngCore,
     now: Duration,
     ring_fd: RawFd,
 ) -> io::Result<usize> {
-    // Drain SQ first (single mutable borrow), then process each entry
-    // by re-borrowing the ring on demand. Latency sampling needs
-    // `&Fs`, so we cannot keep `&mut RingState` live across it.
-    let entries: Vec<Entry> = match fs.io_uring_rings.get_mut(&ring_fd) {
+    // Drain SQ first (single mutable borrow on the ring), then process
+    // each entry by re-borrowing the ring on demand. Latency sampling
+    // touches `&mut Fs`, so we cannot keep `&mut RingState` live
+    // across it.
+    let entries: Vec<Entry> = match iou.rings.get_mut(&ring_fd) {
         Some(ring) => ring.sq.drain(..).collect(),
         None => {
             return Err(io::Error::new(
@@ -100,7 +102,7 @@ fn schedule_pending(
     for entry in entries {
         accepted += 1;
         if entry.flags.has_unsupported() {
-            let ring = fs.io_uring_rings.get_mut(&ring_fd).expect("ring vanished");
+            let ring = iou.rings.get_mut(&ring_fd).expect("ring vanished");
             ring.post_immediate_error(entry.user_data, libc_einval(), now);
             continue;
         }
@@ -140,8 +142,8 @@ fn schedule_pending(
                     // sensible cache state to consult.
                     false
                 };
-                let latency = fs.calculate_latency(rng, cache_hit);
-                let ring = fs.io_uring_rings.get_mut(&ring_fd).expect("ring vanished");
+                let latency = fs.calculate_latency(cache_hit);
+                let ring = iou.rings.get_mut(&ring_fd).expect("ring vanished");
                 ring.schedule(
                     entry.user_data,
                     now + latency,
@@ -171,8 +173,8 @@ fn schedule_pending(
                         }
                     }
                 }
-                let latency = fs.calculate_latency(rng, false);
-                let ring = fs.io_uring_rings.get_mut(&ring_fd).expect("ring vanished");
+                let latency = fs.calculate_latency(false);
+                let ring = iou.rings.get_mut(&ring_fd).expect("ring vanished");
                 ring.schedule(
                     entry.user_data,
                     now + latency,
@@ -185,12 +187,12 @@ fn schedule_pending(
                 );
             }
             OpKind::Fsync { fd } => {
-                let latency = fs.calculate_latency(rng, false);
-                let ring = fs.io_uring_rings.get_mut(&ring_fd).expect("ring vanished");
+                let latency = fs.calculate_latency(false);
+                let ring = iou.rings.get_mut(&ring_fd).expect("ring vanished");
                 ring.schedule(entry.user_data, now + latency, PendingApply::Fsync { fd });
             }
             OpKind::AsyncCancel { target_user_data } => {
-                let ring = fs.io_uring_rings.get_mut(&ring_fd).expect("ring vanished");
+                let ring = iou.rings.get_mut(&ring_fd).expect("ring vanished");
                 ring.cancel(entry.user_data, target_user_data, now);
             }
         }

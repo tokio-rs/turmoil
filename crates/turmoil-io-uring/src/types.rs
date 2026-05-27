@@ -7,8 +7,10 @@ use std::time::Duration;
 ///
 /// Holds the same kind of integer the real crate accepts. In the
 /// simulation the integer is one allocated by
-/// [`crate::fs::Fs::alloc_fd`] (i.e. from the high `SIM_FD_BASE` range)
-/// and is resolved back to a path by the ring at completion time.
+/// [`turmoil_fs::Fs::alloc_fd`] (file fds) or
+/// [`crate::host::IoUringHostState::alloc_ring_fd`] (ring fds),
+/// each from a distinct subrange above `SIM_FD_BASE`. Resolved back to
+/// per-host state at completion time.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub struct Fd(pub RawFd);
 
@@ -48,13 +50,13 @@ impl From<Duration> for Timespec {
     }
 }
 
-/// Arguments for [`crate::io_uring::Submitter::submit_with_args`].
+/// Arguments for [`crate::Submitter::submit_with_args`].
 ///
 /// The timespec timeout is validated for shape (nsec must be a valid
 /// nanosecond) but is not used to bound a wait — `submit_with_args`
 /// is sync and the simulation cannot block sync code on simulated
 /// time. Tests needing a real wall-time bound should await on
-/// [`crate::io_uring::AsyncFd::readable`] inside a
+/// [`crate::AsyncFd::readable`] inside a
 /// `tokio::time::timeout`. The sigmask field exists for source
 /// compatibility but is ignored.
 #[derive(Default)]
@@ -69,7 +71,7 @@ impl<'a> SubmitArgs<'a> {
         Self::default()
     }
 
-    /// Set a timeout for [`crate::io_uring::Submitter::submit_with_args`].
+    /// Set a timeout for [`crate::Submitter::submit_with_args`].
     pub fn timespec(mut self, ts: &'a Timespec) -> Self {
         self.timeout = Some(*ts);
         self

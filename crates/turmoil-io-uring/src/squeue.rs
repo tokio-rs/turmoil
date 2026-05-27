@@ -1,6 +1,7 @@
 //! Submission queue types mirroring [`io_uring::squeue`](https://docs.rs/io-uring/0.7/io_uring/squeue).
 
-use crate::fs::FsContext;
+#[cfg(feature = "fs")]
+use crate::host::IoUringContext;
 use std::os::fd::RawFd;
 
 /// Sealed trait selecting between [`Entry`] (default) and the larger
@@ -8,7 +9,7 @@ use std::os::fd::RawFd;
 /// implemented in the simulation.
 pub trait EntryMarker: private::Sealed + Sized {}
 
-/// One submission queue entry. Built by [`crate::io_uring::opcode`]
+/// One submission queue entry. Built by [`crate::opcode`]
 /// builders and pushed onto a [`SubmissionQueue`].
 ///
 /// The simulation does not preserve the kernel's wire layout — the
@@ -18,6 +19,7 @@ pub trait EntryMarker: private::Sealed + Sized {}
 /// `flags`) returns `Entry` and is chainable.
 #[derive(Clone, Debug)]
 pub struct Entry {
+    #[cfg_attr(not(feature = "fs"), allow(dead_code))]
     pub(crate) op: OpKind,
     pub(crate) user_data: u64,
     pub(crate) flags: Flags,
@@ -59,6 +61,7 @@ impl Flags {
     }
 
     /// Whether any flag the simulation rejects is set.
+    #[cfg_attr(not(feature = "fs"), allow(dead_code))]
     pub(crate) fn has_unsupported(self) -> bool {
         const REJECTED: u8 = Flags::FIXED_FILE.0
             | Flags::IO_DRAIN.0
@@ -89,6 +92,11 @@ impl std::ops::BitOrAssign for Flags {
 /// invariants as the real crate (buffer must remain valid until the
 /// CQE is reaped, no aliasing).
 #[derive(Clone, Debug)]
+// The fields are only read by the runtime modules (submit/cqueue/sim),
+// which are gated behind the `fs` feature. Without `fs`, these are
+// "data only" — the consumer (e.g. parity tests against the real
+// `io-uring` crate) holds Entry values without dispatching them.
+#[cfg_attr(not(feature = "fs"), allow(dead_code))]
 pub(crate) enum OpKind {
     Read {
         fd: RawFd,
@@ -115,19 +123,18 @@ pub(crate) enum OpKind {
 // - The buffer's lifetime contract matches the real `io-uring` crate:
 //   the caller must keep it valid until the CQE is reaped, with no
 //   concurrent aliasing. We rely on that, same as Linux does.
-// - SQEs CAN cross threads via the `WORKER_FS_CONTEXT` thread-local
-//   path: a worker thread that called `FsHandle::enter()` may push
-//   an Entry into `RingState::sq` (held inside `Arc<Mutex<Fs>>`),
-//   and another thread later drains it in `schedule_pending`. The
-//   `Mutex` ensures the Entry is exclusively owned by one thread at
-//   a time, so `Send` is sound. Aliasing of the underlying buffer
-//   between submitter and drainer is the caller's responsibility.
+// - The per-host `Mutex<IoUringHostState>` serializes access: an
+//   `Entry` only crosses threads while the mutex is held, never as a
+//   bare value, so each thread observes exclusive ownership. Aliasing
+//   of the underlying buffer between submitter and drainer is the
+//   caller's responsibility, identical to the real-io_uring contract.
 unsafe impl Send for OpKind {}
 unsafe impl Sync for OpKind {}
 
 /// Submission queue handle. Borrows the ring for the duration of its
 /// existence (or, for `submission_shared`, asserts unique writer
-/// access — see [`crate::io_uring::IoUring::submission_shared`]).
+/// access — see [`crate::IoUring::submission_shared`]).
+#[cfg(feature = "fs")]
 pub struct SubmissionQueue<'a> {
     ring_fd: RawFd,
     _lifetime: std::marker::PhantomData<&'a ()>,
@@ -145,6 +152,7 @@ impl std::fmt::Display for PushError {
 
 impl std::error::Error for PushError {}
 
+#[cfg(feature = "fs")]
 impl<'a> SubmissionQueue<'a> {
     pub(crate) fn new(ring_fd: RawFd) -> Self {
         Self {
@@ -161,12 +169,8 @@ impl<'a> SubmissionQueue<'a> {
     /// writer of the SQ. The simulation does not currently enforce
     /// this invariant.
     pub unsafe fn push(&mut self, entry: &Entry) -> Result<(), PushError> {
-        FsContext::current(|ctx| {
-            let ring = ctx
-                .fs
-                .io_uring_rings
-                .get_mut(&self.ring_fd)
-                .ok_or(PushError)?;
+        IoUringContext::current(|ctx| {
+            let ring = ctx.io_uring.rings.get_mut(&self.ring_fd).ok_or(PushError)?;
             if ring.sq.len() >= ring.depth as usize {
                 return Err(PushError);
             }
@@ -177,9 +181,9 @@ impl<'a> SubmissionQueue<'a> {
 
     /// Number of entries currently queued (not yet submitted).
     pub fn len(&self) -> usize {
-        FsContext::current(|ctx| {
-            ctx.fs
-                .io_uring_rings
+        IoUringContext::current(|ctx| {
+            ctx.io_uring
+                .rings
                 .get(&self.ring_fd)
                 .map(|r| r.sq.len())
                 .unwrap_or(0)
@@ -193,9 +197,9 @@ impl<'a> SubmissionQueue<'a> {
 
     /// Whether the SQ is at its configured depth.
     pub fn is_full(&self) -> bool {
-        FsContext::current(|ctx| {
-            ctx.fs
-                .io_uring_rings
+        IoUringContext::current(|ctx| {
+            ctx.io_uring
+                .rings
                 .get(&self.ring_fd)
                 .map(|r| r.sq.len() >= r.depth as usize)
                 .unwrap_or(true)
@@ -204,9 +208,9 @@ impl<'a> SubmissionQueue<'a> {
 
     /// Maximum SQ depth.
     pub fn capacity(&self) -> usize {
-        FsContext::current(|ctx| {
-            ctx.fs
-                .io_uring_rings
+        IoUringContext::current(|ctx| {
+            ctx.io_uring
+                .rings
                 .get(&self.ring_fd)
                 .map(|r| r.depth as usize)
                 .unwrap_or(0)

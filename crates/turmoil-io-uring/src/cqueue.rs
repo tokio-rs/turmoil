@@ -1,6 +1,8 @@
 //! Completion queue types mirroring [`io_uring::cqueue`](https://docs.rs/io-uring/0.7/io_uring/cqueue).
 
-use crate::fs::FsContext;
+#[cfg(feature = "fs")]
+use crate::host::{with_fs_and_io_uring, IoUringContext};
+#[cfg(feature = "fs")]
 use std::os::fd::RawFd;
 
 /// Sealed trait selecting between [`Entry`] (default) and the larger
@@ -60,6 +62,7 @@ impl EntryMarker for Entry {}
 /// leaves any not-yet-yielded matured ops un-executed (their effects
 /// are queued but not staged into `Fs`). Drain to completion or hold
 /// the iterator across the full set of expected CQEs.
+#[cfg(feature = "fs")]
 pub struct CompletionQueue<'a> {
     ring_fd: RawFd,
     /// Number of CQEs the most recent `sync()` exposed for this
@@ -71,6 +74,7 @@ pub struct CompletionQueue<'a> {
     _lifetime: std::marker::PhantomData<&'a ()>,
 }
 
+#[cfg(feature = "fs")]
 impl<'a> CompletionQueue<'a> {
     pub(crate) fn new(ring_fd: RawFd) -> Self {
         Self {
@@ -84,9 +88,9 @@ impl<'a> CompletionQueue<'a> {
     /// the number of CQEs currently matured. Mirrors the real crate's
     /// `sync()` which copies the kernel CQ head into userspace.
     pub fn sync(&mut self) {
-        self.visible = Some(FsContext::current(|ctx| {
-            ctx.fs
-                .io_uring_rings
+        self.visible = Some(IoUringContext::current(|ctx| {
+            ctx.io_uring
+                .rings
                 .get(&self.ring_fd)
                 .map(|r| r.ready_cq_count(ctx.now))
                 .unwrap_or(0)
@@ -106,6 +110,7 @@ impl<'a> CompletionQueue<'a> {
     }
 }
 
+#[cfg(feature = "fs")]
 impl<'a> Iterator for CompletionQueue<'a> {
     type Item = Entry;
 
@@ -118,20 +123,13 @@ impl<'a> Iterator for CompletionQueue<'a> {
         if *remaining == 0 {
             return None;
         }
-        let entry = FsContext::current(|ctx| {
-            let now = ctx.now;
-            let ring_fd = self.ring_fd;
-            // Borrow the ring mutably and pop one ready scheduled op.
-            let scheduled = ctx
-                .fs
-                .io_uring_rings
-                .get_mut(&ring_fd)?
-                .pop_ready(now, ctx.rng)?;
-            // Execute the op against the fs (this is where reads,
-            // writes, and fsync touch persisted/pending state). We
-            // re-borrow `ctx` because `apply` needs `&mut Fs` and the
-            // `RingState` is no longer in scope.
-            let result = scheduled.apply.execute(ctx.fs, ctx.rng, now);
+        let ring_fd = self.ring_fd;
+        // We need both the ring (to pop the next scheduled op) and
+        // `&mut Fs` (to execute the op's read/write/fsync side
+        // effect). The combined-borrow helper locks both per host.
+        let entry = with_fs_and_io_uring(|fs, iou, rng, now| {
+            let scheduled = iou.rings.get_mut(&ring_fd)?.pop_ready(now, rng)?;
+            let result = scheduled.apply.execute(fs, rng, now);
             Some(Entry {
                 user_data: scheduled.user_data,
                 result,

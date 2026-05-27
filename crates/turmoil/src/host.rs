@@ -1,6 +1,8 @@
 use crate::envelope::{hex, Datagram, Protocol, Segment, Syn};
 #[cfg(feature = "unstable-fs")]
 use crate::fs::{Fs, FsConfig};
+#[cfg(feature = "unstable-io_uring")]
+use crate::io_uring::host::IoUringHostState;
 use crate::net::tcp::stream::BidiFlowControl;
 use crate::net::{SocketPair, TcpListener, UdpSocket};
 use crate::{Envelope, TRACING_TARGET};
@@ -13,7 +15,7 @@ use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::ops::RangeInclusive;
 use std::sync::Arc;
-#[cfg(feature = "unstable-fs")]
+#[cfg(any(feature = "unstable-fs", feature = "unstable-io_uring"))]
 use std::sync::Mutex;
 use tokio::sync::{mpsc, Notify};
 use tokio::time::{Duration, Instant};
@@ -46,12 +48,17 @@ pub(crate) struct Host {
     #[cfg(feature = "unstable-fs")]
     pub(crate) fs: Arc<Mutex<Fs>>,
 
+    /// Per-host io_uring registry: active rings + ring-fd allocator.
+    #[cfg(feature = "unstable-io_uring")]
+    pub(crate) io_uring: Arc<Mutex<IoUringHostState>>,
+
     next_ephemeral_port: u16,
     ephemeral_ports: RangeInclusive<u16>,
 }
 
 impl Host {
     #[cfg(feature = "unstable-fs")]
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         nodename: impl Into<String>,
         addr: IpAddr,
@@ -60,13 +67,16 @@ impl Host {
         tcp_capacity: usize,
         udp_capacity: usize,
         fs_config: FsConfig,
+        fs_seed: u64,
     ) -> Host {
         Host {
             nodename: nodename.into(),
             addr,
             udp: Udp::new(udp_capacity),
             tcp: Tcp::new(tcp_capacity),
-            fs: Arc::new(Mutex::new(Fs::new(fs_config))),
+            fs: Arc::new(Mutex::new(Fs::new(fs_config, fs_seed))),
+            #[cfg(feature = "unstable-io_uring")]
+            io_uring: Arc::new(Mutex::new(IoUringHostState::new())),
             timer,
             next_ephemeral_port: *ephemeral_ports.start(),
             ephemeral_ports,
@@ -610,6 +620,7 @@ mod test {
             1,
             1,
             FsConfig::default(),
+            0,
         );
         #[cfg(not(feature = "unstable-fs"))]
         let mut host = Host::new(

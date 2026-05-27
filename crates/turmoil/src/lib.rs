@@ -200,12 +200,19 @@ mod ip;
 pub use ip::IpVersion;
 
 #[cfg(feature = "unstable-fs")]
-pub mod fs;
+pub use turmoil_fs as fs;
 #[cfg(feature = "unstable-fs")]
-pub use fs::FsConfig;
+pub use turmoil_fs::FsConfig;
 
 #[cfg(feature = "unstable-io_uring")]
-pub mod io_uring;
+pub use turmoil_io_uring as io_uring;
+
+/// Hook fired by `turmoil-fs` on every silent-corruption event when
+/// `unstable-barriers` is on. Stored in `EnterCtx::on_corruption`.
+#[cfg(all(feature = "unstable-fs", feature = "unstable-barriers"))]
+fn fs_corruption_hook(event: &turmoil_fs::FsCorruption) {
+    crate::barriers::trigger_noop(event.clone());
+}
 
 #[cfg(feature = "unstable-barriers")]
 pub mod barriers;

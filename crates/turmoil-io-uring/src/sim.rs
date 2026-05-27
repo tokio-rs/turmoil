@@ -1,7 +1,6 @@
 //! Per-host ring state and scheduling heap.
 
 use super::squeue::Entry as SqEntry;
-use crate::fs::Fs;
 use rand::seq::SliceRandom;
 use rand::RngCore;
 use std::collections::VecDeque;
@@ -9,9 +8,10 @@ use std::os::fd::RawFd;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Notify;
+use turmoil_fs::Fs;
 
-/// State for one [`crate::io_uring::IoUring`] instance, hung off
-/// [`crate::fs::Fs::io_uring_rings`].
+/// State for one [`crate::IoUring`] instance, hung off
+/// [`crate::host::IoUringHostState::rings`].
 pub(crate) struct RingState {
     pub(crate) depth: u32,
     /// Entries pushed via `SubmissionQueue::push` but not yet handed
@@ -26,7 +26,7 @@ pub(crate) struct RingState {
     ready: VecDeque<ScheduledCqe>,
     /// Woken whenever the readiness state of the ring changes:
     /// a new CQE matures, a CQE is posted immediately, or the ring
-    /// is being torn down. The [`crate::io_uring::AsyncFd`] shim
+    /// is being torn down. The [`crate::AsyncFd`] shim
     /// awaits this to avoid spinning.
     pub(crate) cq_notify: Arc<Notify>,
 }
@@ -118,7 +118,7 @@ impl RingState {
     }
 
     /// Earliest scheduled completion time. `None` when nothing is in
-    /// flight. The [`crate::io_uring::AsyncFd`] shim sleeps until this
+    /// flight. The [`crate::AsyncFd`] shim sleeps until this
     /// deadline to avoid spinning on the world clock.
     pub(crate) fn next_deadline(&self) -> Option<Duration> {
         if !self.ready.is_empty() {
@@ -226,7 +226,7 @@ impl PendingApply {
 //
 // These touch the existing `Fs` API surface (open_handles, read_file,
 // write_file, sync_file) and apply the same probabilistic fault knobs
-// the [`crate::fs::shim`] surface does. There is one source of truth
+// the [`turmoil_fs::shim`] surface does. There is one source of truth
 // for fs behavior: ops submitted via io_uring observe the same
 // io_error_probability / short_read_probability / corruption_probability
 // / sync_probability the sync and tokio shims observe.
@@ -280,11 +280,10 @@ fn exec_read(
 
     // corruption_probability: silent bit-flip on a random byte.
     //
-    // TODO: when `unstable-barriers` is enabled, fire
-    // `crate::barriers::trigger_noop(crate::fs::FsCorruption { ... })`
-    // here — same as `shim::std::fs::File::read_at_internal` does —
-    // so tests observing FsCorruption events see ring-driven reads
-    // alongside shim reads.
+    // TODO: fire `turmoil_fs::fire_corruption(...)` here so tests
+    // observing FsCorruption events see ring-driven reads alongside
+    // shim reads — same as `turmoil_fs::shim::std::fs::File::read_at_internal`
+    // does.
     if n > 0 && sample_prob(rng, fs.corruption_probability) {
         let corrupt_offset = sample_range(rng, 0..n);
         let corrupt_byte = (rng.next_u32() & 0xff) as u8;
