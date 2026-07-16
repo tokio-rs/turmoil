@@ -1,6 +1,6 @@
 use crate::envelope::{hex, Datagram, Protocol, Segment, Syn};
 #[cfg(feature = "unstable-fs")]
-use crate::fs::{Fs, FsConfig};
+use crate::fs::{Fs, FsConfig, FsState};
 #[cfg(feature = "unstable-io_uring")]
 use crate::io_uring::host::IoUringHostState;
 use crate::net::tcp::stream::BidiFlowControl;
@@ -15,7 +15,7 @@ use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::ops::RangeInclusive;
 use std::sync::Arc;
-#[cfg(any(feature = "unstable-fs", feature = "unstable-io_uring"))]
+#[cfg(feature = "unstable-io_uring")]
 use std::sync::Mutex;
 use tokio::sync::{mpsc, Notify};
 use tokio::time::{Duration, Instant};
@@ -46,7 +46,7 @@ pub(crate) struct Host {
 
     /// Simulated filesystem.
     #[cfg(feature = "unstable-fs")]
-    pub(crate) fs: Arc<Mutex<Fs>>,
+    pub(crate) fs: Fs,
 
     /// Per-host io_uring registry: active rings + ring-fd allocator.
     #[cfg(feature = "unstable-io_uring")]
@@ -69,12 +69,19 @@ impl Host {
         fs_config: FsConfig,
         fs_seed: u64,
     ) -> Host {
+        let state = FsState::new(fs_config, fs_seed);
+        #[cfg(feature = "unstable-barriers")]
+        let state = {
+            let mut s = state;
+            s.on_corruption = Some(std::sync::Arc::new(crate::fs_corruption_hook));
+            s
+        };
         Host {
             nodename: nodename.into(),
             addr,
             udp: Udp::new(udp_capacity),
             tcp: Tcp::new(tcp_capacity),
-            fs: Arc::new(Mutex::new(Fs::new(fs_config, fs_seed))),
+            fs: Fs::from_state(state),
             #[cfg(feature = "unstable-io_uring")]
             io_uring: Arc::new(Mutex::new(IoUringHostState::new())),
             timer,

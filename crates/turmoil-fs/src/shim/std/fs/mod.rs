@@ -795,11 +795,14 @@ impl File {
                 // Fire the installed corruption hook (turmoil's
                 // `unstable-barriers` integration installs this; if
                 // not installed, the call is a no-op).
-                crate::fire_corruption(&crate::FsCorruption {
-                    path: path.clone(),
-                    offset: offset + corrupt_offset as u64,
-                    len: 1,
-                });
+                crate::fire_corruption(
+                    ctx.fs,
+                    &crate::FsCorruption {
+                        path: path.clone(),
+                        offset: offset + corrupt_offset as u64,
+                        len: 1,
+                    },
+                );
             }
 
             Ok(n)
@@ -1748,7 +1751,7 @@ pub fn remove_dir_all<P: AsRef<Path>>(path: P) -> Result<()> {
 }
 
 /// Helper function to recursively remove directory contents.
-fn remove_dir_contents_recursive(fs: &mut crate::Fs, path: &Path) -> Result<()> {
+fn remove_dir_contents_recursive(fs: &mut crate::FsState, path: &Path) -> Result<()> {
     // Get all entries in this directory
     let entries = fs.dir_entries(path);
 
