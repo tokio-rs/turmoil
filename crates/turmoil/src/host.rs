@@ -1,6 +1,6 @@
 use crate::envelope::{hex, Datagram, Protocol, Segment, Syn};
 #[cfg(feature = "unstable-fs")]
-use crate::fs::{Fs, FsConfig, FsState};
+use crate::fs::{Fs, FsConfig};
 #[cfg(feature = "unstable-io_uring")]
 use crate::io_uring::host::IoUringHostState;
 use crate::net::tcp::stream::BidiFlowControl;
@@ -69,19 +69,19 @@ impl Host {
         fs_config: FsConfig,
         fs_seed: u64,
     ) -> Host {
-        let state = FsState::new(fs_config, fs_seed);
+        #[cfg(not(feature = "unstable-barriers"))]
+        let builder = Fs::builder().config(fs_config).seed(fs_seed);
         #[cfg(feature = "unstable-barriers")]
-        let state = {
-            let mut s = state;
-            s.on_corruption = Some(std::sync::Arc::new(crate::fs_corruption_hook));
-            s
-        };
+        let builder = Fs::builder()
+            .config(fs_config)
+            .seed(fs_seed)
+            .on_corruption(crate::fs_corruption_hook);
         Host {
             nodename: nodename.into(),
             addr,
             udp: Udp::new(udp_capacity),
             tcp: Tcp::new(tcp_capacity),
-            fs: Fs::from_state(state),
+            fs: builder.build(),
             #[cfg(feature = "unstable-io_uring")]
             io_uring: Arc::new(Mutex::new(IoUringHostState::new())),
             timer,

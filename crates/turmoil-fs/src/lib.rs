@@ -2451,6 +2451,14 @@ pub struct FsBuilder {
 }
 
 impl FsBuilder {
+    /// Replace the entire config at once. Individual builder methods
+    /// (e.g. [`Self::sync_probability`]) override fields within this
+    /// config, so call this first if combining both styles.
+    pub fn config(mut self, config: FsConfig) -> Self {
+        self.config = config;
+        self
+    }
+
     /// Set the RNG seed (default: 0).
     pub fn seed(mut self, seed: u64) -> Self {
         self.seed = seed;
