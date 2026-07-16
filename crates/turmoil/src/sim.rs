@@ -179,7 +179,7 @@ impl<'a> Sim<'a> {
                 World::current(|world| {
                     let addr = world.current.expect("current host missing");
                     let host = world.hosts.get_mut(&addr).unwrap();
-                    host.fs.lock().crash();
+                    host.fs.crash();
                     #[cfg(feature = "unstable-io_uring")]
                     host.io_uring.lock().unwrap().crash();
                 });
@@ -479,7 +479,7 @@ impl<'a> Sim<'a> {
             let is_software_finished = World::enter(&self.world, || {
                 #[cfg(feature = "unstable-fs")]
                 {
-                    fs_handle.lock().now = now;
+                    fs_handle.set_now(now);
                 }
                 #[cfg(feature = "unstable-fs")]
                 let _fs_guard = fs_handle.enter();

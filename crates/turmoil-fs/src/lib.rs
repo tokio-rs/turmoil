@@ -2553,12 +2553,6 @@ impl Fs {
         FsBuilder::default()
     }
 
-    /// Construct from a pre-built `FsState`. Used by embedders (like
-    /// turmoil) that create state with [`FsState::new`] directly.
-    pub fn from_state(state: FsState) -> Self {
-        Fs(Arc::new(Mutex::new(state)))
-    }
-
     /// Install this `Fs` as the current filesystem on the calling
     /// thread. While the guard is held, shim operations route through
     /// this `Fs`.
@@ -2566,11 +2560,18 @@ impl Fs {
         enter(&self.0)
     }
 
-    /// Lock the inner state for direct mutation. Embedders use this to
-    /// advance simulated time (`fs.lock().now = ...`) or call methods
-    /// like `crash()`.
-    pub fn lock(&self) -> std::sync::MutexGuard<'_, FsState> {
-        self.0.lock().expect("FsState mutex poisoned")
+    /// Advance simulated time. The embedder calls this before each
+    /// tick so that timestamps on newly created files reflect the
+    /// simulation clock.
+    pub fn set_now(&self, now: Duration) {
+        self.0.lock().expect("FsState mutex poisoned").now = now;
+    }
+
+    /// Crash this host's filesystem, discarding pending (unsynced)
+    /// writes and orphaning files whose directory entries were never
+    /// synced. See [`FsState::crash`] for the full semantics.
+    pub fn crash(&self) {
+        self.0.lock().expect("FsState mutex poisoned").crash();
     }
 }
 
