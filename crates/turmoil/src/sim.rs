@@ -513,7 +513,7 @@ impl<'a> Sim<'a> {
         self.steps += 1;
 
         if self.elapsed > self.config.duration && !is_finished {
-            return Err(format!(
+            Err(format!(
                 "Ran for duration: {:?} steps: {} without completing",
                 self.config.duration, self.steps,
             ))?;
