@@ -34,9 +34,9 @@
 //! // shim operations now route through this Fs
 //! ```
 //!
-//! For embedding into a multi-host harness (e.g. `turmoil`), store each
-//! host's `Fs` behind an `Arc<Mutex<Fs>>` and call [`enter`] with a
-//! reference to it each tick.
+//! For embedding into a multi-host harness (e.g. `turmoil`), store an
+//! `Fs` per host. Before each tick, advance time via `fs.lock().now`
+//! and call `fs.enter()`. Cloning an `Fs` is cheap (shared state).
 
 pub mod shim;
 
@@ -63,7 +63,7 @@ pub const SIM_FD_BASE: RawFd = 1 << 30;
 
 // ─── Enter pattern ──────────────────────────────────────────────────
 //
-// `enter(&arc)` stores the `Arc<Mutex<Fs>>` in a thread-local.
+// `enter(&arc)` stores the `Arc<Mutex<FsState>>` in a thread-local.
 // While the returned guard is alive, `FsContext::current` reads from
 // that thread-local — no globals, no installed function pointers,
 // just lexically-scoped access. The embedder (`turmoil`) calls
@@ -72,13 +72,13 @@ pub const SIM_FD_BASE: RawFd = 1 << 30;
 // Same shape `turmoil-net` uses for its CURRENT thread-local: the
 // state lives in the entered struct, not in a global registry.
 //
-// Simulated time and the corruption hook live on `Fs` directly — no
-// external per-tick injection. The embedder advances `fs.now` before
-// each tick; the hook is set at build time.
+// Simulated time and the corruption hook live on `FsState` directly —
+// no external per-tick injection. The embedder advances
+// `fs.lock().now` before each tick; the hook is set at build time.
 
 thread_local! {
-    /// `Arc<Mutex<Fs>>` of the entered fs. Locked on each
-    /// `FsContext::current` call, also cloned by `FsHandle::current`.
+    /// `Arc<Mutex<FsState>>` of the entered fs. Locked on each
+    /// `FsContext::current` call.
     static CURRENT_FS_ARC: RefCell<Option<Arc<Mutex<FsState>>>> = const { RefCell::new(None) };
 }
 
@@ -102,8 +102,8 @@ impl Drop for FsEnterGuard {
     }
 }
 
-/// Mark `arc`'s `Fs` as the current one for [`FsContext::current`] on
-/// this thread.
+/// Mark `arc`'s `FsState` as the current one for [`FsContext::current`]
+/// on this thread.
 ///
 /// While the guard is alive, shim operations on this thread
 /// (`turmoil_fs::shim::std::fs::*` etc.) route through this `Fs`. The
@@ -177,7 +177,7 @@ struct WorkerContext {
 ///
 /// # Thread Safety
 ///
-/// The handle holds an `Arc<Mutex<Fs>>`, so it is safe to send to other threads.
+/// The handle clones the inner `Arc`, so it is safe to send to other threads.
 /// The mutex ensures exclusive access to the filesystem during operations.
 /// However, users should be aware that concurrent access from multiple threads
 /// may lead to non-deterministic behavior in tests.

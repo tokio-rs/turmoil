@@ -7,7 +7,7 @@ use std::time::Duration;
 ///
 /// Holds the same kind of integer the real crate accepts. In the
 /// simulation the integer is one allocated by
-/// [`turmoil_fs::Fs::alloc_fd`] (file fds) or
+/// [`turmoil_fs::FsState::alloc_fd`] (file fds) or
 /// [`crate::host::IoUringHostState::alloc_ring_fd`] (ring fds),
 /// each from a distinct subrange above `SIM_FD_BASE`. Resolved back to
 /// per-host state at completion time.

@@ -208,7 +208,8 @@ pub use turmoil_fs::FsConfig;
 pub use turmoil_io_uring as io_uring;
 
 /// Hook fired by `turmoil-fs` on every silent-corruption event when
-/// `unstable-barriers` is on. Stored in `EnterCtx::on_corruption`.
+/// `unstable-barriers` is on. Installed on `FsState::on_corruption`
+/// at host construction time.
 #[cfg(all(feature = "unstable-fs", feature = "unstable-barriers"))]
 fn fs_corruption_hook(event: &turmoil_fs::FsCorruption) {
     crate::barriers::trigger_noop(event.clone());
