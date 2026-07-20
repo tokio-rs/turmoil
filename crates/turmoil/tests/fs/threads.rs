@@ -1,12 +1,12 @@
 //! Worker thread filesystem access tests.
 //!
-//! These tests demonstrate using `FsHandle` to perform filesystem
+//! These tests demonstrate using `Fs` to perform filesystem
 //! operations from worker threads spawned outside the turmoil
 //! simulation context.
 
 use std::os::unix::fs::FileExt;
 use turmoil::fs::shim::std::fs::{create_dir, read, write, OpenOptions};
-use turmoil::fs::FsHandle;
+use turmoil::fs::Fs;
 use turmoil::{Builder, Result};
 
 #[test]
@@ -15,13 +15,13 @@ fn worker_thread_basic_io() -> Result {
     sim.client("test", async {
         create_dir("/data")?;
 
-        // Capture handle to current host's filesystem
-        let handle = FsHandle::current();
+        // Capture the current host's filesystem
+        let fs = Fs::current();
 
         // Spawn worker thread
         let worker = std::thread::spawn(move || {
             // Enter the filesystem context
-            let _guard = handle.enter();
+            let _guard = fs.enter();
 
             // Now filesystem operations work
             write("/data/from_worker.txt", b"hello from worker")?;
@@ -43,10 +43,10 @@ fn worker_thread_file_handle() -> Result {
     sim.client("test", async {
         create_dir("/data")?;
 
-        let handle = FsHandle::current();
+        let fs = Fs::current();
 
         let worker = std::thread::spawn(move || {
-            let _guard = handle.enter();
+            let _guard = fs.enter();
 
             // Use OpenOptions and FileExt trait
             let file = OpenOptions::new()
@@ -82,10 +82,10 @@ fn worker_thread_multiple_operations() -> Result {
         create_dir("/data")?;
         write("/data/initial.txt", b"initial data")?;
 
-        let handle = FsHandle::current();
+        let fs = Fs::current();
 
         let worker = std::thread::spawn(move || {
-            let _guard = handle.enter();
+            let _guard = fs.enter();
 
             // Read existing data
             let initial = read("/data/initial.txt")?;
@@ -116,18 +116,18 @@ fn worker_thread_guard_scoping() -> Result {
     sim.client("test", async {
         create_dir("/data")?;
 
-        let handle = FsHandle::current();
+        let fs = Fs::current();
 
         let worker = std::thread::spawn(move || {
             // First scope
             {
-                let _guard = handle.enter();
+                let _guard = fs.enter();
                 write("/data/scoped1.txt", b"scope 1")?;
             }
 
             // Re-enter with new guard
             {
-                let _guard = handle.enter();
+                let _guard = fs.enter();
                 write("/data/scoped2.txt", b"scope 2")?;
             }
 
@@ -152,10 +152,10 @@ fn worker_thread_with_sync() -> Result {
         create_dir("/data")?;
         sync_dir("/")?;
 
-        let handle = FsHandle::current();
+        let fs = Fs::current();
 
         let worker = std::thread::spawn(move || {
-            let _guard = handle.enter();
+            let _guard = fs.enter();
 
             let file = OpenOptions::new()
                 .read(true)

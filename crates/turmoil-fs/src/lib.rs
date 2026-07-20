@@ -35,7 +35,7 @@
 //! ```
 //!
 //! For embedding into a multi-host harness (e.g. `turmoil`), store an
-//! `Fs` per host. Before each tick, advance time via `fs.lock().now`
+//! `Fs` per host. Before each tick, advance time via [`Fs::set_now`]
 //! and call `fs.enter()`. Cloning an `Fs` is cheap (shared state).
 
 pub mod shim;
@@ -74,7 +74,7 @@ pub const SIM_FD_BASE: RawFd = 1 << 30;
 //
 // Simulated time and the corruption hook live on `FsState` directly —
 // no external per-tick injection. The embedder advances
-// `fs.lock().now` before each tick; the hook is set at build time.
+// time with `Fs::set_now` before each tick; the hook is set at build time.
 
 thread_local! {
     /// `Arc<Mutex<FsState>>` of the entered fs. Locked on each
@@ -112,7 +112,7 @@ impl Drop for FsEnterGuard {
 /// **Lock-on-demand:** `enter` does not hold the mutex on `arc`. Each
 /// `FsContext::current` call inside the guard locks the mutex for the
 /// duration of the closure body, then releases it. This sidesteps a
-/// deadlock with [`FsHandle`]-spawned OS threads that synchronously
+/// deadlock with OS threads using cloned [`Fs`] values that synchronously
 /// block the main sim thread (e.g. `std::thread::spawn` + `join`).
 ///
 /// `enter` calls nest. Dropping the guard restores the previous
@@ -128,128 +128,11 @@ fn fire_corruption(fs: &FsState, event: &FsCorruption) {
     }
 }
 
-// Thread-local storage for worker thread filesystem context.
-// When a worker thread calls `FsHandle::enter()`, this stores the context
-// so that `FsContext::current()` can find it.
-thread_local! {
-    static WORKER_FS_CONTEXT: RefCell<Option<WorkerContext>> = const { RefCell::new(None) };
-}
-
-/// Context stored in thread-local for worker threads.
-struct WorkerContext {
-    /// Shared reference to the filesystem
-    fs: Arc<Mutex<FsState>>,
-}
-
-/// A handle to the current host's filesystem that can be sent to worker threads.
-///
-/// Use this to perform filesystem operations from threads spawned outside
-/// the turmoil simulation context (e.g., via `std::thread::spawn` or
-/// `tokio::task::spawn_blocking`).
-///
-/// # Example
-///
-/// ```ignore
-/// use turmoil::fs::FsHandle;
-/// use turmoil::fs::shim::std::fs::{create_dir, write, read};
-///
-/// // In turmoil simulation:
-/// create_dir("/data")?;
-///
-/// // Capture handle to current host's filesystem
-/// let handle = FsHandle::current();
-///
-/// // Spawn worker thread
-/// let worker = std::thread::spawn(move || {
-///     // Enter the filesystem context
-///     let _guard = handle.enter();
-///
-///     // Now filesystem operations work
-///     write("/data/from_worker.txt", b"hello")?;
-///     Ok::<_, std::io::Error>(())
-/// });
-///
-/// worker.join().unwrap()?;
-///
-/// // Data is visible from main thread
-/// assert_eq!(read("/data/from_worker.txt")?, b"hello");
-/// ```
-///
-/// # Thread Safety
-///
-/// The handle clones the inner `Arc`, so it is safe to send to other threads.
-/// The mutex ensures exclusive access to the filesystem during operations.
-/// However, users should be aware that concurrent access from multiple threads
-/// may lead to non-deterministic behavior in tests.
-pub struct FsHandle {
-    /// Shared reference to the host's filesystem
-    fs: Arc<Mutex<FsState>>,
-}
-
-impl FsHandle {
-    /// Capture a handle to the current host's filesystem.
-    ///
-    /// Must be called from within a turmoil simulation context.
-    ///
-    /// # Panics
-    ///
-    /// Panics if called outside a turmoil simulation.
-    pub fn current() -> Self {
-        let fs = CURRENT_FS_ARC.with(|c| {
-            c.borrow()
-                .as_ref()
-                .map(Arc::clone)
-                .expect("turmoil-fs: no Fs is current (call Fs::enter first)")
-        });
-        FsHandle { fs }
-    }
-
-    /// Enter the filesystem context for this thread.
-    ///
-    /// Returns a guard that must be held while performing filesystem operations.
-    /// When the guard is dropped, the context is cleared.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let handle = FsHandle::current();
-    /// std::thread::spawn(move || {
-    ///     let _guard = handle.enter();
-    ///     // filesystem operations work here
-    /// });
-    /// ```
-    pub fn enter(&self) -> FsHandleGuard {
-        WORKER_FS_CONTEXT.with(|ctx| {
-            *ctx.borrow_mut() = Some(WorkerContext {
-                fs: Arc::clone(&self.fs),
-            });
-        });
-        FsHandleGuard { _private: () }
-    }
-}
-
-/// Guard that maintains the filesystem context for a worker thread.
-///
-/// When dropped, clears the thread-local context.
-#[must_use = "the filesystem context is only active while this guard is held"]
-pub struct FsHandleGuard {
-    /// Prevent external construction for forward compatibility.
-    _private: (),
-}
-
-impl Drop for FsHandleGuard {
-    fn drop(&mut self) {
-        WORKER_FS_CONTEXT.with(|ctx| {
-            *ctx.borrow_mut() = None;
-        });
-    }
-}
-
 /// Context for filesystem operations, bundling Fs state with time.
 ///
 /// Borrowed handle to the current host's filesystem state. Made `pub`
 /// so sister crates (notably `turmoil-io-uring`) can call
-/// [`FsContext::current`] when they need `&mut Fs`.
+/// [`FsContext::current`] when they need `&mut FsState`.
 /// Published-but-unstable surface — not stable for end users.
 ///
 /// `now` is read from `fs.now` at the time the context is acquired.
@@ -261,35 +144,15 @@ pub struct FsContext<'a> {
 }
 
 impl FsContext<'_> {
-    /// Check if we're in a worker thread context.
-    fn in_worker_context() -> bool {
-        WORKER_FS_CONTEXT.with(|ctx| ctx.borrow().is_some())
-    }
-
     /// Run `f` with the current host's filesystem context.
     ///
-    /// Two sources are checked, in order:
-    /// 1. The worker thread-local set by [`FsHandle::enter`].
-    /// 2. The thread-local set by [`enter`] (the main sim thread).
+    /// The current filesystem is thread-local, so each worker thread
+    /// must call [`Fs::enter`] before using filesystem shims.
     ///
     /// # Panics
     ///
-    /// Panics if called outside both a turmoil simulation and a worker
-    /// thread context.
+    /// Panics if called without an entered [`Fs`] on this thread.
     pub fn current<R>(f: impl FnOnce(FsContext<'_>) -> R) -> R {
-        if Self::in_worker_context() {
-            return WORKER_FS_CONTEXT.with(|ctx| {
-                let borrowed = ctx.borrow();
-                let worker_ctx = borrowed.as_ref().unwrap();
-                let mut fs_guard = worker_ctx.fs.lock().unwrap();
-                let now = fs_guard.now;
-                f(FsContext {
-                    fs: &mut fs_guard,
-                    now,
-                })
-            });
-        }
-
         let arc = CURRENT_FS_ARC
             .with(|c| c.borrow().as_ref().map(Arc::clone))
             .expect("turmoil-fs: no Fs is current (call Fs::enter first)");
@@ -301,20 +164,6 @@ impl FsContext<'_> {
     /// Run `f` if we're in a simulation context, otherwise no-op.
     /// Used in drop paths where the simulation may be shutting down.
     pub fn current_if_set(f: impl FnOnce(FsContext<'_>)) {
-        if Self::in_worker_context() {
-            WORKER_FS_CONTEXT.with(|ctx| {
-                let borrowed = ctx.borrow();
-                let worker_ctx = borrowed.as_ref().unwrap();
-                let mut fs_guard = worker_ctx.fs.lock().unwrap();
-                let now = fs_guard.now;
-                f(FsContext {
-                    fs: &mut fs_guard,
-                    now,
-                });
-            });
-            return;
-        }
-
         let Some(arc) = CURRENT_FS_ARC.with(|c| c.borrow().as_ref().map(Arc::clone)) else {
             return;
         };
@@ -2551,6 +2400,26 @@ impl Fs {
     /// configuration.
     pub fn builder() -> FsBuilder {
         FsBuilder::default()
+    }
+
+    /// Clone the current host's filesystem.
+    ///
+    /// Use this from an entered simulation context to move the current
+    /// filesystem into a worker thread. The worker must call
+    /// [`Fs::enter`] before using filesystem shims.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called without an entered `Fs` on this thread.
+    pub fn current() -> Self {
+        let state = CURRENT_FS_ARC.with(|current| {
+            current
+                .borrow()
+                .as_ref()
+                .map(Arc::clone)
+                .expect("turmoil-fs: no Fs is current (call Fs::enter first)")
+        });
+        Self(state)
     }
 
     /// Install this `Fs` as the current filesystem on the calling
