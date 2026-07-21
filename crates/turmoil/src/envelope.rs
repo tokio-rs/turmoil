@@ -74,9 +74,9 @@ pub(crate) fn hex(
 
     for (i, &b) in bytes.iter().enumerate() {
         if i < bytes.len() - 1 {
-            write!(f, "{b:#2X}, ")?;
+            write!(f, "{b:#04X}, ")?;
         } else {
-            write!(f, "{b:#2X}")?;
+            write!(f, "{b:#04X}")?;
         }
     }
 

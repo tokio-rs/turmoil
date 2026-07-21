@@ -23,7 +23,7 @@ A mocked `File` returns the bytes you prime it with; it doesn't distinguish "in 
 
 ## Structure
 
-- The crate root holds the authoritative filesystem (`Fs`, `FsConfig`, `FsContext`, `FsHandle`): per-host namespace, inode/file table, pending-vs-synced durability state, crash recovery, O_DIRECT alignment rules.
+- The crate root holds the authoritative filesystem (`Fs`, `FsConfig`, `FsContext`): per-host namespace, inode/file table, pending-vs-synced durability state, crash recovery, O_DIRECT alignment rules.
 - `shim::std` / `shim::tokio` — drop-in replacements for the corresponding standard-library and tokio APIs. Every type, method, and error kind mirrors the upstream signature exactly.
 
 ## Embedding
@@ -35,6 +35,8 @@ A mocked `File` returns the bytes you prime it with; it doesn't distinguish "in 
 turmoil = { version = "0.7", features = ["unstable-fs"] }
 ```
 
-If you are building a custom harness, call `install_host_accessor` once per simulation to plug a callback that hands `FsContext::current` (and `FsContext::current_if_set`) the current host's `Arc<Mutex<Fs>>`, simulated time, and RNG.
+If you are building a custom harness, create an `Fs` for each host. Before each
+tick, call `Fs::set_now` and enter the filesystem with `Fs::enter`; filesystem
+shim operations on that thread then use the entered host.
 
 See the [`turmoil` README](../turmoil/README.md) for crash-consistency examples.

@@ -179,7 +179,7 @@ impl<'a> Sim<'a> {
                 World::current(|world| {
                     let addr = world.current.expect("current host missing");
                     let host = world.hosts.get_mut(&addr).unwrap();
-                    host.fs.lock().unwrap().crash();
+                    host.fs.crash();
                     #[cfg(feature = "unstable-io_uring")]
                     host.io_uring.lock().unwrap().crash();
                 });
@@ -464,10 +464,10 @@ impl<'a> Sim<'a> {
             // for the whole tick; rt.tick's own World::current calls
             // re-borrow only what they need (rng for net, etc.).
             #[cfg(feature = "unstable-fs")]
-            let (fs_arc, now) = {
+            let (fs_handle, now) = {
                 let world = self.world.borrow();
                 let host = world.hosts.get(&addr).expect("missing host");
-                (Arc::clone(&host.fs), host.timer.since_epoch())
+                (host.fs.clone(), host.timer.since_epoch())
             };
             #[cfg(feature = "unstable-io_uring")]
             let iou_arc = {
@@ -478,16 +478,11 @@ impl<'a> Sim<'a> {
 
             let is_software_finished = World::enter(&self.world, || {
                 #[cfg(feature = "unstable-fs")]
-                let _fs_guard = turmoil_fs::enter(
-                    &fs_arc,
-                    turmoil_fs::EnterCtx {
-                        now,
-                        #[cfg(feature = "unstable-barriers")]
-                        on_corruption: Some(&crate::fs_corruption_hook),
-                        #[cfg(not(feature = "unstable-barriers"))]
-                        on_corruption: None,
-                    },
-                );
+                {
+                    fs_handle.set_now(now);
+                }
+                #[cfg(feature = "unstable-fs")]
+                let _fs_guard = fs_handle.enter();
                 #[cfg(feature = "unstable-io_uring")]
                 let _iou_guard = turmoil_io_uring::host::enter(
                     &iou_arc,
@@ -518,7 +513,7 @@ impl<'a> Sim<'a> {
         self.steps += 1;
 
         if self.elapsed > self.config.duration && !is_finished {
-            return Err(format!(
+            Err(format!(
                 "Ran for duration: {:?} steps: {} without completing",
                 self.config.duration, self.steps,
             ))?;

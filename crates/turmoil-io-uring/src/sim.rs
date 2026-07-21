@@ -8,7 +8,7 @@ use std::os::fd::RawFd;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Notify;
-use turmoil_fs::Fs;
+use turmoil_fs::FsState;
 
 /// State for one [`crate::IoUring`] instance, hung off
 /// [`crate::host::IoUringHostState::rings`].
@@ -167,7 +167,7 @@ pub(crate) struct ScheduledCqe {
     pub(crate) apply: PendingApply,
 }
 
-/// What runs against [`Fs`] at completion time.
+/// What runs against [`FsState`] at completion time.
 ///
 /// Held until the [`super::cqueue::CompletionQueue`] iterator yields
 /// the corresponding CQE; only then does the read/write/fsync take
@@ -202,7 +202,7 @@ unsafe impl Sync for PendingApply {}
 
 impl PendingApply {
     /// Execute the op against `fs`, returning the CQE result.
-    pub(crate) fn execute(self, fs: &mut Fs, rng: &mut dyn RngCore, now: Duration) -> i32 {
+    pub(crate) fn execute(self, fs: &mut FsState, rng: &mut dyn RngCore, now: Duration) -> i32 {
         match self {
             PendingApply::ImmediateError(err) => err,
             PendingApply::Read {
@@ -224,7 +224,7 @@ impl PendingApply {
 
 // --- fs effect execution ---------------------------------------------
 //
-// These touch the existing `Fs` API surface (open_handles, read_file,
+// These touch the existing `FsState` API surface (open_handles, read_file,
 // write_file, sync_file) and apply the same probabilistic fault knobs
 // the [`turmoil_fs::shim`] surface does. There is one source of truth
 // for fs behavior: ops submitted via io_uring observe the same
@@ -236,13 +236,13 @@ impl PendingApply {
 // On real Linux, a file submitted via SQE has its open-file struct
 // reference-counted by the kernel; closing the fd does NOT cancel an
 // in-flight op. The simulation resolves the fd at completion time by
-// looking it up in `Fs::open_handles`, so closing the file (dropping
+// looking it up in `FsState::open_handles`, so closing the file (dropping
 // the `shim::std::fs::File`) between submit and completion turns the
 // CQE into `-EBADF` instead of completing normally. Consumers must
 // keep the file alive until they've drained the corresponding CQE.
 
 fn exec_read(
-    fs: &mut Fs,
+    fs: &mut FsState,
     rng: &mut dyn RngCore,
     fd: RawFd,
     ptr: *mut u8,
@@ -295,7 +295,7 @@ fn exec_read(
 }
 
 fn exec_write(
-    fs: &mut Fs,
+    fs: &mut FsState,
     rng: &mut dyn RngCore,
     fd: RawFd,
     ptr: *const u8,
@@ -337,7 +337,7 @@ fn exec_write(
     len as i32
 }
 
-fn exec_fsync(fs: &mut Fs, rng: &mut dyn RngCore, fd: RawFd) -> i32 {
+fn exec_fsync(fs: &mut FsState, rng: &mut dyn RngCore, fd: RawFd) -> i32 {
     let Some(path) = fs.open_handles.get(&fd).cloned() else {
         return -EBADF;
     };
@@ -370,9 +370,9 @@ fn sample_range(rng: &mut dyn RngCore, range: std::ops::Range<usize>) -> usize {
 }
 
 /// O_DIRECT alignment check: pointer, offset, and length must each be
-/// multiples of `Fs::direct_io_alignment`. Mirrors the same check in
+/// multiples of `FsState::direct_io_alignment`. Mirrors the same check in
 /// the sync and tokio shims; real Linux returns `EINVAL` for these.
-fn direct_io_aligned(fs: &Fs, ptr: usize, offset: u64, len: u32) -> bool {
+fn direct_io_aligned(fs: &FsState, ptr: usize, offset: u64, len: u32) -> bool {
     let alignment = fs.direct_io_alignment;
     if alignment == 0 {
         return true;

@@ -184,7 +184,12 @@ impl IoUringContext<'_> {
 
 #[cfg(feature = "fs")]
 pub(crate) fn with_fs_and_io_uring<R>(
-    f: impl FnOnce(&mut turmoil_fs::Fs, &mut IoUringHostState, &mut dyn rand::RngCore, Duration) -> R,
+    f: impl FnOnce(
+        &mut turmoil_fs::FsState,
+        &mut IoUringHostState,
+        &mut dyn rand::RngCore,
+        Duration,
+    ) -> R,
 ) -> R {
     // Lock fs first (matches lock order documented elsewhere in this
     // crate). FsContext::current handles the fs lock; we lock

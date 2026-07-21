@@ -78,7 +78,7 @@ impl<'a> Submitter<'a> {
 /// schedule a future CQE or post an immediate `EINVAL` CQE for
 /// unsupported ops.
 fn schedule_pending(
-    fs: &mut turmoil_fs::Fs,
+    fs: &mut turmoil_fs::FsState,
     iou: &mut IoUringHostState,
     rng: &mut dyn rand::RngCore,
     now: Duration,
