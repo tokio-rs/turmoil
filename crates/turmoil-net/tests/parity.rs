@@ -53,3 +53,18 @@ fn trait_bounds() {
     // ReuniteError is a public Error type.
     debug::<ReuniteError>();
 }
+
+#[test]
+fn try_read_vectored() {
+    fn check(
+        stream: &TcpStream,
+        borrowed: &ReadHalf<'_>,
+        owned: &OwnedReadHalf,
+        bufs: &mut [std::io::IoSliceMut<'_>],
+    ) {
+        let _: std::io::Result<usize> = stream.try_read_vectored(bufs);
+        let _: std::io::Result<usize> = borrowed.try_read_vectored(bufs);
+        let _: std::io::Result<usize> = owned.try_read_vectored(bufs);
+    }
+    let _ = check;
+}

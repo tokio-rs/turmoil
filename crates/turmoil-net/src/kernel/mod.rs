@@ -518,6 +518,22 @@ impl Kernel {
         }
     }
 
+    /// Receive available TCP bytes into multiple buffers, without registering
+    /// a waker or disturbing an existing read waiter.
+    pub fn try_recv_vectored(
+        &mut self,
+        fd: Fd,
+        bufs: &mut [std::io::IoSliceMut<'_>],
+    ) -> std::io::Result<usize> {
+        if self.lookup(fd)?.ty != Type::Stream {
+            return Err(ErrorKind::Unsupported.into());
+        }
+        match tcp::poll_recv_vectored(self, fd, None, bufs) {
+            Poll::Ready(result) => result,
+            Poll::Pending => Err(ErrorKind::WouldBlock.into()),
+        }
+    }
+
     /// `shutdown(SHUT_WR)`. TCP-only in practice; UDP sockets have no
     /// FIN to send. Kernel-level shutdown-read isn't exposed because
     /// tokio's API doesn't carry the idea (see `TcpStream` docs).

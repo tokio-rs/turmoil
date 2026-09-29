@@ -46,11 +46,11 @@ impl TcpStream {
         let pair = Arc::new(pair);
         let read_half = ReadHalf {
             pair: pair.clone(),
-            rx: Rx {
+            rx: Mutex::new(Rx {
                 recv: receiver,
                 buffer: None,
-            },
-            is_closed: false,
+                is_closed: false,
+            }),
             flow_control: flow_control.read,
         };
 
@@ -102,6 +102,15 @@ impl TcpStream {
         tracing::trace!(target: TRACING_TARGET, src = ?pair.remote, dst = ?pair.local, protocol = %"TCP SYN-ACK", "Recv");
 
         Ok(TcpStream::new(pair, rx, bidi))
+    }
+
+    /// Read available data into the buffers in order without waiting.
+    ///
+    /// Returns the total bytes read, which may fill only part of the buffers,
+    /// or `WouldBlock` if no data is available. `Ok(0)` indicates EOF or that
+    /// all supplied buffers are empty.
+    pub fn try_read_vectored(&self, bufs: &mut [io::IoSliceMut<'_>]) -> Result<usize> {
+        self.read_half.try_read_vectored(bufs)
     }
 
     /// Try to write a buffer to the stream, returning how many bytes were
@@ -196,9 +205,7 @@ impl TcpStream {
 
 pub(crate) struct ReadHalf {
     pub(crate) pair: Arc<SocketPair>,
-    rx: Rx,
-    /// FIN received, EOF for reads
-    is_closed: bool,
+    rx: Mutex<Rx>,
     flow_control: Arc<FlowControl>,
 }
 
@@ -209,31 +216,95 @@ struct Rx {
     /// This is used to support read impls by stashing available bytes for
     /// subsequent reads.
     buffer: Option<Bytes>,
+    /// FIN received, EOF for reads.
+    is_closed: bool,
 }
 
 impl ReadHalf {
+    pub(crate) fn try_read_vectored(&self, bufs: &mut [io::IoSliceMut<'_>]) -> Result<usize> {
+        let mut rx = self.rx.lock().unwrap();
+        let mut n = 0;
+        let mut index = 0;
+        let mut filled = 0;
+        loop {
+            if rx.is_closed {
+                return Ok(n);
+            }
+            if rx.buffer.is_none() {
+                match rx.recv.try_recv() {
+                    Ok(seg) => {
+                        tracing::trace!(target: TRACING_TARGET, src = ?self.pair.remote, dst = ?self.pair.local, protocol = %seg, "Recv");
+                        match seg {
+                            SequencedSegment::Data(bytes) => {
+                                self.flow_control.release();
+                                rx.buffer = Some(bytes);
+                            }
+                            SequencedSegment::Fin => {
+                                rx.is_closed = true;
+                                return Ok(n);
+                            }
+                        }
+                    }
+                    Err(_) if n > 0 => return Ok(n),
+                    Err(mpsc::error::TryRecvError::Empty) => {
+                        return Err(io::ErrorKind::WouldBlock.into());
+                    }
+                    Err(mpsc::error::TryRecvError::Disconnected) => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::ConnectionReset,
+                            "Connection reset",
+                        ));
+                    }
+                }
+            }
+            let bytes = rx.buffer.as_mut().unwrap();
+            while index < bufs.len() {
+                let buf = &mut bufs[index];
+                let len = bytes.len().min(buf.len() - filled);
+                buf[filled..filled + len].copy_from_slice(&bytes[..len]);
+                bytes.advance(len);
+                n += len;
+                filled += len;
+                if filled == buf.len() {
+                    index += 1;
+                    filled = 0;
+                }
+                if bytes.is_empty() {
+                    break;
+                }
+            }
+            if bytes.is_empty() {
+                rx.buffer = None;
+            }
+            if index == bufs.len() {
+                return Ok(n);
+            }
+        }
+    }
+
     fn poll_read_priv(&mut self, cx: &mut Context<'_>, buf: &mut ReadBuf) -> Poll<Result<()>> {
-        if self.is_closed || buf.capacity() == 0 {
+        let rx = self.rx.get_mut().unwrap();
+        if rx.is_closed || buf.capacity() == 0 {
             return Poll::Ready(Ok(()));
         }
 
-        if let Some(bytes) = self.rx.buffer.take() {
-            self.rx.buffer = Self::put_slice(bytes, buf);
+        if let Some(bytes) = rx.buffer.take() {
+            rx.buffer = Self::put_slice(bytes, buf);
 
             return Poll::Ready(Ok(()));
         }
 
-        match ready!(self.rx.recv.poll_recv(cx)) {
+        match ready!(rx.recv.poll_recv(cx)) {
             Some(seg) => {
                 tracing::trace!(target: TRACING_TARGET, src = ?self.pair.remote, dst = ?self.pair.local, protocol = %seg, "Recv");
 
                 match seg {
                     SequencedSegment::Data(bytes) => {
                         self.flow_control.release();
-                        self.rx.buffer = Self::put_slice(bytes, buf);
+                        rx.buffer = Self::put_slice(bytes, buf);
                     }
                     SequencedSegment::Fin => {
-                        self.is_closed = true;
+                        rx.is_closed = true;
                     }
                 }
 
@@ -269,18 +340,19 @@ impl ReadHalf {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf,
     ) -> Poll<Result<usize>> {
-        if self.is_closed || buf.capacity() == 0 {
+        let rx = self.rx.get_mut().unwrap();
+        if rx.is_closed || buf.capacity() == 0 {
             return Poll::Ready(Ok(0));
         }
 
         // If we have buffered data, peek from it
-        if let Some(bytes) = &self.rx.buffer {
+        if let Some(bytes) = &rx.buffer {
             let len = std::cmp::min(bytes.len(), buf.remaining());
             buf.put_slice(&bytes[..len]);
             return Poll::Ready(Ok(len));
         }
 
-        match ready!(self.rx.recv.poll_recv(cx)) {
+        match ready!(rx.recv.poll_recv(cx)) {
             Some(seg) => {
                 tracing::trace!(target: TRACING_TARGET, src = ?self.pair.remote, dst = ?self.pair.local, protocol = %seg, "Peek");
 
@@ -289,12 +361,12 @@ impl ReadHalf {
                         self.flow_control.release();
                         let len = std::cmp::min(bytes.len(), buf.remaining());
                         buf.put_slice(&bytes[..len]);
-                        self.rx.buffer = Some(bytes);
+                        rx.buffer = Some(bytes);
 
                         Poll::Ready(Ok(len))
                     }
                     SequencedSegment::Fin => {
-                        self.is_closed = true;
+                        rx.is_closed = true;
                         Poll::Ready(Ok(0))
                     }
                 }
@@ -316,7 +388,7 @@ impl Debug for ReadHalf {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ReadHalf")
             .field("pair", &self.pair)
-            .field("is_closed", &self.is_closed)
+            .field("is_closed", &self.rx.lock().unwrap().is_closed)
             .finish()
     }
 }
@@ -602,9 +674,10 @@ impl Drop for ReadHalf {
             // a Data segment parked in the host's reorder buffer. A queued
             // FIN is not a reset condition — a graceful close followed by a
             // drop should stay graceful.
-            let has_unread = !self.is_closed
-                && (self.rx.buffer.is_some()
-                    || matches!(self.rx.recv.try_recv(), Ok(SequencedSegment::Data(_)))
+            let rx = self.rx.get_mut().unwrap();
+            let has_unread = !rx.is_closed
+                && (rx.buffer.is_some()
+                    || matches!(rx.recv.try_recv(), Ok(SequencedSegment::Data(_)))
                     || world.current_host_mut().tcp.has_buffered_data(*self.pair));
 
             if has_unread {

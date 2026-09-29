@@ -33,6 +33,13 @@ impl ReadHalf<'_> {
         self.0.try_read(buf)
     }
 
+    /// Read available data into the buffers in order.
+    ///
+    /// See [`TcpStream::try_read_vectored`] for return values.
+    pub fn try_read_vectored(&self, bufs: &mut [io::IoSliceMut<'_>]) -> io::Result<usize> {
+        self.0.try_read_vectored(bufs)
+    }
+
     pub async fn peek(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         self.0.peek(buf).await
     }
