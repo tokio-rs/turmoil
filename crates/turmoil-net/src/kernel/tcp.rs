@@ -502,7 +502,7 @@ fn push_to_listener(k: &mut Kernel, child: Fd, local: SocketAddr) {
             .as_mut()
             .expect("listener");
         listen.ready.push_back(child);
-        listen.accept_wakers.drain(..).collect()
+        std::mem::take(&mut listen.accept_wakers)
     };
     for w in wakers {
         w.wake();
