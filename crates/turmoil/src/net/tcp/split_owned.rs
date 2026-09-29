@@ -20,6 +20,13 @@ pub struct OwnedReadHalf {
 }
 
 impl OwnedReadHalf {
+    /// Read available data into the buffers in order.
+    ///
+    /// See [`TcpStream::try_read_vectored`] for return values.
+    pub fn try_read_vectored(&self, bufs: &mut [io::IoSliceMut<'_>]) -> io::Result<usize> {
+        self.inner.try_read_vectored(bufs)
+    }
+
     /// Returns the local address that this stream is bound to.
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         Ok(self.inner.pair.local)

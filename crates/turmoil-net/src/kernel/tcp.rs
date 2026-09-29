@@ -986,6 +986,15 @@ pub(super) fn poll_recv(
     cx: &mut Context<'_>,
     buf: &mut [u8],
 ) -> Poll<Result<usize>> {
+    poll_recv_vectored(k, fd, Some(cx), &mut [std::io::IoSliceMut::new(buf)])
+}
+
+pub(super) fn poll_recv_vectored(
+    k: &mut Kernel,
+    fd: Fd,
+    cx: Option<&mut Context<'_>>,
+    bufs: &mut [std::io::IoSliceMut<'_>],
+) -> Poll<Result<usize>> {
     let recv_cap = k.recv_buf_cap;
     let (n, should_update_window, local, remote) = {
         let st = match k.lookup_mut(fd) {
@@ -1022,14 +1031,23 @@ pub(super) fn poll_recv(
             if !readable_state {
                 return Poll::Ready(Err(Error::from(ErrorKind::NotConnected)));
             }
-            st.register_read_waker(cx.waker());
+            if let Some(cx) = cx {
+                st.register_read_waker(cx.waker());
+            }
             return Poll::Pending;
         }
         let local = bound_endpoint(st);
         let tcb = st.tcb.as_mut().unwrap();
-        let n = tcb.recv_buf.len().min(buf.len());
-        let drained = tcb.recv_buf.split_to(n);
-        buf[..n].copy_from_slice(&drained);
+        let mut n = 0;
+        for buf in bufs {
+            let len = tcb.recv_buf.len().min(buf.len());
+            let drained = tcb.recv_buf.split_to(len);
+            buf[..len].copy_from_slice(&drained);
+            n += len;
+            if tcb.recv_buf.is_empty() {
+                break;
+            }
+        }
         // Window-update trigger: if we freed ≥ half the recv cap,
         // advertise. Crude SWS avoidance; refine alongside real flow
         // control.

@@ -61,6 +61,15 @@ impl TcpStream {
         }
     }
 
+    /// Read available data into the buffers in order without waiting.
+    ///
+    /// Returns the total bytes read, which may fill only part of the buffers,
+    /// or `WouldBlock` if no data is available. `Ok(0)` indicates EOF or that
+    /// all supplied buffers are empty.
+    pub fn try_read_vectored(&self, bufs: &mut [io::IoSliceMut<'_>]) -> io::Result<usize> {
+        sys(|k| k.try_recv_vectored(self.fd, bufs))
+    }
+
     pub fn try_write(&self, buf: &[u8]) -> io::Result<usize> {
         match sys(|k| k.poll_send(self.fd, &mut noop_cx(), buf)) {
             Poll::Ready(r) => r,

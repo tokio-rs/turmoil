@@ -1,6 +1,6 @@
 use std::{
     assert_eq, assert_ne,
-    io::{self, ErrorKind},
+    io::{self, ErrorKind, IoSliceMut},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     rc::Rc,
     time::Duration,
@@ -19,6 +19,135 @@ use turmoil::{
 };
 
 const PORT: u16 = 1738;
+
+#[test]
+fn try_read_vectored_scatter_and_partial_reads() -> Result {
+    let mut sim = Builder::new().build();
+    sim.client("client", async {
+        let listener = TcpListener::bind(("127.0.0.1", PORT)).await?;
+        let (mut client, (mut server, _)) =
+            tokio::try_join!(TcpStream::connect(("127.0.0.1", PORT)), listener.accept())?;
+        let mut first = [b'!'; 2];
+        let mut second = [b'!'; 3];
+        assert_error_kind(
+            server.try_read_vectored(&mut [
+                IoSliceMut::new(&mut first),
+                IoSliceMut::new(&mut second),
+            ]),
+            ErrorKind::WouldBlock,
+        );
+        assert_eq!(&first, b"!!");
+        assert_eq!(&second, b"!!!");
+
+        client.write_all(b"abcdefgh").await?;
+        assert_eq!(server.peek(&mut [0; 8]).await?, 8);
+        assert_eq!(server.try_read_vectored(&mut [])?, 0);
+        assert_eq!(
+            server.try_read_vectored(&mut [IoSliceMut::new(&mut [])])?,
+            0
+        );
+        assert_eq!(
+            server.try_read_vectored(&mut [
+                IoSliceMut::new(&mut []),
+                IoSliceMut::new(&mut first),
+                IoSliceMut::new(&mut []),
+                IoSliceMut::new(&mut second),
+                IoSliceMut::new(&mut []),
+            ])?,
+            5
+        );
+        assert_eq!(&first, b"ab");
+        assert_eq!(&second, b"cde");
+
+        first.fill(b'!');
+        second.fill(b'!');
+        let mut untouched = [b'!'; 2];
+        assert_eq!(
+            server.try_read_vectored(&mut [
+                IoSliceMut::new(&mut first),
+                IoSliceMut::new(&mut second),
+                IoSliceMut::new(&mut untouched),
+            ])?,
+            3
+        );
+        assert_eq!(&first, b"fg");
+        assert_eq!(&second, b"h!!");
+        assert_eq!(&untouched, b"!!");
+        assert_error_kind(
+            server.try_read_vectored(&mut [IoSliceMut::new(&mut untouched)]),
+            ErrorKind::WouldBlock,
+        );
+
+        client.shutdown().await?;
+        assert_eq!(server.peek(&mut [0]).await?, 0);
+        assert_eq!(
+            server.try_read_vectored(&mut [IoSliceMut::new(&mut untouched)])?,
+            0
+        );
+        assert_eq!(&untouched, b"!!");
+        Ok(())
+    });
+    sim.run()
+}
+
+#[test]
+fn try_read_vectored_crosses_segments_and_releases_capacity() -> Result {
+    let mut sim = Builder::new()
+        .tcp_capacity(2)
+        .tick_duration(Duration::from_millis(1))
+        .build();
+    sim.client("client", async {
+        let listener = TcpListener::bind(("127.0.0.1", PORT)).await?;
+        let (client, (mut server, _)) =
+            tokio::try_join!(TcpStream::connect(("127.0.0.1", PORT)), listener.accept())?;
+        assert_eq!(client.try_write(b"ab")?, 2);
+        assert_eq!(client.try_write(b"cdef")?, 4);
+        assert_error_kind(client.try_write(b"g"), ErrorKind::WouldBlock);
+        // Loopback delivery runs on the next simulation tick. Let both
+        // segments arrive without consuming either one.
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert_error_kind(client.try_write(b"g"), ErrorKind::WouldBlock);
+        let mut first = [0; 3];
+        let mut second = [0; 3];
+        let (read, write) = server.into_split();
+        assert_eq!(
+            read.try_read_vectored(&mut [
+                IoSliceMut::new(&mut first),
+                IoSliceMut::new(&mut second),
+            ])?,
+            6
+        );
+        assert_eq!(&first, b"abc");
+        assert_eq!(&second, b"def");
+        assert_eq!(client.try_write(b"g")?, 1);
+        server = read.reunite(write)?;
+        assert_eq!(server.read_u8().await?, b'g');
+        Ok(())
+    });
+    sim.run()
+}
+
+#[test]
+fn try_read_vectored_reports_reset() -> Result {
+    let mut sim = Builder::new().build();
+    sim.client("client", async {
+        let listener = TcpListener::bind(("127.0.0.1", PORT)).await?;
+        let (mut client, (mut server, _)) =
+            tokio::try_join!(TcpStream::connect(("127.0.0.1", PORT)), listener.accept())?;
+        server.write_all(b"unread").await?;
+        client.peek(&mut [0]).await?;
+        drop(client);
+        assert_error_kind(server.peek(&mut [0]).await, ErrorKind::ConnectionReset);
+        let mut buf = [b'!'; 2];
+        assert_error_kind(
+            server.try_read_vectored(&mut [IoSliceMut::new(&mut buf)]),
+            ErrorKind::ConnectionReset,
+        );
+        assert_eq!(&buf, b"!!");
+        Ok(())
+    });
+    sim.run()
+}
 
 fn assert_error_kind<T>(res: io::Result<T>, kind: io::ErrorKind) {
     assert_eq!(res.err().map(|e| e.kind()), Some(kind));

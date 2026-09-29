@@ -1,4 +1,4 @@
-use std::io::ErrorKind;
+use std::io::{ErrorKind, IoSliceMut};
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -280,6 +280,174 @@ fn tcp_try_read_would_block_on_empty() {
             ErrorKind::WouldBlock
         );
     });
+}
+
+#[test]
+fn tcp_try_read_vectored_scatter_and_partial_reads() {
+    fixture::lo(async {
+        let listener = TcpListener::bind("127.0.0.1:8701").await.unwrap();
+        let (mut client, (server, _)) =
+            tokio::try_join!(TcpStream::connect("127.0.0.1:8701"), listener.accept()).unwrap();
+        let mut first = [b'!'; 2];
+        let mut second = [b'!'; 3];
+        assert_eq!(
+            server
+                .try_read_vectored(
+                    &mut [IoSliceMut::new(&mut first), IoSliceMut::new(&mut second),]
+                )
+                .unwrap_err()
+                .kind(),
+            ErrorKind::WouldBlock
+        );
+        assert_eq!(first, [b'!'; 2]);
+        assert_eq!(second, [b'!'; 3]);
+
+        client.write_all(b"abcdefgh").await.unwrap();
+        assert_eq!(server.peek(&mut [0; 8]).await.unwrap(), 8);
+        assert_eq!(server.try_read_vectored(&mut []).unwrap(), 0);
+        assert_eq!(
+            server
+                .try_read_vectored(&mut [IoSliceMut::new(&mut [])])
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            server
+                .try_read_vectored(&mut [
+                    IoSliceMut::new(&mut []),
+                    IoSliceMut::new(&mut first),
+                    IoSliceMut::new(&mut []),
+                    IoSliceMut::new(&mut second),
+                    IoSliceMut::new(&mut []),
+                ])
+                .unwrap(),
+            5
+        );
+        assert_eq!(&first, b"ab");
+        assert_eq!(&second, b"cde");
+
+        first.fill(b'!');
+        second.fill(b'!');
+        let mut untouched = [b'!'; 2];
+        assert_eq!(
+            server
+                .try_read_vectored(&mut [
+                    IoSliceMut::new(&mut first),
+                    IoSliceMut::new(&mut second),
+                    IoSliceMut::new(&mut untouched),
+                ])
+                .unwrap(),
+            3
+        );
+        assert_eq!(&first, b"fg");
+        assert_eq!(&second, b"h!!");
+        assert_eq!(&untouched, b"!!");
+
+        client.shutdown().await.unwrap();
+        assert_eq!(server.peek(&mut [0]).await.unwrap(), 0);
+        assert_eq!(
+            server
+                .try_read_vectored(&mut [IoSliceMut::new(&mut untouched)])
+                .unwrap(),
+            0
+        );
+        assert_eq!(&untouched, b"!!");
+    });
+}
+
+#[test]
+fn tcp_try_read_vectored_on_split_halves() {
+    fixture::lo(async {
+        let listener = TcpListener::bind("127.0.0.1:8702").await.unwrap();
+        let (mut client, (mut server, _)) =
+            tokio::try_join!(TcpStream::connect("127.0.0.1:8702"), listener.accept()).unwrap();
+        client.write_all(b"abcdefg").await.unwrap();
+        assert_eq!(server.peek(&mut [0; 7]).await.unwrap(), 7);
+        let mut first = [0; 1];
+        let mut second = [0; 2];
+        {
+            let (read, _write) = server.split();
+            assert_eq!(
+                read.try_read_vectored(&mut [
+                    IoSliceMut::new(&mut first),
+                    IoSliceMut::new(&mut second),
+                ])
+                .unwrap(),
+                3
+            );
+        }
+        assert_eq!(&first, b"a");
+        assert_eq!(&second, b"bc");
+
+        let (read, write) = server.into_split();
+        assert_eq!(
+            read.try_read_vectored(&mut [
+                IoSliceMut::new(&mut first),
+                IoSliceMut::new(&mut second),
+            ])
+            .unwrap(),
+            3
+        );
+        assert_eq!(&first, b"d");
+        assert_eq!(&second, b"ef");
+        let mut server = read.reunite(write).unwrap();
+        assert_eq!(server.read_u8().await.unwrap(), b'g');
+    });
+}
+
+#[test]
+fn tcp_try_read_vectored_reports_reset() {
+    fixture::lo(async {
+        let listener = TcpListener::bind("127.0.0.1:8703").await.unwrap();
+        let (client, (mut server, _)) =
+            tokio::try_join!(TcpStream::connect("127.0.0.1:8703"), listener.accept()).unwrap();
+        server.write_all(b"unread").await.unwrap();
+        client.peek(&mut [0]).await.unwrap();
+        drop(client);
+        assert_eq!(
+            server.peek(&mut [0]).await.unwrap_err().kind(),
+            ErrorKind::ConnectionReset
+        );
+        let mut buf = [b'!'; 2];
+        assert_eq!(
+            server
+                .try_read_vectored(&mut [IoSliceMut::new(&mut buf)])
+                .unwrap_err()
+                .kind(),
+            ErrorKind::ConnectionReset
+        );
+        assert_eq!(&buf, b"!!");
+    });
+}
+
+#[test]
+fn tcp_try_read_vectored_reopens_receive_window() {
+    fixture::lo_with_config(
+        KernelConfig::default().send_buf_cap(8).recv_buf_cap(8),
+        async {
+            let listener = TcpListener::bind("127.0.0.1:8704").await.unwrap();
+            let (mut client, (mut server, _)) =
+                tokio::try_join!(TcpStream::connect("127.0.0.1:8704"), listener.accept()).unwrap();
+            let writer = tokio::spawn(async move {
+                client.write_all(b"abcdefghijklmnop").await.unwrap();
+            });
+            assert_eq!(server.peek(&mut [0; 8]).await.unwrap(), 8);
+            let mut bufs = [[0; 2]; 4];
+            let mut slices: Vec<_> = bufs.iter_mut().map(|b| IoSliceMut::new(b)).collect();
+            assert_eq!(server.try_read_vectored(&mut slices).unwrap(), 8);
+            assert_eq!(bufs.concat(), b"abcdefgh");
+
+            // Each vector is smaller than the window-update threshold. Their
+            // combined drain must advertise room so the rest can be delivered.
+            let mut rest = [0; 8];
+            tokio::time::timeout(Duration::from_millis(500), server.read_exact(&mut rest))
+                .await
+                .expect("vectored read did not reopen the receive window")
+                .unwrap();
+            assert_eq!(&rest, b"ijklmnop");
+            writer.await.unwrap();
+        },
+    );
 }
 
 #[test]
