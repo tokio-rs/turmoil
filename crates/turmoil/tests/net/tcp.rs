@@ -7,10 +7,11 @@ use std::{
 };
 
 use std::future;
+use test_case::test_case;
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncReadExt, AsyncWriteExt, Interest},
     sync::{oneshot, Notify},
-    time::timeout,
+    time::{sleep, timeout, Instant},
 };
 use turmoil::{
     lookup,
@@ -122,6 +123,67 @@ fn try_read_vectored_crosses_segments_and_releases_capacity() -> Result {
         assert_eq!(client.try_write(b"g")?, 1);
         server = read.reunite(write)?;
         assert_eq!(server.read_u8().await?, b'g');
+        Ok(())
+    });
+    sim.run()
+}
+
+#[test]
+fn ready_then_try_read_vectored() -> Result {
+    let mut sim = Builder::new().tcp_capacity(1).build();
+    sim.client("client", async {
+        let listener = TcpListener::bind(("127.0.0.1", PORT)).await?;
+        let (mut client, (mut server, _)) =
+            tokio::try_join!(TcpStream::connect(("127.0.0.1", PORT)), listener.accept())?;
+
+        client.write_all(b"abcd").await?;
+        let ready = server.ready(Interest::READABLE).await?;
+        assert!(ready.is_readable());
+        assert!(!ready.is_read_closed());
+        let mut first = [0; 2];
+        let mut second = [0; 2];
+        assert_eq!(
+            server.try_read_vectored(&mut [
+                IoSliceMut::new(&mut first),
+                IoSliceMut::new(&mut second),
+            ])?,
+            4
+        );
+        assert_eq!(&first, b"ab");
+        assert_eq!(&second, b"cd");
+        assert_error_kind(
+            server.try_read_vectored(&mut [IoSliceMut::new(&mut first)]),
+            ErrorKind::WouldBlock,
+        );
+        assert!(
+            timeout(Duration::from_millis(10), server.ready(Interest::READABLE))
+                .await
+                .is_err()
+        );
+
+        // Readiness must release capacity, and FIN must not need a channel slot.
+        client.write_all(b"efgh").await?;
+        client.shutdown().await?;
+        sleep(Duration::from_secs(1)).await;
+        assert!(server.ready(Interest::READABLE).await?.is_read_closed());
+        let (read, write) = server.into_split();
+        assert_eq!(
+            read.try_read_vectored(&mut [
+                IoSliceMut::new(&mut first),
+                IoSliceMut::new(&mut second),
+            ])?,
+            4
+        );
+        assert_eq!(&first, b"ef");
+        assert_eq!(&second, b"gh");
+        // Detect EOF directly, without an async read or peek observing it first.
+        assert_eq!(
+            read.try_read_vectored(&mut [IoSliceMut::new(&mut first)])?,
+            0
+        );
+        server = read.reunite(write)?;
+        assert!(server.ready(Interest::READABLE).await?.is_read_closed());
+        assert_eq!(server.read(&mut first).await?, 0);
         Ok(())
     });
     sim.run()
@@ -932,6 +994,319 @@ fn split() -> Result {
 
         let (r3, w3) = s3.into_split();
         r3.reunite(w3)?;
+
+        Ok(())
+    });
+
+    sim.run()
+}
+
+#[test_case(1; "full receive channel")]
+#[test_case(2; "spare receive capacity")]
+fn ready_reports_close_behind_unread_data(capacity: usize) -> Result {
+    let mut sim = Builder::new().tcp_capacity(capacity).build();
+
+    sim.client("server", async move {
+        let listener = bind().await?;
+        let (mut s, _) = listener.accept().await?;
+
+        s.write_all(&[42; 64]).await?;
+        s.shutdown().await?;
+        Ok(())
+    });
+
+    sim.client("client", async move {
+        let mut s = TcpStream::connect(("server", PORT)).await?;
+
+        // Let the data and the FIN behind it both arrive.
+        sleep(Duration::from_secs(1)).await;
+
+        let ready = s.ready(Interest::READABLE).await?;
+        assert!(ready.is_readable());
+        assert!(ready.is_read_closed());
+
+        // Readiness consumed nothing.
+        let mut received = Vec::new();
+        timeout(Duration::from_secs(1), s.read_to_end(&mut received)).await??;
+        assert_eq!(vec![42; 64], received);
+
+        let ready = s.ready(Interest::READABLE).await?;
+        assert!(ready.is_read_closed());
+        assert!(!ready.is_write_closed());
+
+        Ok(())
+    });
+
+    sim.run()
+}
+
+#[test]
+fn ready_with_unread_data_is_not_closed() -> Result {
+    let mut sim = Builder::new().build();
+
+    let notify = Rc::new(Notify::new());
+    let wait = notify.clone();
+
+    sim.client("server", async move {
+        let listener = bind().await?;
+        let (mut s, _) = listener.accept().await?;
+
+        s.write_all(b"pipeline").await?;
+        wait.notified().await;
+        Ok(())
+    });
+
+    sim.client("client", async move {
+        let mut s = TcpStream::connect(("server", PORT)).await?;
+
+        let ready = s.ready(Interest::READABLE).await?;
+        assert!(ready.is_readable());
+        assert!(!ready.is_read_closed());
+
+        let mut received = [0; 8];
+        s.read_exact(&mut received).await?;
+        assert_eq!(b"pipeline", &received);
+
+        notify.notify_one();
+        Ok(())
+    });
+
+    sim.run()
+}
+
+#[test]
+fn ready_waits_for_data() -> Result {
+    let mut sim = Builder::new().build();
+
+    let notify = Rc::new(Notify::new());
+    let wait = notify.clone();
+
+    sim.client("server", async move {
+        let listener = bind().await?;
+        let (mut s, _) = listener.accept().await?;
+
+        wait.notified().await;
+        s.write_u8(1).await?;
+        Ok(())
+    });
+
+    sim.client("client", async move {
+        let mut s = TcpStream::connect(("server", PORT)).await?;
+
+        assert!(timeout(Duration::from_secs(1), s.ready(Interest::READABLE))
+            .await
+            .is_err());
+
+        notify.notify_one();
+        assert!(s.ready(Interest::READABLE).await?.is_readable());
+        assert_eq!(1, s.read_u8().await?);
+
+        Ok(())
+    });
+
+    sim.run()
+}
+
+#[test]
+fn ready_reports_reset() -> Result {
+    let mut sim = Builder::new().build();
+
+    sim.client("server", async move {
+        let listener = bind().await?;
+        let (s, _) = listener.accept().await?;
+
+        // Closing with unread data resets the connection.
+        sleep(Duration::from_secs(1)).await;
+        drop(s);
+        Ok(())
+    });
+
+    sim.client("client", async move {
+        let mut s = TcpStream::connect(("server", PORT)).await?;
+        s.write_all(b"unread").await?;
+
+        // Blocks until the reset lands; only the requested interest is reported.
+        let ready = s.ready(Interest::READABLE).await?;
+        assert!(ready.is_read_closed(), "{ready:?}");
+        assert!(!ready.is_write_closed(), "{ready:?}");
+
+        let ready = s.ready(Interest::READABLE | Interest::WRITABLE).await?;
+        assert!(ready.is_read_closed(), "{ready:?}");
+        assert!(ready.is_write_closed(), "{ready:?}");
+
+        Ok(())
+    });
+
+    sim.run()
+}
+
+#[test_case(1; "exhausted credits")]
+#[test_case(2; "spare credits")]
+fn ready_writable_reports_reset(capacity: usize) -> Result {
+    let mut sim = Builder::new().tcp_capacity(capacity).build();
+
+    sim.client("server", async {
+        let listener = bind().await?;
+        let (s, _) = listener.accept().await?;
+        sleep(Duration::from_secs(1)).await;
+        drop(s);
+        Ok(())
+    });
+
+    sim.client("client", async move {
+        let mut s = TcpStream::connect(("server", PORT)).await?;
+        s.write_all(b"unread").await?;
+
+        if capacity > 1 {
+            sleep(Duration::from_secs(2)).await;
+        }
+
+        let start = Instant::now();
+        let ready = timeout(Duration::from_secs(3), s.ready(Interest::WRITABLE)).await??;
+        assert!(start.elapsed() < Duration::from_secs(2));
+        assert!(ready.is_write_closed(), "{ready:?}");
+        assert!(!ready.is_read_closed(), "{ready:?}");
+        assert_error_kind(s.writable().await, ErrorKind::BrokenPipe);
+        Ok(())
+    });
+
+    sim.run()
+}
+
+#[test]
+fn write_blocked_on_flow_control_fails_on_reset() -> Result {
+    let mut sim = Builder::new().tcp_capacity(1).build();
+
+    sim.client("server", async {
+        let listener = bind().await?;
+        let (s, _) = listener.accept().await?;
+        sleep(Duration::from_secs(1)).await;
+        drop(s);
+        Ok(())
+    });
+
+    sim.client("client", async move {
+        let mut s = TcpStream::connect(("server", PORT)).await?;
+        s.write_all(b"one").await?;
+
+        // No credits remain, so only the reset can wake this write.
+        let start = Instant::now();
+        let res = timeout(Duration::from_secs(3), s.write_all(b"two")).await?;
+        assert!(start.elapsed() < Duration::from_secs(2));
+        assert_error_kind(res, ErrorKind::BrokenPipe);
+        Ok(())
+    });
+
+    sim.run()
+}
+
+#[test]
+fn empty_write_does_not_wait_for_credits() -> Result {
+    let mut sim = Builder::new().tcp_capacity(1).build();
+
+    sim.host("server", || async {
+        let listener = bind().await?;
+        let (_s, _) = listener.accept().await?;
+        future::pending().await
+    });
+
+    sim.client("client", async move {
+        let mut s = TcpStream::connect(("server", PORT)).await?;
+        s.write_all(b"one").await?;
+
+        // The server never reads, so the credit is never returned.
+        assert_eq!(0, timeout(Duration::from_secs(1), s.write(b"")).await??);
+
+        let (_, mut w) = s.into_split();
+        assert_eq!(0, timeout(Duration::from_secs(1), w.write(b"")).await??);
+        Ok(())
+    });
+
+    sim.run()
+}
+
+#[test_case(Interest::ERROR; "error only")]
+#[test_case(Interest::ERROR | Interest::READABLE; "error and readable")]
+#[test_case(Interest::ERROR | Interest::WRITABLE; "error and writable")]
+fn ready_rejects_unsupported_interests(interest: Interest) -> Result {
+    let mut sim = Builder::new().build();
+
+    sim.host("server", || async {
+        let listener = bind().await?;
+        let (_s, _) = listener.accept().await?;
+        future::pending().await
+    });
+
+    sim.client("client", async move {
+        let mut s = TcpStream::connect(("server", PORT)).await?;
+        assert_error_kind(
+            timeout(Duration::from_secs(1), s.ready(interest)).await?,
+            ErrorKind::InvalidInput,
+        );
+        Ok(())
+    });
+
+    sim.run()
+}
+
+#[derive(Clone, Copy)]
+enum ObserveEof {
+    Read,
+    Peek,
+    Ready,
+}
+
+#[test_case(ObserveEof::Read; "after read")]
+#[test_case(ObserveEof::Peek; "after peek")]
+#[test_case(ObserveEof::Ready; "after readiness")]
+fn ready_reports_reset_after_eof(observe: ObserveEof) -> Result {
+    let mut sim = Builder::new().build();
+
+    sim.client("server", async {
+        let listener = bind().await?;
+        let (mut s, _) = listener.accept().await?;
+        s.shutdown().await?;
+        assert_eq!(1, s.peek(&mut [0; 1]).await?);
+        drop(s);
+        Ok(())
+    });
+
+    sim.client("client", async move {
+        let mut s = TcpStream::connect(("server", PORT)).await?;
+        match observe {
+            ObserveEof::Read => assert_eq!(0, s.read(&mut [0; 1]).await?),
+            ObserveEof::Peek => assert_eq!(0, s.peek(&mut [0; 1]).await?),
+            ObserveEof::Ready => assert!(s.ready(Interest::READABLE).await?.is_read_closed()),
+        }
+
+        s.write_all(b"unread").await?;
+        sleep(Duration::from_secs(1)).await;
+
+        let ready = s.ready(Interest::READABLE | Interest::WRITABLE).await?;
+        assert!(ready.is_read_closed(), "{ready:?}");
+        assert!(ready.is_write_closed(), "{ready:?}");
+        Ok(())
+    });
+
+    sim.run()
+}
+
+#[test]
+fn ready_writable() -> Result {
+    let mut sim = Builder::new().build();
+
+    sim.client("server", async move {
+        let listener = bind().await?;
+        let _ = listener.accept().await?;
+        Ok(())
+    });
+
+    sim.client("client", async move {
+        let mut s = TcpStream::connect(("server", PORT)).await?;
+
+        let ready = s.ready(Interest::WRITABLE).await?;
+        assert!(ready.is_writable());
+        assert!(!ready.is_readable());
 
         Ok(())
     });
