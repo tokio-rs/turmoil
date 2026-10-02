@@ -1,18 +1,18 @@
 use bytes::{Buf, Bytes};
-use std::future::poll_fn;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
-use std::task::Waker;
 use std::{
     fmt::Debug,
+    future::poll_fn,
     io::{self, Error, Result},
     net::SocketAddr,
     pin::Pin,
-    sync::Arc,
-    task::{ready, Context, Poll},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
+    task::{ready, Context, Poll, Waker},
 };
 use tokio::{
-    io::{AsyncRead, AsyncWrite, ReadBuf},
+    io::{AsyncRead, AsyncWrite, Interest, ReadBuf, Ready},
     runtime::Handle,
     sync::{mpsc, oneshot},
     time::sleep,
@@ -20,7 +20,7 @@ use tokio::{
 
 use crate::{
     envelope::{Envelope, Protocol, Segment, Syn},
-    host::{is_same, SequencedSegment},
+    host::{is_same, SequencedSegment, StreamState},
     net::SocketPair,
     world::World,
     ToSocketAddrs, TRACING_TARGET,
@@ -40,7 +40,7 @@ pub struct TcpStream {
 impl TcpStream {
     pub(crate) fn new(
         pair: SocketPair,
-        receiver: mpsc::Receiver<SequencedSegment>,
+        receiver: mpsc::Receiver<Bytes>,
         flow_control: BidiFlowControl,
     ) -> Self {
         let pair = Arc::new(pair);
@@ -150,7 +150,9 @@ impl TcpStream {
     /// Waits for the socket to become writable.
     ///
     /// This function is equivalent to `ready(Interest::WRITABLE)` and is usually
-    /// paired with `try_write()`.
+    /// paired with `try_write()`. Unlike tokio, which returns `Ok(())` and leaves
+    /// the failure to `try_write()`, this fails with `BrokenPipe` once the stream
+    /// is shut down or reset.
     ///
     /// # Cancel safety
     ///
@@ -186,6 +188,69 @@ impl TcpStream {
         Ok(())
     }
 
+    /// Waits for any of the requested readiness states, without consuming
+    /// buffered data. Unlike tokio this takes `&mut self`, as reads and peeks do.
+    ///
+    /// As in tokio, only flags for the requested interests are reported. The
+    /// peer closing its write half is reported as `READ_CLOSED`, even while
+    /// unread data is still queued ahead of the close. A reset reports
+    /// `READ_CLOSED` and `WRITE_CLOSED` for the corresponding interests.
+    ///
+    /// Only `READABLE`, `WRITABLE`, and their combination are supported. Other
+    /// interests return an [`io::ErrorKind::InvalidInput`] error.
+    ///
+    /// # Cancel safety
+    ///
+    /// This method is cancel safe.
+    pub async fn ready(&mut self, interest: Interest) -> Result<Ready> {
+        poll_fn(|cx| self.poll_ready(cx, interest)).await
+    }
+
+    /// Polls for any of the requested readiness states. See [`Self::ready`].
+    pub fn poll_ready(&mut self, cx: &mut Context<'_>, interest: Interest) -> Poll<Result<Ready>> {
+        if interest != Interest::READABLE
+            && interest != Interest::WRITABLE
+            && interest != (Interest::READABLE | Interest::WRITABLE)
+        {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "only readable and writable interests are supported",
+            )));
+        }
+
+        let state = World::current(|world| {
+            world
+                .current_host_mut()
+                .tcp
+                .poll_stream_state(*self.read_half.pair, cx)
+        });
+
+        let mut ready = Ready::EMPTY;
+
+        if interest.is_readable() {
+            if state != StreamState::Open {
+                ready |= Ready::READABLE | Ready::READ_CLOSED;
+            } else if let Poll::Ready(read) = self.read_half.poll_read_ready(cx) {
+                read?;
+                ready |= Ready::READABLE;
+            }
+        }
+        if interest.is_writable() {
+            if let Poll::Ready(write) = self.write_half.poll_writable(cx) {
+                ready |= match write {
+                    Ok(()) => Ready::WRITABLE,
+                    Err(_) => Ready::WRITE_CLOSED,
+                };
+            }
+        }
+
+        if ready.is_empty() {
+            Poll::Pending
+        } else {
+            Poll::Ready(Ok(ready))
+        }
+    }
+
     /// Receives data on the socket from the remote address to which it is
     /// connected, without removing that data from the queue. On success,
     /// returns the number of bytes peeked.
@@ -210,7 +275,7 @@ pub(crate) struct ReadHalf {
 }
 
 struct Rx {
-    recv: mpsc::Receiver<SequencedSegment>,
+    recv: mpsc::Receiver<Bytes>,
     /// The remaining bytes of a received data segment.
     ///
     /// This is used to support read impls by stashing available bytes for
@@ -232,24 +297,23 @@ impl ReadHalf {
             }
             if rx.buffer.is_none() {
                 match rx.recv.try_recv() {
-                    Ok(seg) => {
-                        tracing::trace!(target: TRACING_TARGET, src = ?self.pair.remote, dst = ?self.pair.local, protocol = %seg, "Recv");
-                        match seg {
-                            SequencedSegment::Data(bytes) => {
-                                self.flow_control.release();
-                                rx.buffer = Some(bytes);
-                            }
-                            SequencedSegment::Fin => {
-                                rx.is_closed = true;
-                                return Ok(n);
-                            }
-                        }
+                    Ok(bytes) => {
+                        tracing::trace!(target: TRACING_TARGET, src = ?self.pair.remote, dst = ?self.pair.local, protocol = %SequencedSegment::Data(bytes.clone()), "Recv");
+                        self.flow_control.release();
+                        rx.buffer = Some(bytes);
                     }
                     Err(_) if n > 0 => return Ok(n),
                     Err(mpsc::error::TryRecvError::Empty) => {
                         return Err(io::ErrorKind::WouldBlock.into());
                     }
                     Err(mpsc::error::TryRecvError::Disconnected) => {
+                        let state = World::current(|world| {
+                            world.current_host().tcp.stream_state(*self.pair)
+                        });
+                        if state == StreamState::ReadClosed {
+                            rx.is_closed = true;
+                            return Ok(n);
+                        }
                         return Err(io::Error::new(
                             io::ErrorKind::ConnectionReset,
                             "Connection reset",
@@ -283,38 +347,17 @@ impl ReadHalf {
     }
 
     fn poll_read_priv(&mut self, cx: &mut Context<'_>, buf: &mut ReadBuf) -> Poll<Result<()>> {
-        let rx = self.rx.get_mut().unwrap();
-        if rx.is_closed || buf.capacity() == 0 {
+        if buf.capacity() == 0 {
             return Poll::Ready(Ok(()));
         }
 
+        ready!(self.poll_read_ready(cx))?;
+        let rx = self.rx.get_mut().unwrap();
         if let Some(bytes) = rx.buffer.take() {
             rx.buffer = Self::put_slice(bytes, buf);
-
-            return Poll::Ready(Ok(()));
         }
 
-        match ready!(rx.recv.poll_recv(cx)) {
-            Some(seg) => {
-                tracing::trace!(target: TRACING_TARGET, src = ?self.pair.remote, dst = ?self.pair.local, protocol = %seg, "Recv");
-
-                match seg {
-                    SequencedSegment::Data(bytes) => {
-                        self.flow_control.release();
-                        rx.buffer = Self::put_slice(bytes, buf);
-                    }
-                    SequencedSegment::Fin => {
-                        rx.is_closed = true;
-                    }
-                }
-
-                Poll::Ready(Ok(()))
-            }
-            None => Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::ConnectionReset,
-                "Connection reset",
-            ))),
-        }
+        Poll::Ready(Ok(()))
     }
 
     /// Put bytes in `buf` based on the minimum of `avail` and its remaining
@@ -340,47 +383,62 @@ impl ReadHalf {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf,
     ) -> Poll<Result<usize>> {
-        let rx = self.rx.get_mut().unwrap();
-        if rx.is_closed || buf.capacity() == 0 {
+        if buf.capacity() == 0 {
             return Poll::Ready(Ok(0));
         }
 
-        // If we have buffered data, peek from it
-        if let Some(bytes) = &rx.buffer {
-            let len = std::cmp::min(bytes.len(), buf.remaining());
-            buf.put_slice(&bytes[..len]);
-            return Poll::Ready(Ok(len));
-        }
+        ready!(self.poll_read_ready(cx))?;
+        let Some(bytes) = &self.rx.get_mut().unwrap().buffer else {
+            return Poll::Ready(Ok(0));
+        };
+        let len = std::cmp::min(bytes.len(), buf.remaining());
+        buf.put_slice(&bytes[..len]);
 
-        match ready!(rx.recv.poll_recv(cx)) {
-            Some(seg) => {
-                tracing::trace!(target: TRACING_TARGET, src = ?self.pair.remote, dst = ?self.pair.local, protocol = %seg, "Peek");
-
-                match seg {
-                    SequencedSegment::Data(bytes) => {
-                        self.flow_control.release();
-                        let len = std::cmp::min(bytes.len(), buf.remaining());
-                        buf.put_slice(&bytes[..len]);
-                        rx.buffer = Some(bytes);
-
-                        Poll::Ready(Ok(len))
-                    }
-                    SequencedSegment::Fin => {
-                        rx.is_closed = true;
-                        Poll::Ready(Ok(0))
-                    }
-                }
-            }
-            None => Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::ConnectionReset,
-                "Connection reset",
-            ))),
-        }
+        Poll::Ready(Ok(len))
     }
 
     pub(crate) async fn peek(&mut self, buf: &mut [u8]) -> Result<usize> {
         let mut buf = ReadBuf::new(buf);
         poll_fn(|cx| self.poll_peek(cx, &mut buf)).await
+    }
+
+    fn poll_read_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<()>> {
+        let rx = self.rx.get_mut().unwrap();
+        if rx.is_closed || rx.buffer.is_some() {
+            return Poll::Ready(Ok(()));
+        }
+
+        if let SequencedSegment::Data(bytes) = ready!(self.poll_recv(cx))? {
+            self.rx.get_mut().unwrap().buffer = Some(bytes);
+        }
+
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Result<SequencedSegment>> {
+        let rx = self.rx.get_mut().unwrap();
+        let segment = match ready!(rx.recv.poll_recv(cx)) {
+            Some(bytes) => {
+                self.flow_control.release();
+                SequencedSegment::Data(bytes)
+            }
+            None => {
+                let state =
+                    World::current(|world| world.current_host().tcp.stream_state(*self.pair));
+                if state != StreamState::ReadClosed {
+                    return Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::ConnectionReset,
+                        "Connection reset",
+                    )));
+                }
+                rx.is_closed = true;
+                SequencedSegment::Fin
+            }
+        };
+
+        tracing::trace!(target: TRACING_TARGET, src = ?self.pair.remote, dst = ?self.pair.local, protocol = %segment, "Recv");
+
+        Poll::Ready(Ok(segment))
     }
 }
 
@@ -402,12 +460,12 @@ pub(crate) struct WriteHalf {
 
 impl WriteHalf {
     fn try_write(&self, buf: &[u8]) -> Result<usize> {
-        if buf.remaining() == 0 {
-            return Ok(0);
-        }
-
         if self.is_shutdown {
             return Err(io::Error::new(io::ErrorKind::BrokenPipe, "Broken pipe"));
+        }
+
+        if buf.remaining() == 0 {
+            return Ok(0);
         }
 
         if !self.flow_control.try_acquire() {
@@ -433,27 +491,25 @@ impl WriteHalf {
                 "Broken pipe",
             )));
         }
+
+        let state = World::current(|world| {
+            world
+                .current_host_mut()
+                .tcp
+                .poll_stream_state(*self.pair, cx)
+        });
+        if state == StreamState::Reset {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "Broken pipe",
+            )));
+        }
+
         if self.flow_control.has_credits() {
             return Poll::Ready(Ok(()));
         }
         self.flow_control.register_waker(cx.waker().clone());
         Poll::Pending
-    }
-
-    fn poll_write_priv(&self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize>> {
-        if self.is_shutdown {
-            return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
-        }
-
-        match self.try_write(buf) {
-            // If the socket is full, behave like non-blocking port, and register a waker
-            // for the socket to become writable again.
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                self.flow_control.register_waker(cx.waker().clone());
-                Poll::Pending
-            }
-            result => Poll::Ready(result),
-        }
     }
 
     fn poll_shutdown_priv(&mut self) -> Poll<Result<()>> {
@@ -574,9 +630,20 @@ impl FlowControl {
     }
 
     fn try_acquire(&self) -> bool {
-        self.credits
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| v.checked_sub(1))
-            .is_ok()
+        // Use CAS directly to support the older compiler pinned in CI.
+        let mut credits = self.credits.load(Ordering::Acquire);
+        while let Some(remaining) = credits.checked_sub(1) {
+            match self.credits.compare_exchange_weak(
+                credits,
+                remaining,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(actual) => credits = actual,
+            }
+        }
+        false
     }
 
     fn release(&self) {
@@ -634,7 +701,11 @@ impl AsyncRead for TcpStream {
 
 impl AsyncWrite for WriteHalf {
     fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize>> {
-        self.poll_write_priv(cx, buf)
+        // A zero-length send never blocks on a full send buffer.
+        if !buf.is_empty() {
+            ready!(self.poll_writable(cx))?;
+        }
+        Poll::Ready(self.try_write(buf))
     }
 
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<()>> {
@@ -667,17 +738,12 @@ impl AsyncWrite for TcpStream {
 impl Drop for ReadHalf {
     fn drop(&mut self) {
         World::current_if_set(|world| {
-            // RFC 9293 §3.10.4: closing with unread data MUST send a RST so
-            // the peer learns data was lost. "Unread data" = application
-            // bytes received but not consumed: partial segment bytes stashed
-            // in the rx buffer, a Data segment still queued on the mpsc, or
-            // a Data segment parked in the host's reorder buffer. A queued
-            // FIN is not a reset condition — a graceful close followed by a
-            // drop should stay graceful.
+            // RFC 9293 §3.10.4 requires RST on close with unread data so the
+            // peer knows bytes were lost, including out-of-order bytes.
             let rx = self.rx.get_mut().unwrap();
             let has_unread = !rx.is_closed
                 && (rx.buffer.is_some()
-                    || matches!(rx.recv.try_recv(), Ok(SequencedSegment::Data(_)))
+                    || rx.recv.try_recv().is_ok()
                     || world.current_host_mut().tcp.has_buffered_data(*self.pair));
 
             if has_unread {

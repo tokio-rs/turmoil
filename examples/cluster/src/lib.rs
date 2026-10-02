@@ -2,7 +2,6 @@ use std::{
     cell::{RefCell, RefMut},
     collections::VecDeque,
     error::Error,
-    future::Future,
     rc::Rc,
     time::Duration,
 };
@@ -113,72 +112,68 @@ impl Cluster {
     }
 }
 
-pub fn echo_client_cycle(
+pub async fn echo_client_cycle(
     cluster: Cluster,
     clients: usize,
     duration: Duration,
-) -> impl Future<Output = Result<(), Box<dyn Error>>> {
-    async move {
-        let mut join = JoinSet::new();
+) -> Result<(), Box<dyn Error>> {
+    let mut join = JoinSet::new();
 
-        for _client in 0..clients {
-            let cluster = cluster.clone();
+    for _client in 0..clients {
+        let cluster = cluster.clone();
 
-            join.spawn_local(async move {
-                let mut client = Client::new(cluster);
+        join.spawn_local(async move {
+            let mut client = Client::new(cluster);
 
-                while turmoil::elapsed() < duration {
-                    if let Err(e) = client.request().await {
-                        client.reset();
-                        tracing::debug!("request error: {:?}", e)
-                    }
+            while turmoil::elapsed() < duration {
+                if let Err(e) = client.request().await {
+                    client.reset();
+                    tracing::debug!("request error: {:?}", e)
                 }
-            });
-        }
-
-        let _ = join.join_all().await;
-
-        Ok(())
+            }
+        });
     }
+
+    let _ = join.join_all().await;
+
+    Ok(())
 }
 
-pub fn machine_attrition(
+pub async fn machine_attrition(
     cluster: Cluster,
     duration: Duration,
     machines_to_kill: usize,
     machines_to_leave: usize,
-) -> impl Future<Output = Result<(), Box<dyn Error>>> {
-    async move {
-        tracing::info!("starting attrition workload");
-        let mut killed_machines = 0;
+) -> Result<(), Box<dyn Error>> {
+    tracing::info!("starting attrition workload");
+    let mut killed_machines = 0;
 
-        let mean_delay = duration / machines_to_kill as u32;
+    let mean_delay = duration / machines_to_kill as u32;
 
-        loop {
-            if turmoil::elapsed() > duration {
-                break;
-            }
-
-            let jitter = cluster.rng().random_range(0..mean_delay.as_millis());
-            tokio::time::sleep(Duration::from_millis(jitter as u64)).await;
-
-            let machines = cluster.get_machines();
-
-            let alive_machines = machines.iter().filter(|m| !m.failed).collect::<Vec<_>>();
-
-            if killed_machines < machines_to_kill && alive_machines.len() > machines_to_leave {
-                // Kill random machine
-                let machine_to_kill = alive_machines.choose(&mut *cluster.rng()).unwrap();
-
-                tracing::info!("assassinating: {}", machine_to_kill.name);
-
-                cluster.crash(machine_to_kill.name.clone());
-                killed_machines += 1;
-            }
+    loop {
+        if turmoil::elapsed() > duration {
+            break;
         }
 
-        Ok(())
+        let jitter = cluster.rng().random_range(0..mean_delay.as_millis());
+        tokio::time::sleep(Duration::from_millis(jitter as u64)).await;
+
+        let machines = cluster.get_machines();
+
+        let alive_machines = machines.iter().filter(|m| !m.failed).collect::<Vec<_>>();
+
+        if killed_machines < machines_to_kill && alive_machines.len() > machines_to_leave {
+            // Kill random machine
+            let machine_to_kill = alive_machines.choose(&mut *cluster.rng()).unwrap();
+
+            tracing::info!("assassinating: {}", machine_to_kill.name);
+
+            cluster.crash(machine_to_kill.name.clone());
+            killed_machines += 1;
+        }
     }
+
+    Ok(())
 }
 
 async fn server(addr: String) -> Result<(), Box<dyn Error>> {

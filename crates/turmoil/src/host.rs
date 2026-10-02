@@ -17,6 +17,7 @@ use std::ops::RangeInclusive;
 use std::sync::Arc;
 #[cfg(feature = "unstable-io_uring")]
 use std::sync::Mutex;
+use std::task::{Context, Waker};
 use tokio::sync::{mpsc, Notify};
 use tokio::time::{Duration, Instant};
 
@@ -366,15 +367,24 @@ struct StreamSocket {
     buf: IndexMap<u64, SequencedSegment>,
     next_send_seq: u64,
     recv_seq: u64,
-    sender: mpsc::Sender<SequencedSegment>,
+    /// None once FIN is in order, so EOF does not consume channel capacity.
+    sender: Option<mpsc::Sender<Bytes>>,
     flow_control: BidiFlowControl,
+    reset_waker: Option<Waker>,
     /// A simple reference counter for tracking read/write half drops. Once 0, the
     /// socket may be removed from the host.
     ref_ct: usize,
 }
 
-/// Stripped down version of [`Segment`] for delivery out to the application
-/// layer.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StreamState {
+    Open,
+    ReadClosed,
+    Reset,
+}
+
+/// A received [`Segment`] stripped of its sequence number. The host reorders
+/// these by seq; the stream sees them in order.
 #[derive(Debug)]
 pub(crate) enum SequencedSegment {
     Data(Bytes),
@@ -391,15 +401,16 @@ impl Display for SequencedSegment {
 }
 
 impl StreamSocket {
-    fn new(capacity: usize) -> (Self, mpsc::Receiver<SequencedSegment>, BidiFlowControl) {
+    fn new(capacity: usize) -> (Self, mpsc::Receiver<Bytes>, BidiFlowControl) {
         let (tx, rx) = mpsc::channel(capacity);
         let flow_control = BidiFlowControl::new(capacity);
         let sock = Self {
             buf: IndexMap::new(),
             next_send_seq: 1,
             recv_seq: 0,
-            sender: tx,
+            sender: Some(tx),
             flow_control: flow_control.clone(),
+            reset_waker: None,
             ref_ct: 2,
         };
 
@@ -412,6 +423,13 @@ impl StreamSocket {
         seq
     }
 
+    fn state(&self) -> StreamState {
+        match self.sender {
+            Some(_) => StreamState::Open,
+            None => StreamState::ReadClosed,
+        }
+    }
+
     // Buffer and re-order received segments by `seq` as the network may deliver
     // them out of order.
     fn buffer(&mut self, seq: u64, segment: SequencedSegment) -> Result<(), Protocol> {
@@ -421,20 +439,30 @@ impl StreamSocket {
 
         assert!(exists.is_none(), "duplicate segment {seq}");
 
-        while self.buf.contains_key(&(self.recv_seq + 1)) {
-            self.recv_seq += 1;
+        while let Some(segment) = self.buf.swap_remove(&(self.recv_seq + 1)) {
+            let Some(sender) = &self.sender else {
+                return Err(Protocol::Tcp(Segment::Rst));
+            };
 
-            match self.sender.try_reserve() {
-                Ok(permit) => {
-                    let segment = self.buf.swap_remove(&self.recv_seq).unwrap();
-                    permit.send(segment)
-                }
-                Err(Closed(())) => return Err(Protocol::Tcp(Segment::Rst)),
-                Err(Full(())) => {
-                    self.recv_seq -= 1;
-                    break;
+            match segment {
+                SequencedSegment::Data(bytes) => match sender.try_send(bytes) {
+                    Ok(()) => {}
+                    Err(Closed(_)) => return Err(Protocol::Tcp(Segment::Rst)),
+                    Err(Full(bytes)) => {
+                        self.buf
+                            .insert(self.recv_seq + 1, SequencedSegment::Data(bytes));
+                        break;
+                    }
+                },
+                SequencedSegment::Fin => {
+                    if sender.is_closed() {
+                        return Err(Protocol::Tcp(Segment::Rst));
+                    }
+                    self.sender = None;
                 }
             }
+
+            self.recv_seq += 1;
         }
 
         Ok(())
@@ -478,7 +506,7 @@ impl Tcp {
     pub(crate) fn new_stream(
         &mut self,
         pair: SocketPair,
-    ) -> (mpsc::Receiver<SequencedSegment>, BidiFlowControl) {
+    ) -> (mpsc::Receiver<Bytes>, BidiFlowControl) {
         let (sock, rx, bidi) = StreamSocket::new(self.socket_capacity);
 
         let exists = self.sockets.insert(pair, sock);
@@ -541,11 +569,7 @@ impl Tcp {
                 None => return Err(Protocol::Tcp(Segment::Rst)),
             },
             Segment::Rst => {
-                if self.sockets.get(&SocketPair::new(dst, src)).is_some() {
-                    self.sockets
-                        .swap_remove(&SocketPair::new(dst, src))
-                        .unwrap();
-                }
+                self.reset_stream(SocketPair::new(dst, src));
             }
         };
 
@@ -566,10 +590,32 @@ impl Tcp {
             .unwrap_or(false)
     }
 
+    pub(crate) fn stream_state(&self, pair: SocketPair) -> StreamState {
+        self.sockets
+            .get(&pair)
+            .map_or(StreamState::Reset, StreamSocket::state)
+    }
+
+    pub(crate) fn poll_stream_state(
+        &mut self,
+        pair: SocketPair,
+        cx: &mut Context<'_>,
+    ) -> StreamState {
+        let Some(sock) = self.sockets.get_mut(&pair) else {
+            return StreamState::Reset;
+        };
+        sock.reset_waker = Some(cx.waker().clone());
+        sock.state()
+    }
+
     /// Remove the stream socket without decrementing the half-close refcount.
     /// Used when sending RST: the connection is torn down immediately.
     pub(crate) fn reset_stream(&mut self, pair: SocketPair) {
-        self.sockets.swap_remove(&pair);
+        if let Some(sock) = self.sockets.swap_remove(&pair) {
+            if let Some(waker) = sock.reset_waker {
+                waker.wake();
+            }
+        }
     }
 
     pub(crate) fn close_stream_half(&mut self, pair: SocketPair) {
