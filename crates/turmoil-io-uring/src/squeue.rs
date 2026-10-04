@@ -32,12 +32,13 @@ impl Entry {
         self
     }
 
-    /// Replace the per-op flags. Most flags are rejected at submit time
+    /// Add `f` to the per-op flags, keeping those already set, as the real
+    /// crate's `Entry::flags` does. Most flags are rejected at submit time
     /// (see module docs). `ASYNC` is accepted: it marks the op as issued
     /// blocking from a worker thread, which exempts it from the
     /// `eagain_probability` fault.
     pub fn flags(mut self, f: Flags) -> Self {
-        self.flags = f;
+        self.flags |= f;
         self
     }
 }

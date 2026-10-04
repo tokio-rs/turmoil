@@ -558,6 +558,35 @@ fn eagain_probability_fails_nonblocking_ops() -> Result {
 }
 
 #[test]
+fn entry_flags_accumulate() -> Result {
+    // `Entry::flags` adds to the flags already set, as io-uring's does, so
+    // an op built with one flag and marked ASYNC later keeps both: here an
+    // IO_LINK the submit path rejects, which it still must after ASYNC.
+    let mut sim = Builder::new().build();
+    sim.client("c", async {
+        create_dir_all(TEST_DIR)?;
+        let file = open_rw(&format!("{TEST_DIR}/flags"))?;
+        let fd = types::Fd(file.as_raw_fd());
+        let mut ring = IoUring::new(4).expect("new ring");
+        let payload = b"abc".to_vec();
+        let w = opcode::Write::new(fd, payload.as_ptr(), payload.len() as u32)
+            .build()
+            .flags(squeue::Flags::IO_LINK)
+            .flags(squeue::Flags::ASYNC)
+            .user_data(1);
+        unsafe {
+            ring.submission().push(&w).expect("push w");
+        }
+        ring.submit().expect("submit w");
+        let cqe = drain_one(&mut ring).await;
+        assert_eq!(cqe.result(), -22, "IO_LINK survives a later .flags(ASYNC)");
+        drop(file);
+        Ok(())
+    });
+    sim.run()
+}
+
+#[test]
 fn eagain_probability_spares_async_ops() -> Result {
     let mut builder = Builder::new();
     builder.fs().eagain_probability(1.0);
