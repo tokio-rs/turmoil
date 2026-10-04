@@ -514,6 +514,91 @@ fn short_read_probability_truncates() -> Result {
 }
 
 #[test]
+fn eagain_probability_fails_nonblocking_ops() -> Result {
+    let mut builder = Builder::new();
+    builder.fs().eagain_probability(1.0);
+    let mut sim = builder.build();
+    sim.client("c", async {
+        create_dir_all(TEST_DIR)?;
+        let file = open_rw(&format!("{TEST_DIR}/eagain"))?;
+        let fd = types::Fd(file.as_raw_fd());
+        let mut ring = IoUring::new(4).expect("new ring");
+
+        let payload = b"abcdef".to_vec();
+        let w = opcode::Write::new(fd, payload.as_ptr(), payload.len() as u32)
+            .build()
+            .user_data(1);
+        unsafe {
+            ring.submission().push(&w).expect("push w");
+        }
+        ring.submit().expect("submit w");
+        let cqe = drain_one(&mut ring).await;
+        assert_eq!(cqe.result(), -11, "expected -EAGAIN on a nonblocking write");
+        assert_eq!(
+            file.metadata()?.len(),
+            0,
+            "a write that failed with EAGAIN changes nothing"
+        );
+
+        let mut buf = vec![0xAAu8; payload.len()];
+        let r = opcode::Read::new(fd, buf.as_mut_ptr(), buf.len() as u32)
+            .build()
+            .user_data(2);
+        unsafe {
+            ring.submission().push(&r).expect("push r");
+        }
+        ring.submit().expect("submit r");
+        let cqe = drain_one(&mut ring).await;
+        assert_eq!(cqe.result(), -11, "expected -EAGAIN on a nonblocking read");
+        assert_eq!(buf, vec![0xAAu8; payload.len()], "the buffer is untouched");
+        drop(file);
+        Ok(())
+    });
+    sim.run()
+}
+
+#[test]
+fn eagain_probability_spares_async_ops() -> Result {
+    let mut builder = Builder::new();
+    builder.fs().eagain_probability(1.0);
+    let mut sim = builder.build();
+    sim.client("c", async {
+        create_dir_all(TEST_DIR)?;
+        let file = open_rw(&format!("{TEST_DIR}/eagain_async"))?;
+        let fd = types::Fd(file.as_raw_fd());
+        let mut ring = IoUring::new(4).expect("new ring");
+
+        let payload = b"abcdef".to_vec();
+        let w = opcode::Write::new(fd, payload.as_ptr(), payload.len() as u32)
+            .build()
+            .flags(squeue::Flags::ASYNC)
+            .user_data(1);
+        unsafe {
+            ring.submission().push(&w).expect("push w");
+        }
+        ring.submit().expect("submit w");
+        let cqe = drain_one(&mut ring).await;
+        assert_eq!(cqe.result(), payload.len() as i32);
+
+        let mut buf = vec![0u8; payload.len()];
+        let r = opcode::Read::new(fd, buf.as_mut_ptr(), buf.len() as u32)
+            .build()
+            .flags(squeue::Flags::ASYNC)
+            .user_data(2);
+        unsafe {
+            ring.submission().push(&r).expect("push r");
+        }
+        ring.submit().expect("submit r");
+        let cqe = drain_one(&mut ring).await;
+        assert_eq!(cqe.result(), payload.len() as i32);
+        assert_eq!(buf, payload);
+        drop(file);
+        Ok(())
+    });
+    sim.run()
+}
+
+#[test]
 fn crash_drops_unsynced_writes_submitted_via_ring() -> Result {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;

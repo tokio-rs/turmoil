@@ -360,6 +360,7 @@ impl PageCacheConfig {
 /// - `io_error_probability`: 0.0 (no random I/O errors)
 /// - `corruption_probability`: 0.0 (no silent corruption)
 /// - `short_read_probability`: 0.0 (positional reads always return the full count)
+/// - `eagain_probability`: 0.0 (io_uring reads and writes never complete with `EAGAIN`)
 /// - `noatime`: true (access time not updated on reads)
 /// - `direct_io_alignment`: 512 (minimum kernel alignment for O_DIRECT)
 /// - `block_size`: None (writes are atomic, no torn writes)
@@ -377,6 +378,9 @@ pub struct FsConfig {
     pub(crate) corruption_probability: f64,
     /// Probability that a positional read returns a short count (0.0 - 1.0)
     pub(crate) short_read_probability: f64,
+    /// Probability that a nonblocking io_uring read or write completes with
+    /// `EAGAIN` (0.0 - 1.0)
+    pub(crate) eagain_probability: f64,
     /// Whether to use noatime semantics (atime not updated on reads)
     pub(crate) noatime: bool,
     /// Required alignment in bytes for O_DIRECT I/O (buffer pointer, offset, and length)
@@ -397,6 +401,7 @@ impl Default for FsConfig {
             io_error_probability: 0.0,
             corruption_probability: 0.0,
             short_read_probability: 0.0,
+            eagain_probability: 0.0,
             noatime: true,
             direct_io_alignment: 512,
             block_size: None,
@@ -490,6 +495,36 @@ impl FsConfig {
             "short_read_probability must be between 0.0 and 1.0"
         );
         self.short_read_probability = value;
+        self
+    }
+
+    /// Set the probability that an io_uring read or write completes with
+    /// `EAGAIN` (0.0 - 1.0).
+    ///
+    /// Default: 0.0 (no `EAGAIN` completions).
+    ///
+    /// io_uring issues a regular-file read or write nonblocking first. When
+    /// the block layer has no request to give a nonblocking bio (the device
+    /// queue's tags are all in use), the bio fails with `EAGAIN`; the kernel
+    /// reissues the op itself only from some completion contexts (before
+    /// Linux 6.14, only from the submitting task), and otherwise posts
+    /// `-EAGAIN` in the CQE. When set, a read or write submitted without
+    /// `IOSQE_ASYNC` may complete that way. The op has no effect: a read
+    /// leaves the buffer and a write leaves the file untouched.
+    ///
+    /// An op submitted with `IOSQE_ASYNC` is exempt. The kernel issues it
+    /// from a worker thread, blocking, so its bio waits for a request
+    /// instead of failing.
+    ///
+    /// Affects only the io_uring simulation: a blocking `pread`/`pwrite`
+    /// on a regular file never returns `EAGAIN`, so the std and tokio shims
+    /// ignore it.
+    pub fn eagain_probability(&mut self, value: f64) -> &mut Self {
+        assert!(
+            (0.0..=1.0).contains(&value),
+            "eagain_probability must be between 0.0 and 1.0"
+        );
+        self.eagain_probability = value;
         self
     }
 
@@ -944,6 +979,8 @@ pub struct FsState {
     pub corruption_probability: f64,
     /// Probability that a positional read returns a short count (0.0 - 1.0)
     pub short_read_probability: f64,
+    /// See [`FsConfig::eagain_probability`].
+    pub eagain_probability: f64,
     /// Required alignment in bytes for O_DIRECT I/O
     pub direct_io_alignment: u64,
     /// Block size for torn write simulation (None = atomic writes)
@@ -985,6 +1022,7 @@ impl FsState {
             io_error_probability: config.io_error_probability,
             corruption_probability: config.corruption_probability,
             short_read_probability: config.short_read_probability,
+            eagain_probability: config.eagain_probability,
             direct_io_alignment: config.direct_io_alignment,
             block_size: config.block_size,
             io_latency: config.io_latency,
@@ -2341,6 +2379,12 @@ impl FsBuilder {
     /// Set the probability of short reads (0.0–1.0).
     pub fn short_read_probability(mut self, value: f64) -> Self {
         self.config.short_read_probability(value);
+        self
+    }
+
+    /// Set the probability of `EAGAIN` io_uring completions (0.0–1.0).
+    pub fn eagain_probability(mut self, value: f64) -> Self {
+        self.config.eagain_probability(value);
         self
     }
 

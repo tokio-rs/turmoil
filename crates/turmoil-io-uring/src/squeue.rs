@@ -33,7 +33,9 @@ impl Entry {
     }
 
     /// Replace the per-op flags. Most flags are rejected at submit time
-    /// (see module docs); `ASYNC` is accepted as a no-op.
+    /// (see module docs). `ASYNC` is accepted: it marks the op as issued
+    /// blocking from a worker thread, which exempts it from the
+    /// `eagain_probability` fault.
     pub fn flags(mut self, f: Flags) -> Self {
         self.flags = f;
         self
@@ -58,6 +60,12 @@ impl Flags {
     /// crate's `Flags` type.
     pub const fn empty() -> Self {
         Self(0)
+    }
+
+    /// Whether every flag in `other` is set.
+    #[cfg_attr(not(feature = "fs"), allow(dead_code))]
+    pub(crate) fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
     }
 
     /// Whether any flag the simulation rejects is set.

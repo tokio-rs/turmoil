@@ -180,12 +180,16 @@ pub(crate) enum PendingApply {
         ptr: *mut u8,
         len: u32,
         offset: u64,
+        /// Submitted without `IOSQE_ASYNC`, so open to `eagain_probability`.
+        nonblocking: bool,
     },
     Write {
         fd: RawFd,
         ptr: *const u8,
         len: u32,
         offset: u64,
+        /// As for `Read`.
+        nonblocking: bool,
     },
     Fsync {
         fd: RawFd,
@@ -210,13 +214,15 @@ impl PendingApply {
                 ptr,
                 len,
                 offset,
-            } => exec_read(fs, rng, fd, ptr, len, offset),
+                nonblocking,
+            } => exec_read(fs, rng, fd, ptr, len, offset, nonblocking),
             PendingApply::Write {
                 fd,
                 ptr,
                 len,
                 offset,
-            } => exec_write(fs, rng, fd, ptr, len, offset, now),
+                nonblocking,
+            } => exec_write(fs, rng, fd, ptr, len, offset, nonblocking, now),
             PendingApply::Fsync { fd } => exec_fsync(fs, rng, fd),
         }
     }
@@ -229,7 +235,9 @@ impl PendingApply {
 // the [`turmoil_fs::shim`] surface does. There is one source of truth
 // for fs behavior: ops submitted via io_uring observe the same
 // io_error_probability / short_read_probability / corruption_probability
-// / sync_probability the sync and tokio shims observe.
+// / sync_probability the sync and tokio shims observe. One knob is io_uring's
+// alone: eagain_probability, for a nonblocking issue the block layer refused
+// (see `turmoil_fs::FsConfig::eagain_probability`).
 //
 // # Divergence from real Linux: fd lifetime
 //
@@ -248,6 +256,7 @@ fn exec_read(
     ptr: *mut u8,
     len: u32,
     offset: u64,
+    nonblocking: bool,
 ) -> i32 {
     let Some(path) = fs.open_handles.get(&fd).cloned() else {
         return -EBADF;
@@ -258,6 +267,12 @@ fn exec_read(
     // misaligned O_DIRECT op returns -EINVAL.
     if fs.direct_io_fds.contains(&fd) && !direct_io_aligned(fs, ptr as usize, offset, len) {
         return -EINVAL;
+    }
+
+    // eagain_probability: a nonblocking issue the block layer refused,
+    // surfaced before touching the buf.
+    if nonblocking && sample_prob(rng, fs.eagain_probability) {
+        return -EAGAIN;
     }
 
     // io_error_probability: surfaces as -EIO before touching the buf.
@@ -294,6 +309,8 @@ fn exec_read(
     n as i32
 }
 
+// The op's fields, the fs and rng it runs against, and the time it lands.
+#[allow(clippy::too_many_arguments)]
 fn exec_write(
     fs: &mut FsState,
     rng: &mut dyn RngCore,
@@ -301,6 +318,7 @@ fn exec_write(
     ptr: *const u8,
     len: u32,
     offset: u64,
+    nonblocking: bool,
     now: Duration,
 ) -> i32 {
     let Some(path) = fs.open_handles.get(&fd).cloned() else {
@@ -310,6 +328,11 @@ fn exec_write(
     // O_DIRECT alignment, see exec_read for the rationale.
     if fs.direct_io_fds.contains(&fd) && !direct_io_aligned(fs, ptr as usize, offset, len) {
         return -EINVAL;
+    }
+
+    // eagain_probability: as for reads, and before mutating state.
+    if nonblocking && sample_prob(rng, fs.eagain_probability) {
+        return -EAGAIN;
     }
 
     // io_error_probability: surface -EIO before mutating state.
@@ -385,6 +408,7 @@ fn direct_io_aligned(fs: &FsState, ptr: usize, offset: u64, len: u32) -> bool {
 
 const EBADF: i32 = 9;
 const EIO: i32 = 5;
+const EAGAIN: i32 = 11;
 const ECANCELED: i32 = 125;
 const ENOENT: i32 = 2;
 const ENOSPC: i32 = 28;

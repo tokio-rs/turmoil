@@ -2,7 +2,7 @@
 
 use super::host::{with_fs_and_io_uring, IoUringHostState};
 use super::sim::PendingApply;
-use super::squeue::{Entry, OpKind};
+use super::squeue::{Entry, Flags, OpKind};
 use super::types::SubmitArgs;
 use std::io;
 use std::os::fd::RawFd;
@@ -106,6 +106,10 @@ fn schedule_pending(
             ring.post_immediate_error(entry.user_data, libc_einval(), now);
             continue;
         }
+        // Without IOSQE_ASYNC the kernel issues a read or write nonblocking
+        // first, which is what can fail with EAGAIN; with it, a worker
+        // issues it blocking.
+        let nonblocking = !entry.flags.contains(Flags::ASYNC);
         match entry.op {
             OpKind::Read {
                 fd,
@@ -152,6 +156,7 @@ fn schedule_pending(
                         ptr,
                         len,
                         offset,
+                        nonblocking,
                     },
                 );
             }
@@ -183,6 +188,7 @@ fn schedule_pending(
                         ptr,
                         len,
                         offset,
+                        nonblocking,
                     },
                 );
             }
