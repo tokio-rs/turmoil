@@ -9,7 +9,7 @@ use std::{
         atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
     },
-    task::{ready, Context, Poll, Waker},
+    task::{ready, Context, Poll, Wake, Waker},
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite, Interest, ReadBuf, Ready},
@@ -52,12 +52,14 @@ impl TcpStream {
                 is_closed: false,
             }),
             flow_control: flow_control.read,
+            waiters: Arc::default(),
         };
 
         let write_half = WriteHalf {
             pair,
             is_shutdown: false,
             flow_control: flow_control.write,
+            waiters: Arc::default(),
         };
 
         Self {
@@ -189,7 +191,7 @@ impl TcpStream {
     }
 
     /// Waits for any of the requested readiness states, without consuming
-    /// buffered data. Unlike tokio this takes `&mut self`, as reads and peeks do.
+    /// buffered data.
     ///
     /// As in tokio, only flags for the requested interests are reported. The
     /// peer closing its write half is reported as `READ_CLOSED`, even while
@@ -202,12 +204,38 @@ impl TcpStream {
     /// # Cancel safety
     ///
     /// This method is cancel safe.
-    pub async fn ready(&mut self, interest: Interest) -> Result<Ready> {
+    pub async fn ready(&self, interest: Interest) -> Result<Ready> {
         poll_fn(|cx| self.poll_ready(cx, interest)).await
     }
 
-    /// Polls for any of the requested readiness states. See [`Self::ready`].
-    pub fn poll_ready(&mut self, cx: &mut Context<'_>, interest: Interest) -> Poll<Result<Ready>> {
+    /// Waits for the socket to become readable.
+    ///
+    /// This function is equivalent to `ready(Interest::READABLE)` and is usually
+    /// paired with `try_read_vectored()`. As in tokio, it also completes once
+    /// the peer has closed or reset the connection, leaving the EOF or error
+    /// to the read that follows.
+    ///
+    /// # Cancel safety
+    ///
+    /// This method is cancel safe. Once a readiness event occurs, the method
+    /// will continue to return immediately until the readiness event is
+    /// consumed by an attempt to read that fails with `WouldBlock` or
+    /// `Poll::Pending`.
+    pub async fn readable(&self) -> Result<()> {
+        poll_fn(|cx| self.poll_read_ready(cx)).await
+    }
+
+    /// Polls for read readiness. See [`Self::readable`].
+    pub fn poll_read_ready(&self, cx: &mut Context<'_>) -> Poll<Result<()>> {
+        self.poll_ready(cx, Interest::READABLE).map_ok(|_| ())
+    }
+
+    /// Polls for write readiness. See [`Self::writable`].
+    pub fn poll_write_ready(&self, cx: &mut Context<'_>) -> Poll<Result<()>> {
+        self.write_half.poll_writable(cx)
+    }
+
+    fn poll_ready(&self, cx: &mut Context<'_>, interest: Interest) -> Poll<Result<Ready>> {
         if interest != Interest::READABLE
             && interest != Interest::WRITABLE
             && interest != (Interest::READABLE | Interest::WRITABLE)
@@ -218,16 +246,13 @@ impl TcpStream {
             )));
         }
 
-        let state = World::current(|world| {
-            world
-                .current_host_mut()
-                .tcp
-                .poll_stream_state(*self.read_half.pair, cx)
-        });
-
         let mut ready = Ready::EMPTY;
 
         if interest.is_readable() {
+            // FIN and RST both drop the channel sender, which wakes the read
+            // side, so read interest must not claim the socket's reset waker.
+            let state =
+                World::current(|world| world.current_host().tcp.stream_state(*self.read_half.pair));
             if state != StreamState::Open {
                 ready |= Ready::READABLE | Ready::READ_CLOSED;
             } else if let Poll::Ready(read) = self.read_half.poll_read_ready(cx) {
@@ -256,14 +281,14 @@ impl TcpStream {
     /// returns the number of bytes peeked.
     ///
     /// Successive calls return the same data.
-    pub async fn peek(&mut self, buf: &mut [u8]) -> Result<usize> {
+    pub async fn peek(&self, buf: &mut [u8]) -> Result<usize> {
         self.read_half.peek(buf).await
     }
 
     /// Attempts to receive data on the socket, without removing that data from
     /// the queue, registering the current task for wakeup if data is not yet
     /// available.
-    pub fn poll_peek(&mut self, cx: &mut Context<'_>, buf: &mut ReadBuf) -> Poll<Result<usize>> {
+    pub fn poll_peek(&self, cx: &mut Context<'_>, buf: &mut ReadBuf) -> Poll<Result<usize>> {
         self.read_half.poll_peek(cx, buf)
     }
 }
@@ -272,6 +297,7 @@ pub(crate) struct ReadHalf {
     pub(crate) pair: Arc<SocketPair>,
     rx: Mutex<Rx>,
     flow_control: Arc<FlowControl>,
+    waiters: Arc<WakerSet>,
 }
 
 struct Rx {
@@ -346,13 +372,13 @@ impl ReadHalf {
         }
     }
 
-    fn poll_read_priv(&mut self, cx: &mut Context<'_>, buf: &mut ReadBuf) -> Poll<Result<()>> {
+    fn poll_read_priv(&self, cx: &mut Context<'_>, buf: &mut ReadBuf) -> Poll<Result<()>> {
         if buf.capacity() == 0 {
             return Poll::Ready(Ok(()));
         }
 
-        ready!(self.poll_read_ready(cx))?;
-        let rx = self.rx.get_mut().unwrap();
+        let mut rx = self.rx.lock().unwrap();
+        ready!(self.poll_fill(&mut rx, cx))?;
         if let Some(bytes) = rx.buffer.take() {
             rx.buffer = Self::put_slice(bytes, buf);
         }
@@ -378,17 +404,14 @@ impl ReadHalf {
         }
     }
 
-    pub(crate) fn poll_peek(
-        &mut self,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf,
-    ) -> Poll<Result<usize>> {
+    pub(crate) fn poll_peek(&self, cx: &mut Context<'_>, buf: &mut ReadBuf) -> Poll<Result<usize>> {
         if buf.capacity() == 0 {
             return Poll::Ready(Ok(0));
         }
 
-        ready!(self.poll_read_ready(cx))?;
-        let Some(bytes) = &self.rx.get_mut().unwrap().buffer else {
+        let mut rx = self.rx.lock().unwrap();
+        ready!(self.poll_fill(&mut rx, cx))?;
+        let Some(bytes) = &rx.buffer else {
             return Poll::Ready(Ok(0));
         };
         let len = std::cmp::min(bytes.len(), buf.remaining());
@@ -397,27 +420,34 @@ impl ReadHalf {
         Poll::Ready(Ok(len))
     }
 
-    pub(crate) async fn peek(&mut self, buf: &mut [u8]) -> Result<usize> {
+    pub(crate) async fn peek(&self, buf: &mut [u8]) -> Result<usize> {
         let mut buf = ReadBuf::new(buf);
         poll_fn(|cx| self.poll_peek(cx, &mut buf)).await
     }
 
-    fn poll_read_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<()>> {
-        let rx = self.rx.get_mut().unwrap();
+    fn poll_read_ready(&self, cx: &mut Context<'_>) -> Poll<Result<()>> {
+        let mut rx = self.rx.lock().unwrap();
+        self.poll_fill(&mut rx, cx)
+    }
+
+    /// Stashes the next in-order segment in `rx.buffer` unless one is already
+    /// there or EOF has been seen.
+    fn poll_fill(&self, rx: &mut Rx, cx: &mut Context<'_>) -> Poll<Result<()>> {
         if rx.is_closed || rx.buffer.is_some() {
             return Poll::Ready(Ok(()));
         }
 
-        if let SequencedSegment::Data(bytes) = ready!(self.poll_recv(cx))? {
-            self.rx.get_mut().unwrap().buffer = Some(bytes);
+        if let SequencedSegment::Data(bytes) = ready!(self.poll_recv(rx, cx))? {
+            rx.buffer = Some(bytes);
         }
 
         Poll::Ready(Ok(()))
     }
 
-    fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Result<SequencedSegment>> {
-        let rx = self.rx.get_mut().unwrap();
-        let segment = match ready!(rx.recv.poll_recv(cx)) {
+    fn poll_recv(&self, rx: &mut Rx, cx: &mut Context<'_>) -> Poll<Result<SequencedSegment>> {
+        let waker = self.waiters.register(cx);
+        let mut cx = Context::from_waker(&waker);
+        let segment = match ready!(rx.recv.poll_recv(&mut cx)) {
             Some(bytes) => {
                 self.flow_control.release();
                 SequencedSegment::Data(bytes)
@@ -456,6 +486,39 @@ pub(crate) struct WriteHalf {
     /// FIN sent, closed for writes
     is_shutdown: bool,
     flow_control: Arc<FlowControl>,
+    waiters: Arc<WakerSet>,
+}
+
+/// Tasks waiting on one half of a stream.
+///
+/// The sources a half waits on (the mpsc receiver, flow-control credits, the
+/// host's reset waker) each hold a single waker, so a waker for the set is
+/// registered with them instead and fans wakeups out to every caller.
+#[derive(Default)]
+struct WakerSet(Mutex<Vec<Waker>>);
+
+impl WakerSet {
+    /// Registers the caller and returns the waker to poll sources with.
+    fn register(self: &Arc<Self>, cx: &Context<'_>) -> Waker {
+        let mut wakers = self.0.lock().unwrap();
+        if !wakers.iter().any(|w| w.will_wake(cx.waker())) {
+            wakers.push(cx.waker().clone());
+        }
+        Waker::from(self.clone())
+    }
+}
+
+impl Wake for WakerSet {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        let wakers = std::mem::take(&mut *self.0.lock().unwrap());
+        for waker in wakers {
+            waker.wake();
+        }
+    }
 }
 
 impl WriteHalf {
@@ -492,11 +555,13 @@ impl WriteHalf {
             )));
         }
 
+        let waker = self.waiters.register(cx);
+        let mut cx = Context::from_waker(&waker);
         let state = World::current(|world| {
             world
                 .current_host_mut()
                 .tcp
-                .poll_stream_state(*self.pair, cx)
+                .poll_stream_state(*self.pair, &mut cx)
         });
         if state == StreamState::Reset {
             return Poll::Ready(Err(io::Error::new(
@@ -681,7 +746,7 @@ impl Debug for WriteHalf {
 
 impl AsyncRead for ReadHalf {
     fn poll_read(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &mut ReadBuf,
     ) -> Poll<Result<()>> {

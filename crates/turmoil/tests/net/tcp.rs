@@ -26,7 +26,7 @@ fn try_read_vectored_scatter_and_partial_reads() -> Result {
     let mut sim = Builder::new().build();
     sim.client("client", async {
         let listener = TcpListener::bind(("127.0.0.1", PORT)).await?;
-        let (mut client, (mut server, _)) =
+        let (mut client, (server, _)) =
             tokio::try_join!(TcpStream::connect(("127.0.0.1", PORT)), listener.accept())?;
         let mut first = [b'!'; 2];
         let mut second = [b'!'; 3];
@@ -194,7 +194,7 @@ fn try_read_vectored_reports_reset() -> Result {
     let mut sim = Builder::new().build();
     sim.client("client", async {
         let listener = TcpListener::bind(("127.0.0.1", PORT)).await?;
-        let (mut client, (mut server, _)) =
+        let (client, (mut server, _)) =
             tokio::try_join!(TcpStream::connect(("127.0.0.1", PORT)), listener.accept())?;
         server.write_all(b"unread").await?;
         client.peek(&mut [0]).await?;
@@ -1238,7 +1238,7 @@ fn ready_rejects_unsupported_interests(interest: Interest) -> Result {
     });
 
     sim.client("client", async move {
-        let mut s = TcpStream::connect(("server", PORT)).await?;
+        let s = TcpStream::connect(("server", PORT)).await?;
         assert_error_kind(
             timeout(Duration::from_secs(1), s.ready(interest)).await?,
             ErrorKind::InvalidInput,
@@ -1302,12 +1302,204 @@ fn ready_writable() -> Result {
     });
 
     sim.client("client", async move {
-        let mut s = TcpStream::connect(("server", PORT)).await?;
+        let s = TcpStream::connect(("server", PORT)).await?;
 
         let ready = s.ready(Interest::WRITABLE).await?;
         assert!(ready.is_writable());
         assert!(!ready.is_readable());
 
+        Ok(())
+    });
+
+    sim.run()
+}
+
+#[test]
+fn readable_then_try_read_vectored() -> Result {
+    let mut sim = Builder::new().build();
+
+    let notify = Rc::new(Notify::new());
+    let wait = notify.clone();
+
+    sim.client("server", async move {
+        let listener = bind().await?;
+        let (mut s, _) = listener.accept().await?;
+        wait.notified().await;
+        s.write_all(b"ab").await?;
+        s.shutdown().await?;
+        Ok(())
+    });
+
+    sim.client("client", async move {
+        // Readiness and peeks take `&self`, as in tokio.
+        let s = TcpStream::connect(("server", PORT)).await?;
+        let mut buf = [0; 2];
+
+        assert!(timeout(Duration::from_secs(1), s.readable()).await.is_err());
+        notify.notify_one();
+
+        s.readable().await?;
+        assert_eq!(2, s.peek(&mut buf).await?);
+        assert_eq!(2, s.try_read_vectored(&mut [IoSliceMut::new(&mut buf)])?);
+        assert_eq!(b"ab", &buf);
+
+        // EOF is readable, and the read that follows reports it.
+        s.readable().await?;
+        assert_eq!(0, s.try_read_vectored(&mut [IoSliceMut::new(&mut buf)])?);
+        Ok(())
+    });
+
+    sim.run()
+}
+
+#[test]
+fn readable_completes_on_reset() -> Result {
+    let mut sim = Builder::new().build();
+
+    sim.client("server", async {
+        let listener = bind().await?;
+        let (s, _) = listener.accept().await?;
+        sleep(Duration::from_secs(1)).await;
+        drop(s);
+        Ok(())
+    });
+
+    sim.client("client", async move {
+        let mut s = TcpStream::connect(("server", PORT)).await?;
+        s.write_all(b"unread").await?;
+
+        // As in tokio, readiness reports no error; the read that follows does.
+        timeout(Duration::from_secs(3), s.readable()).await??;
+        assert_error_kind(
+            s.try_read_vectored(&mut [IoSliceMut::new(&mut [0; 1])]),
+            ErrorKind::ConnectionReset,
+        );
+        Ok(())
+    });
+
+    sim.run()
+}
+
+#[test]
+fn poll_ready_fns_match_async_fns() -> Result {
+    let mut sim = Builder::new().build();
+
+    sim.client("server", async {
+        let listener = bind().await?;
+        let (mut s, _) = listener.accept().await?;
+        s.write_u8(1).await?;
+        s.shutdown().await?;
+        Ok(())
+    });
+
+    sim.client("client", async move {
+        let s = TcpStream::connect(("server", PORT)).await?;
+        future::poll_fn(|cx| s.poll_write_ready(cx)).await?;
+        future::poll_fn(|cx| s.poll_read_ready(cx)).await?;
+        assert_eq!(1, s.try_read_vectored(&mut [IoSliceMut::new(&mut [0; 1])])?);
+        future::poll_fn(|cx| s.poll_read_ready(cx)).await?;
+        assert!(s.ready(Interest::READABLE).await?.is_read_closed());
+        Ok(())
+    });
+
+    sim.run()
+}
+
+#[test]
+fn concurrent_readable_and_writable_waiters_observe_reset() -> Result {
+    let mut sim = Builder::new().tcp_capacity(1).build();
+
+    sim.client("server", async {
+        let listener = bind().await?;
+        let (s, _) = listener.accept().await?;
+        sleep(Duration::from_secs(1)).await;
+        drop(s);
+        Ok(())
+    });
+
+    sim.client("client", async move {
+        let mut s = TcpStream::connect(("server", PORT)).await?;
+        // Exhaust send credits so only the reset can wake the write waiter.
+        s.write_all(b"one").await?;
+
+        let s = std::sync::Arc::new(s);
+        let w = s.clone();
+        let writable = tokio::spawn(async move { w.writable().await });
+        tokio::task::yield_now().await;
+        // Polled after the write waiter; must not steal its reset wakeup.
+        let r = s.clone();
+        let readable = tokio::spawn(async move { r.readable().await });
+
+        let (write, read) = timeout(Duration::from_secs(3), async {
+            tokio::join!(writable, readable)
+        })
+        .await?;
+        assert_error_kind(write?, ErrorKind::BrokenPipe);
+        read??;
+        Ok(())
+    });
+
+    sim.run()
+}
+
+#[test]
+fn two_readable_waiters_both_wake() -> Result {
+    let mut sim = Builder::new().build();
+
+    sim.client("client", async {
+        let listener = bind().await?;
+        let (reader, (mut writer, _)) =
+            tokio::try_join!(TcpStream::connect(("127.0.0.1", PORT)), listener.accept())?;
+        let reader = std::sync::Arc::new(reader);
+
+        let r = reader.clone();
+        let first = tokio::spawn(async move { r.readable().await });
+        tokio::task::yield_now().await;
+        let r = reader.clone();
+        let second = tokio::spawn(async move { r.ready(Interest::READABLE).await });
+        tokio::task::yield_now().await;
+
+        writer.write_all(b"x").await?;
+
+        let (first, second) = timeout(Duration::from_secs(1), async {
+            tokio::join!(first, second)
+        })
+        .await?;
+        first??;
+        assert!(second??.is_readable());
+        Ok(())
+    });
+
+    sim.run()
+}
+
+#[test]
+fn two_writable_waiters_both_wake() -> Result {
+    let mut sim = Builder::new().tcp_capacity(1).build();
+
+    sim.client("client", async {
+        let listener = bind().await?;
+        let (mut writer, (mut reader, _)) =
+            tokio::try_join!(TcpStream::connect(("127.0.0.1", PORT)), listener.accept())?;
+        // Exhaust send credits so both waiters block on the peer reading.
+        writer.write_all(b"x").await?;
+        let writer = std::sync::Arc::new(writer);
+
+        let w = writer.clone();
+        let first = tokio::spawn(async move { w.writable().await });
+        tokio::task::yield_now().await;
+        let w = writer.clone();
+        let second = tokio::spawn(async move { w.ready(Interest::WRITABLE).await });
+        tokio::task::yield_now().await;
+
+        assert_eq!(b'x', reader.read_u8().await?);
+
+        let (first, second) = timeout(Duration::from_secs(1), async {
+            tokio::join!(first, second)
+        })
+        .await?;
+        first??;
+        assert!(second??.is_writable());
         Ok(())
     });
 
@@ -1325,7 +1517,7 @@ fn peek_empty_buffer() -> Result {
     });
 
     sim.client("client", async move {
-        let mut s = TcpStream::connect(("server", PORT)).await?;
+        let s = TcpStream::connect(("server", PORT)).await?;
 
         // no-op peek with empty buffer
         let mut buf = [0; 0];
@@ -2254,7 +2446,7 @@ fn close_with_unread_data_sends_rst() -> Result {
     });
 
     sim.client("client", async move {
-        let mut s = TcpStream::connect(("server", PORT)).await?;
+        let s = TcpStream::connect(("server", PORT)).await?;
 
         // Block until at least one byte has arrived in our receive queue,
         // then drop without consuming it. Peek stashes the bytes in the rx
