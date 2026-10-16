@@ -10,7 +10,7 @@ use tokio::{
 };
 use tokio_test::{assert_pending, assert_ready_ok, task};
 use turmoil::{
-    net::{TcpListener, TcpStream},
+    net::{tcp::OwnedReadHalf, TcpListener, TcpStream},
     Builder, Result,
 };
 
@@ -381,6 +381,37 @@ fn multiple_waiters_observe_connection_close(reset: bool) -> Result {
             assert_eq!(0, assert_ready_ok!(peek_a.poll()));
             assert_eq!(0, assert_ready_ok!(peek_b.poll()));
         }
+        Ok(())
+    });
+    sim.run()
+}
+
+#[test]
+fn owned_read_half_poll_peek_accepts_mut_reference() -> Result {
+    let mut sim = Builder::new().build();
+    sim.client("client", async {
+        let (stream, mut peer) = pair().await?;
+        let (mut reader, _writer) = stream.into_split();
+        let mut bytes = [0; 1];
+        let mut buf = ReadBuf::new(&mut bytes);
+        // The explicit call checks the receiver type without auto-dereferencing
+        // a Pin. It must accept the same &mut receiver as Tokio.
+        let mut peek = task::spawn(poll_fn(|cx| {
+            OwnedReadHalf::poll_peek(&mut reader, cx, &mut buf)
+        }));
+        assert_pending!(peek.poll());
+        peer.write_all(b"x").await?;
+        sleep(Duration::from_secs(1)).await;
+        assert!(peek.is_woken());
+        assert_eq!(1, assert_ready_ok!(peek.poll()));
+        drop(peek);
+        assert_eq!(b"x", buf.filled());
+        // Peeking preserves the data for the next read.
+        assert_eq!(b'x', reader.read_u8().await?);
+
+        peer.shutdown().await?;
+        let mut buf = ReadBuf::new(&mut bytes);
+        assert_eq!(0, poll_fn(|cx| reader.poll_peek(cx, &mut buf)).await?);
         Ok(())
     });
     sim.run()

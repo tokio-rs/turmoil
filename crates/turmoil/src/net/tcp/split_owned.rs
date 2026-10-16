@@ -47,9 +47,8 @@ impl OwnedReadHalf {
     /// Attempts to receive data on the socket, without removing that data from
     /// the queue, registering the current task for wakeup if data is not yet
     /// available.
-    // TODO: take `&mut self` like tokio; changing the receiver is a breaking change.
     pub fn poll_peek(
-        self: Pin<&mut Self>,
+        &mut self,
         cx: &mut Context<'_>,
         buf: &mut ReadBuf,
     ) -> Poll<io::Result<usize>> {
