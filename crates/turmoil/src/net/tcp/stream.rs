@@ -1,7 +1,6 @@
 use bytes::{Buf, Bytes};
 use std::{
     fmt::Debug,
-    future::poll_fn,
     io::{self, Error, Result},
     net::SocketAddr,
     pin::Pin,
@@ -9,12 +8,12 @@ use std::{
         atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
     },
-    task::{ready, Context, Poll, Waker},
+    task::{ready, Context, Poll, Wake, Waker},
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite, Interest, ReadBuf, Ready},
     runtime::Handle,
-    sync::{mpsc, oneshot},
+    sync::{mpsc, oneshot, Notify},
     time::sleep,
 };
 
@@ -52,12 +51,14 @@ impl TcpStream {
                 is_closed: false,
             }),
             flow_control: flow_control.read,
+            waiters: Arc::default(),
         };
 
         let write_half = WriteHalf {
             pair,
             is_shutdown: false,
             flow_control: flow_control.write,
+            waiters: Arc::default(),
         };
 
         Self {
@@ -161,7 +162,10 @@ impl TcpStream {
     /// consumed by an attempt to write that fails with `WouldBlock` or
     /// `Poll::Pending`.
     pub async fn writable(&self) -> Result<()> {
-        poll_fn(|cx| self.write_half.poll_writable(cx)).await
+        self.write_half
+            .waiters
+            .wait_for(|| self.write_half.poll_writable())
+            .await
     }
 
     /// Splits a `TcpStream` into a read half and a write half, which can be used
@@ -189,7 +193,7 @@ impl TcpStream {
     }
 
     /// Waits for any of the requested readiness states, without consuming
-    /// buffered data. Unlike tokio this takes `&mut self`, as reads and peeks do.
+    /// buffered data.
     ///
     /// As in tokio, only flags for the requested interests are reported. The
     /// peer closing its write half is reported as `READ_CLOSED`, even while
@@ -202,12 +206,66 @@ impl TcpStream {
     /// # Cancel safety
     ///
     /// This method is cancel safe.
-    pub async fn ready(&mut self, interest: Interest) -> Result<Ready> {
-        poll_fn(|cx| self.poll_ready(cx, interest)).await
+    pub async fn ready(&self, interest: Interest) -> Result<Ready> {
+        loop {
+            let readable = self.read_half.waiters.notify.notified();
+            let writable = self.write_half.waiters.notify.notified();
+            tokio::pin!(readable, writable);
+            // Register before checking either source, including when the
+            // other interest makes ready() complete immediately.
+            if interest.is_readable() {
+                readable.as_mut().enable();
+            }
+            if interest.is_writable() {
+                writable.as_mut().enable();
+            }
+            if let Poll::Ready(result) = self.poll_ready(interest) {
+                return result;
+            }
+            tokio::select! {
+                biased;
+                _ = readable, if interest.is_readable() => {}
+                _ = writable, if interest.is_writable() => {}
+            }
+        }
     }
 
-    /// Polls for any of the requested readiness states. See [`Self::ready`].
-    pub fn poll_ready(&mut self, cx: &mut Context<'_>, interest: Interest) -> Poll<Result<Ready>> {
+    /// Waits for the socket to become readable.
+    ///
+    /// This function is equivalent to `ready(Interest::READABLE)` and is usually
+    /// paired with `try_read_vectored()`. As in tokio, it also completes once
+    /// the peer has closed or reset the connection, leaving the EOF or error
+    /// to the read that follows.
+    ///
+    /// # Cancel safety
+    ///
+    /// This method is cancel safe. Once a readiness event occurs, the method
+    /// will continue to return immediately until the readiness event is
+    /// consumed by an attempt to read that fails with `WouldBlock` or
+    /// `Poll::Pending`.
+    pub async fn readable(&self) -> Result<()> {
+        self.ready(Interest::READABLE).await.map(|_| ())
+    }
+
+    /// Polls for read readiness. See [`Self::readable`].
+    ///
+    /// Across calls to `poll_read_ready`, `poll_peek`, and `AsyncRead::poll_read`,
+    /// only the most recent waker is retained. Async waiters are independent.
+    pub fn poll_read_ready(&self, cx: &mut Context<'_>) -> Poll<Result<()>> {
+        self.read_half.waiters.register_poll(cx.waker());
+        self.poll_ready(Interest::READABLE).map_ok(|_| ())
+    }
+
+    /// Polls for write readiness. See [`Self::writable`].
+    ///
+    /// Across calls to `poll_write_ready` and `AsyncWrite::poll_write`, only the
+    /// most recent waker is retained. Async waiters are independent.
+    pub fn poll_write_ready(&self, cx: &mut Context<'_>) -> Poll<Result<()>> {
+        self.write_half.waiters.register_poll(cx.waker());
+        self.write_half.poll_writable()
+    }
+
+    fn poll_ready(&self, interest: Interest) -> Poll<Result<Ready>> {
         if interest != Interest::READABLE
             && interest != Interest::WRITABLE
             && interest != (Interest::READABLE | Interest::WRITABLE)
@@ -218,25 +276,22 @@ impl TcpStream {
             )));
         }
 
-        let state = World::current(|world| {
-            world
-                .current_host_mut()
-                .tcp
-                .poll_stream_state(*self.read_half.pair, cx)
-        });
-
         let mut ready = Ready::EMPTY;
 
         if interest.is_readable() {
+            // FIN and RST both drop the channel sender, which wakes the read
+            // side, so read interest must not claim the socket's reset waker.
+            let state =
+                World::current(|world| world.current_host().tcp.stream_state(*self.read_half.pair));
             if state != StreamState::Open {
                 ready |= Ready::READABLE | Ready::READ_CLOSED;
-            } else if let Poll::Ready(read) = self.read_half.poll_read_ready(cx) {
+            } else if let Poll::Ready(read) = self.read_half.poll_read_ready() {
                 read?;
                 ready |= Ready::READABLE;
             }
         }
         if interest.is_writable() {
-            if let Poll::Ready(write) = self.write_half.poll_writable(cx) {
+            if let Poll::Ready(write) = self.write_half.poll_writable() {
                 ready |= match write {
                     Ok(()) => Ready::WRITABLE,
                     Err(_) => Ready::WRITE_CLOSED,
@@ -256,14 +311,14 @@ impl TcpStream {
     /// returns the number of bytes peeked.
     ///
     /// Successive calls return the same data.
-    pub async fn peek(&mut self, buf: &mut [u8]) -> Result<usize> {
+    pub async fn peek(&self, buf: &mut [u8]) -> Result<usize> {
         self.read_half.peek(buf).await
     }
 
     /// Attempts to receive data on the socket, without removing that data from
     /// the queue, registering the current task for wakeup if data is not yet
     /// available.
-    pub fn poll_peek(&mut self, cx: &mut Context<'_>, buf: &mut ReadBuf) -> Poll<Result<usize>> {
+    pub fn poll_peek(&self, cx: &mut Context<'_>, buf: &mut ReadBuf) -> Poll<Result<usize>> {
         self.read_half.poll_peek(cx, buf)
     }
 }
@@ -272,6 +327,7 @@ pub(crate) struct ReadHalf {
     pub(crate) pair: Arc<SocketPair>,
     rx: Mutex<Rx>,
     flow_control: Arc<FlowControl>,
+    waiters: Arc<WakerSet>,
 }
 
 struct Rx {
@@ -346,13 +402,14 @@ impl ReadHalf {
         }
     }
 
-    fn poll_read_priv(&mut self, cx: &mut Context<'_>, buf: &mut ReadBuf) -> Poll<Result<()>> {
+    fn poll_read_priv(&self, cx: &mut Context<'_>, buf: &mut ReadBuf) -> Poll<Result<()>> {
         if buf.capacity() == 0 {
             return Poll::Ready(Ok(()));
         }
 
-        ready!(self.poll_read_ready(cx))?;
-        let rx = self.rx.get_mut().unwrap();
+        self.waiters.register_poll(cx.waker());
+        let mut rx = self.rx.lock().unwrap();
+        ready!(self.poll_fill(&mut rx))?;
         if let Some(bytes) = rx.buffer.take() {
             rx.buffer = Self::put_slice(bytes, buf);
         }
@@ -378,17 +435,19 @@ impl ReadHalf {
         }
     }
 
-    pub(crate) fn poll_peek(
-        &mut self,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf,
-    ) -> Poll<Result<usize>> {
+    pub(crate) fn poll_peek(&self, cx: &mut Context<'_>, buf: &mut ReadBuf) -> Poll<Result<usize>> {
+        self.waiters.register_poll(cx.waker());
+        self.poll_peek_priv(buf)
+    }
+
+    fn poll_peek_priv(&self, buf: &mut ReadBuf) -> Poll<Result<usize>> {
         if buf.capacity() == 0 {
             return Poll::Ready(Ok(0));
         }
 
-        ready!(self.poll_read_ready(cx))?;
-        let Some(bytes) = &self.rx.get_mut().unwrap().buffer else {
+        let mut rx = self.rx.lock().unwrap();
+        ready!(self.poll_fill(&mut rx))?;
+        let Some(bytes) = &rx.buffer else {
             return Poll::Ready(Ok(0));
         };
         let len = std::cmp::min(bytes.len(), buf.remaining());
@@ -397,27 +456,36 @@ impl ReadHalf {
         Poll::Ready(Ok(len))
     }
 
-    pub(crate) async fn peek(&mut self, buf: &mut [u8]) -> Result<usize> {
+    pub(crate) async fn peek(&self, buf: &mut [u8]) -> Result<usize> {
         let mut buf = ReadBuf::new(buf);
-        poll_fn(|cx| self.poll_peek(cx, &mut buf)).await
+        self.waiters
+            .wait_for(|| self.poll_peek_priv(&mut buf))
+            .await
     }
 
-    fn poll_read_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<()>> {
-        let rx = self.rx.get_mut().unwrap();
+    fn poll_read_ready(&self) -> Poll<Result<()>> {
+        let mut rx = self.rx.lock().unwrap();
+        self.poll_fill(&mut rx)
+    }
+
+    /// Stashes the next in-order segment in `rx.buffer` unless one is already
+    /// there or EOF has been seen.
+    fn poll_fill(&self, rx: &mut Rx) -> Poll<Result<()>> {
         if rx.is_closed || rx.buffer.is_some() {
             return Poll::Ready(Ok(()));
         }
 
-        if let SequencedSegment::Data(bytes) = ready!(self.poll_recv(cx))? {
-            self.rx.get_mut().unwrap().buffer = Some(bytes);
+        if let SequencedSegment::Data(bytes) = ready!(self.poll_recv(rx))? {
+            rx.buffer = Some(bytes);
         }
 
         Poll::Ready(Ok(()))
     }
 
-    fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Result<SequencedSegment>> {
-        let rx = self.rx.get_mut().unwrap();
-        let segment = match ready!(rx.recv.poll_recv(cx)) {
+    fn poll_recv(&self, rx: &mut Rx) -> Poll<Result<SequencedSegment>> {
+        let waker = Waker::from(self.waiters.clone());
+        let mut cx = Context::from_waker(&waker);
+        let segment = match ready!(rx.recv.poll_recv(&mut cx)) {
             Some(bytes) => {
                 self.flow_control.release();
                 SequencedSegment::Data(bytes)
@@ -456,6 +524,59 @@ pub(crate) struct WriteHalf {
     /// FIN sent, closed for writes
     is_shutdown: bool,
     flow_control: Arc<FlowControl>,
+    waiters: Arc<WakerSet>,
+}
+
+/// Tasks waiting on one half of a stream.
+///
+/// The sources a half waits on (the mpsc receiver, flow-control credits, the
+/// host's reset waker) each hold a single waker, so a waker for the set is
+/// registered with them instead. Notify owns the async registrations and
+/// removes them when futures complete or are cancelled. Poll-based operations
+/// share a separate, single waker, matching Tokio's poll_* contract.
+#[derive(Default)]
+struct WakerSet {
+    notify: Notify,
+    poll_waker: Mutex<Option<Waker>>,
+}
+
+impl WakerSet {
+    fn register_poll(&self, waker: &Waker) {
+        let mut slot = self.poll_waker.lock().unwrap();
+        match slot.as_mut() {
+            Some(current) => current.clone_from(waker),
+            None => *slot = Some(waker.clone()),
+        }
+    }
+
+    async fn wait_for<T>(&self, mut poll: impl FnMut() -> Poll<Result<T>>) -> Result<T> {
+        loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            // Enabling before the readiness check prevents a lost notification
+            // between the check and awaiting the notification.
+            notified.as_mut().enable();
+            if let Poll::Ready(result) = poll() {
+                return result;
+            }
+            notified.await;
+        }
+    }
+}
+
+impl Wake for WakerSet {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        let poll_waker = self.poll_waker.lock().unwrap().take();
+        // Invoke task wakers after releasing the dispatcher lock.
+        self.notify.notify_waiters();
+        if let Some(waker) = poll_waker {
+            waker.wake();
+        }
+    }
 }
 
 impl WriteHalf {
@@ -468,14 +589,17 @@ impl WriteHalf {
             return Ok(0);
         }
 
-        if !self.flow_control.try_acquire() {
-            return Err(io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "send buffer full",
-            ));
-        }
-
         World::current(|world| {
+            // A reset is terminal even when the peer never returned credits.
+            if world.current_host().tcp.stream_state(*self.pair) == StreamState::Reset {
+                return Err(io::Error::new(io::ErrorKind::BrokenPipe, "Broken pipe"));
+            }
+            if !self.flow_control.try_acquire() {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "send buffer full",
+                ));
+            }
             let bytes = Bytes::copy_from_slice(buf);
             let len = bytes.len();
             let seq = self.seq(world)?;
@@ -484,7 +608,7 @@ impl WriteHalf {
         })
     }
 
-    fn poll_writable(&self, cx: &mut Context<'_>) -> Poll<Result<()>> {
+    fn poll_writable(&self) -> Poll<Result<()>> {
         if self.is_shutdown {
             return Poll::Ready(Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
@@ -492,11 +616,13 @@ impl WriteHalf {
             )));
         }
 
+        let waker = Waker::from(self.waiters.clone());
+        let mut cx = Context::from_waker(&waker);
         let state = World::current(|world| {
             world
                 .current_host_mut()
                 .tcp
-                .poll_stream_state(*self.pair, cx)
+                .poll_stream_state(*self.pair, &mut cx)
         });
         if state == StreamState::Reset {
             return Poll::Ready(Err(io::Error::new(
@@ -681,7 +807,7 @@ impl Debug for WriteHalf {
 
 impl AsyncRead for ReadHalf {
     fn poll_read(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &mut ReadBuf,
     ) -> Poll<Result<()>> {
@@ -703,7 +829,8 @@ impl AsyncWrite for WriteHalf {
     fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize>> {
         // A zero-length send never blocks on a full send buffer.
         if !buf.is_empty() {
-            ready!(self.poll_writable(cx))?;
+            self.waiters.register_poll(cx.waker());
+            ready!(self.poll_writable())?;
         }
         Poll::Ready(self.try_write(buf))
     }

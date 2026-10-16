@@ -48,11 +48,11 @@ impl OwnedReadHalf {
     /// the queue, registering the current task for wakeup if data is not yet
     /// available.
     pub fn poll_peek(
-        mut self: Pin<&mut Self>,
+        &mut self,
         cx: &mut Context<'_>,
         buf: &mut ReadBuf,
     ) -> Poll<io::Result<usize>> {
-        Pin::new(&mut self.inner).poll_peek(cx, buf)
+        self.inner.poll_peek(cx, buf)
     }
 
     /// Receives data on the socket from the remote address to which it is

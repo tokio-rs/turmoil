@@ -1,5 +1,13 @@
 # Unreleased
 
+### Breaking
+
+- `turmoil::net::tcp::OwnedReadHalf::poll_peek` now takes `&mut self`
+  instead of `Pin<&mut Self>`, matching Tokio. Update explicit calls from
+  `OwnedReadHalf::poll_peek(Pin::new(&mut half), cx, buf)` to
+  `OwnedReadHalf::poll_peek(&mut half, cx, buf)`, or use
+  `half.poll_peek(cx, buf)`. This requires a breaking release.
+
 ### Changed
 
 - The `unstable-fs` and `unstable-io_uring` features now re-export from
