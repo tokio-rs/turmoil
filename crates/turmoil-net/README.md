@@ -74,6 +74,46 @@ Hostnames are resolved against an in-memory DNS — each new name gets an
 IP in `192.168.0.0/16` on first sight. Pass literal `IpAddr`s if you
 need a specific address.
 
+## UDP broadcast and multicast
+
+`UdpSocket` supports IPv4 broadcast (`set_broadcast`) and IPv4/IPv6
+multicast (`join_multicast_*`, `leave_multicast_*`, and
+`set_multicast_loop_*`). Multicast loopback defaults to enabled; the
+sending socket controls whether local members receive a copy.
+`set_multicast_ttl_v4(0)` limits multicast to local members.
+
+The fabric models one shared link plus each host's loopback. Broadcast
+reaches IPv4 sockets on the destination port; multicast reaches sockets
+that joined the group on that port. Wildcard binds can receive from
+either scope; concrete binds receive only within their loopback or
+link scope. Connected sockets also filter by peer. Membership ends
+when a socket leaves or closes, and repeated joins are idempotent,
+matching turmoil's existing API.
+
+IPv4 membership accepts any address configured on the host, plus
+implicit loopback addresses. `0.0.0.0` selects the socket's concrete
+bind address, otherwise the first configured IPv4 address, falling
+back to loopback when none is configured. Membership is tracked by
+group and selected address: leaving one address preserves other
+memberships, and multiple matching memberships still deliver one copy.
+
+Loopback memberships receive only multicast sent over loopback.
+Configured non-loopback addresses share the fabric's network link;
+local copies of sends over that link go to its members. Joining a
+group does not change the sending address. Bind a sender to a loopback
+address to send multicast over loopback. Sends use the selected scope's
+MTU, so loopback multicast can carry larger datagrams than the shared
+link permits.
+
+IPv6 index 0 uses the same address-selection rules for IPv6. Other
+indexes remain unsupported because the kernel has no interface-index
+registry. There is no subnet topology, so only `255.255.255.255` is
+broadcast; other IPv4 addresses ending in `.255` remain unicast.
+
+Rules see the original broadcast or multicast destination. Remote
+delivery fans out after rule evaluation, so a drop or delay affects all
+remote recipients. Local copies bypass rules, as unicast loopback does.
+
 ## Rules — fault injection
 
 Every non-loopback packet leaving a host runs through an installed chain of `Rule`s. A rule returns a `Verdict`:

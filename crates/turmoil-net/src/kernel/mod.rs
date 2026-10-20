@@ -127,6 +127,28 @@ const EAFNOSUPPORT: i32 = 97;
 /// (real Linux; `ErrorKind::FileTooLarge` is unstable).
 pub(crate) const EMSGSIZE: i32 = 90;
 
+/// Where a packet travels within this host's model. Kept separate
+/// from packet addresses: a local copy of a link multicast still
+/// belongs to the link, and inbound packets always arrive on the link.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeliveryScope {
+    Loopback,
+    Link,
+}
+
+impl DeliveryScope {
+    fn matches(self, address: IpAddr) -> bool {
+        address.is_loopback() == (self == Self::Loopback)
+    }
+}
+
+#[derive(Debug)]
+enum Outbound {
+    Network(Packet),
+    /// A local broadcast/multicast copy, captured at send time.
+    Local(Packet, DeliveryScope),
+}
+
 /// A per-host network stack.
 ///
 /// Owns the socket table and the inbound/outbound packet queues. Does
@@ -144,7 +166,7 @@ pub struct Kernel {
     pub(crate) retx_threshold: u32,
     pub(crate) retx_max: u32,
     /// Packets queued by `poll_send_*` awaiting `egress()`.
-    outbound: VecDeque<Packet>,
+    outbound: VecDeque<Outbound>,
     /// Monotonic TCP initial-sequence-number source. Deterministic by
     /// design — real kernels randomize.
     tcp_isn: u32,
@@ -305,11 +327,42 @@ impl Kernel {
 
     /// `setsockopt(2)`. Most variants are still unimplemented.
     pub fn set_option(&mut self, fd: Fd, opt: SocketOption) -> std::io::Result<()> {
+        match opt {
+            SocketOption::IpAddMembership { group, iface }
+            | SocketOption::IpDropMembership { group, iface } => {
+                return udp::membership(
+                    self,
+                    fd,
+                    group.into(),
+                    iface.into(),
+                    matches!(opt, SocketOption::IpAddMembership { .. }),
+                );
+            }
+            SocketOption::Ipv6JoinGroup { group, iface }
+            | SocketOption::Ipv6LeaveGroup { group, iface } => {
+                udp::validate_membership(self.lookup(fd)?, group.into())?;
+                if iface != 0 {
+                    return Err(Error::from(ErrorKind::AddrNotAvailable));
+                }
+                return udp::membership(
+                    self,
+                    fd,
+                    group.into(),
+                    std::net::Ipv6Addr::UNSPECIFIED.into(),
+                    matches!(opt, SocketOption::Ipv6JoinGroup { .. }),
+                );
+            }
+            _ => {}
+        }
         let st = self.lookup_mut(fd)?;
         match opt {
             SocketOption::Broadcast(v) => st.broadcast = v,
             SocketOption::IpTtl(v) => st.ttl = v,
             SocketOption::TcpNoDelay(v) => st.tcp_nodelay = v,
+            SocketOption::IpMulticastTtl(v) => st.multicast_ttl_v4 = v,
+            SocketOption::Ipv6MulticastHops(v) => st.multicast_hops_v6 = v,
+            SocketOption::IpMulticastLoop(v) => st.multicast_loop_v4 = v,
+            SocketOption::Ipv6MulticastLoop(v) => st.multicast_loop_v6 = v,
             _ => unimplemented!("set_option {:?}", opt),
         }
         Ok(())
@@ -322,6 +375,16 @@ impl Kernel {
             SocketOptionKind::Broadcast => SocketOption::Broadcast(st.broadcast),
             SocketOptionKind::IpTtl => SocketOption::IpTtl(st.ttl),
             SocketOptionKind::TcpNoDelay => SocketOption::TcpNoDelay(st.tcp_nodelay),
+            SocketOptionKind::IpMulticastTtl => SocketOption::IpMulticastTtl(st.multicast_ttl_v4),
+            SocketOptionKind::Ipv6MulticastHops => {
+                SocketOption::Ipv6MulticastHops(st.multicast_hops_v6)
+            }
+            SocketOptionKind::IpMulticastLoop => {
+                SocketOption::IpMulticastLoop(st.multicast_loop_v4)
+            }
+            SocketOptionKind::Ipv6MulticastLoop => {
+                SocketOption::Ipv6MulticastLoop(st.multicast_loop_v6)
+            }
             _ => unimplemented!("get_option {:?}", kind),
         })
     }
@@ -598,13 +661,17 @@ impl Kernel {
         }
     }
 
-    /// Hand an inbound packet to the stack — dispatches to the socket
-    /// bound at the destination tuple, appending to its recv queue and
-    /// waking any pending receiver. Drops the packet if no matching
-    /// socket is bound.
+    /// Hand a packet arriving on the shared link to the stack.
+    /// Dispatches to matching sockets, appending to their recv queues
+    /// and waking pending receivers. Local delivery uses the scope
+    /// selected by `egress`; it doesn't enter through this method.
     pub fn deliver(&mut self, pkt: Packet) {
+        self.deliver_on(pkt, DeliveryScope::Link);
+    }
+
+    fn deliver_on(&mut self, pkt: Packet, scope: DeliveryScope) {
         match pkt.payload.clone() {
-            Transport::Udp(d) => udp::deliver(self, &pkt, &d),
+            Transport::Udp(d) => udp::deliver(self, &pkt, &d, scope),
             Transport::Tcp(s) => tcp::deliver(self, &pkt, &s),
         }
     }
@@ -615,8 +682,8 @@ impl Kernel {
     ///
     /// Runs TCP segmentation first (draining each established socket's
     /// `send_buf` into MSS-sized segments on `outbound`), then drains
-    /// `outbound`. Loopback packets fold back through
-    /// [`deliver`](Self::deliver) inline and never reach `out`.
+    /// `outbound`. Local packets are delivered inline with their
+    /// selected scope; loopback packets never reach `out`.
     ///
     /// Loops until a full pass produces no new outbound packets, so
     /// that an ACK folded through `deliver` can open a window and let
@@ -632,11 +699,18 @@ impl Kernel {
                 break;
             }
             let drained: Vec<_> = std::mem::take(&mut self.outbound).into_iter().collect();
-            for pkt in drained {
-                if self.is_local(pkt.dst) {
-                    self.deliver(pkt);
-                } else {
-                    out.push(pkt);
+            for queued in drained {
+                match queued {
+                    Outbound::Local(pkt, scope) => self.deliver_on(pkt, scope),
+                    Outbound::Network(pkt) if self.is_local(pkt.dst) => {
+                        let scope = if pkt.dst.is_loopback() {
+                            DeliveryScope::Loopback
+                        } else {
+                            DeliveryScope::Link
+                        };
+                        self.deliver_on(pkt, scope);
+                    }
+                    Outbound::Network(pkt) => out.push(pkt),
                 }
             }
         }

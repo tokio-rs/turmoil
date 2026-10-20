@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 
-use indexmap::IndexMap;
+use indexmap::{IndexMap, IndexSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::ops::RangeInclusive;
 use std::path::PathBuf;
@@ -101,9 +101,9 @@ pub enum SocketOption {
     TcpKeepCount(u32),
 
     // ---- IPPROTO_IP ----
-    /// `IP_TTL`. stored.
+    /// `IP_TTL`. simulated for UDP.
     IpTtl(u8),
-    /// `IP_MULTICAST_TTL`. stored.
+    /// `IP_MULTICAST_TTL`. simulated.
     IpMulticastTtl(u8),
     /// `IP_MULTICAST_LOOP`. simulated (whether sender sees own multicast).
     IpMulticastLoop(bool),
@@ -115,7 +115,7 @@ pub enum SocketOption {
     // ---- IPPROTO_IPV6 ----
     /// `IPV6_V6ONLY`. simulated.
     Ipv6Only(bool),
-    /// `IPV6_MULTICAST_HOPS`. stored.
+    /// `IPV6_MULTICAST_HOPS`. simulated.
     Ipv6MulticastHops(u8),
     /// `IPV6_MULTICAST_LOOP`. simulated.
     Ipv6MulticastLoop(bool),
@@ -275,6 +275,15 @@ impl ListenState {
     }
 }
 
+/// A socket's multicast subscription on a selected local address.
+/// Addresses on the shared link have independent memberships, while
+/// loopback memberships only receive packets sent over loopback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MulticastMembership {
+    pub group: IpAddr,
+    pub interface: IpAddr,
+}
+
 /// Kernel-internal per-socket state. Tracks creation parameters, the
 /// bound local address (if any), reuse-option state, the default peer
 /// (for connected sockets), and the inbound datagram queue for
@@ -289,8 +298,15 @@ pub struct Socket {
     /// `_to`/`_from`. For TCP this is the connected remote endpoint.
     pub peer: Option<Addr>,
     pub broadcast: bool,
-    /// `IP_TTL` — stored only; not applied to simulated packets yet.
+    /// `IP_TTL` — applied to outgoing UDP packets.
     pub ttl: u8,
+    pub multicast_ttl_v4: u8,
+    pub multicast_hops_v6: u8,
+    pub multicast_loop_v4: bool,
+    pub multicast_loop_v6: bool,
+    /// Membership belongs to the socket, so close removes it. Retain
+    /// the selected address so leaving one interface preserves others.
+    pub multicast_memberships: IndexSet<MulticastMembership>,
     /// `TCP_NODELAY` — stored only. We don't model Nagle at all, so
     /// reading it back round-trips whatever the app set. See the
     /// `TcpNoDelay` variant on [`SocketOption`] for the TODO.
@@ -336,6 +352,11 @@ impl Socket {
             peer: None,
             broadcast: false,
             ttl: 64,
+            multicast_ttl_v4: 1,
+            multicast_hops_v6: 1,
+            multicast_loop_v4: true,
+            multicast_loop_v6: true,
+            multicast_memberships: IndexSet::new(),
             tcp_nodelay: false,
             recv_queue: VecDeque::new(),
             read_wakers: Vec::new(),

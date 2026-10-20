@@ -822,12 +822,12 @@ fn count_children(k: &Kernel, listener_fd: Fd, local: SocketAddr) -> usize {
 }
 
 fn emit(k: &mut Kernel, src: SocketAddr, dst: SocketAddr, seg: TcpSegment) {
-    k.outbound.push_back(Packet {
+    k.outbound.push_back(super::Outbound::Network(Packet {
         src: src.ip(),
         dst: dst.ip(),
         ttl: 64,
         payload: Transport::Tcp(seg),
-    });
+    }));
 }
 
 fn local_endpoint(k: &Kernel, fd: Fd) -> SocketAddr {

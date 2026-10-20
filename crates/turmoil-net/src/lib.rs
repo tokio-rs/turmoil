@@ -183,8 +183,9 @@ impl EnterGuard {
         });
     }
 
-    /// Route a packet to the host owning its destination IP. Drops
-    /// silently if no host is registered for that IP.
+    /// Route unicast to the host owning its destination IP, or fan out
+    /// UDP broadcast/multicast to other hosts on the shared link.
+    /// Unknown unicast destinations are silently dropped.
     pub fn deliver(&self, pkt: Packet) {
         CURRENT.with(|c| {
             c.borrow_mut()

@@ -2,7 +2,7 @@
 
 use std::future::poll_fn;
 use std::io;
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::task::{Context, Poll, Waker};
 
 use tokio::io::ReadBuf;
@@ -119,6 +119,112 @@ impl UdpSocket {
             SocketOption::Broadcast(v) => Ok(v),
             _ => unreachable!(),
         }
+    }
+
+    /// Whether this socket's IPv4 multicast sends are copied locally.
+    /// Enabled by default.
+    pub fn multicast_loop_v4(&self) -> io::Result<bool> {
+        match sys(|k| k.get_option(self.fd, SocketOptionKind::IpMulticastLoop))? {
+            SocketOption::IpMulticastLoop(v) => Ok(v),
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn set_multicast_loop_v4(&self, on: bool) -> io::Result<()> {
+        sys(|k| k.set_option(self.fd, SocketOption::IpMulticastLoop(on)))
+    }
+
+    /// Whether this socket's IPv6 multicast sends are copied locally.
+    /// Enabled by default.
+    pub fn multicast_loop_v6(&self) -> io::Result<bool> {
+        match sys(|k| k.get_option(self.fd, SocketOptionKind::Ipv6MulticastLoop))? {
+            SocketOption::Ipv6MulticastLoop(v) => Ok(v),
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn set_multicast_loop_v6(&self, on: bool) -> io::Result<()> {
+        sys(|k| k.set_option(self.fd, SocketOption::Ipv6MulticastLoop(on)))
+    }
+
+    /// IPv4 multicast TTL, initially 1. Zero restricts delivery to
+    /// local members (when multicast loopback is enabled).
+    pub fn multicast_ttl_v4(&self) -> io::Result<u32> {
+        match sys(|k| k.get_option(self.fd, SocketOptionKind::IpMulticastTtl))? {
+            SocketOption::IpMulticastTtl(v) => Ok(v as u32),
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn set_multicast_ttl_v4(&self, ttl: u32) -> io::Result<()> {
+        let ttl = ttl
+            .try_into()
+            .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+        sys(|k| k.set_option(self.fd, SocketOption::IpMulticastTtl(ttl)))
+    }
+
+    /// Join a group on any configured local IPv4 address or implicit
+    /// loopback address. `0.0.0.0` selects the concrete bind address,
+    /// otherwise the first configured IPv4 address, falling back to
+    /// loopback when none is configured.
+    ///
+    /// Memberships on loopback receive only multicast sent over
+    /// loopback. Other addresses share the fabric's network link.
+    /// Repeated joins on the same group and selected address are idempotent.
+    pub fn join_multicast_v4(&self, multiaddr: Ipv4Addr, interface: Ipv4Addr) -> io::Result<()> {
+        sys(|k| {
+            k.set_option(
+                self.fd,
+                SocketOption::IpAddMembership {
+                    group: multiaddr,
+                    iface: interface,
+                },
+            )
+        })
+    }
+
+    /// Leave the group on the selected address, preserving memberships
+    /// on other addresses. Returns `AddrNotAvailable` if not joined.
+    pub fn leave_multicast_v4(&self, multiaddr: Ipv4Addr, interface: Ipv4Addr) -> io::Result<()> {
+        sys(|k| {
+            k.set_option(
+                self.fd,
+                SocketOption::IpDropMembership {
+                    group: multiaddr,
+                    iface: interface,
+                },
+            )
+        })
+    }
+
+    /// Join an IPv6 multicast group. Interface index 0 selects the
+    /// concrete bind address, otherwise the first configured IPv6
+    /// address, falling back to loopback when none is configured.
+    /// Other indexes are unsupported because the fabric has no
+    /// indexed network interfaces.
+    pub fn join_multicast_v6(&self, multiaddr: &Ipv6Addr, interface: u32) -> io::Result<()> {
+        sys(|k| {
+            k.set_option(
+                self.fd,
+                SocketOption::Ipv6JoinGroup {
+                    group: *multiaddr,
+                    iface: interface,
+                },
+            )
+        })
+    }
+
+    /// Leave a joined group, or return `AddrNotAvailable`.
+    pub fn leave_multicast_v6(&self, multiaddr: &Ipv6Addr, interface: u32) -> io::Result<()> {
+        sys(|k| {
+            k.set_option(
+                self.fd,
+                SocketOption::Ipv6LeaveGroup {
+                    group: *multiaddr,
+                    iface: interface,
+                },
+            )
+        })
     }
 
     pub fn set_ttl(&self, ttl: u32) -> io::Result<()> {
