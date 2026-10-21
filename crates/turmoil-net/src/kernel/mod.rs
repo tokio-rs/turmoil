@@ -18,11 +18,15 @@ use tokio::io::ReadBuf;
 
 use crate::kernel::socket::{BindKey, SocketTable, DEFAULT_RECV_BUF_CAP, DEFAULT_SEND_BUF_CAP};
 
+mod interface;
 mod packet;
 mod socket;
 mod tcp;
 mod udp;
 mod uds;
+
+use interface::Interfaces;
+pub use interface::{Interface, InterfaceId};
 
 // for shims
 pub use socket::{Addr, Domain, Fd, SocketOption, SocketOptionKind, Type};
@@ -127,26 +131,15 @@ const EAFNOSUPPORT: i32 = 97;
 /// (real Linux; `ErrorKind::FileTooLarge` is unstable).
 pub(crate) const EMSGSIZE: i32 = 90;
 
-/// Where a packet travels within this host's model. Kept separate
-/// from packet addresses: a local copy of a link multicast still
-/// belongs to the link, and inbound packets always arrive on the link.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DeliveryScope {
-    Loopback,
-    Link,
-}
-
-impl DeliveryScope {
-    fn matches(self, address: IpAddr) -> bool {
-        address.is_loopback() == (self == Self::Loopback)
-    }
-}
+/// Linux errno for an unknown network interface.
+const ENODEV: i32 = 19;
+const EADDRNOTAVAIL: i32 = 99;
 
 #[derive(Debug)]
 enum Outbound {
     Network(Packet),
     /// A local broadcast/multicast copy, captured at send time.
-    Local(Packet, DeliveryScope),
+    Local(Packet, InterfaceId),
 }
 
 /// A per-host network stack.
@@ -157,9 +150,7 @@ enum Outbound {
 #[derive(Debug)]
 pub struct Kernel {
     sockets: SocketTable,
-    addresses: Vec<IpAddr>,
-    pub(crate) mtu: u32,
-    pub(crate) loopback_mtu: u32,
+    interfaces: Interfaces,
     pub(crate) send_buf_cap: usize,
     pub(crate) recv_buf_cap: usize,
     pub(crate) default_backlog: usize,
@@ -182,9 +173,7 @@ impl Kernel {
     pub fn with_config(cfg: KernelConfig) -> Self {
         Self {
             sockets: SocketTable::new(),
-            addresses: Vec::new(),
-            mtu: cfg.mtu,
-            loopback_mtu: cfg.loopback_mtu,
+            interfaces: Interfaces::new(cfg.mtu, cfg.loopback_mtu),
             send_buf_cap: cfg.send_buf_cap,
             recv_buf_cap: cfg.recv_buf_cap,
             default_backlog: cfg.default_backlog,
@@ -246,18 +235,17 @@ impl Kernel {
     /// Configure an additional local address for this host. Loopback
     /// (`127.0.0.1`, `::1`) is always implicit.
     pub fn add_address(&mut self, addr: IpAddr) {
-        if !self.addresses.contains(&addr) {
-            self.addresses.push(addr);
-        }
+        self.interfaces.add_address(addr);
+    }
+
+    pub fn interfaces(&self) -> &[Interface] {
+        self.interfaces.all()
     }
 
     /// `true` if `addr` is one of this host's local addresses
     /// (including implicit loopback).
     pub fn is_local(&self, addr: IpAddr) -> bool {
-        if addr.is_loopback() {
-            return true;
-        }
-        self.addresses.contains(&addr)
+        self.interfaces.by_address(addr).is_some()
     }
 
     /// `socket(2)` + `bind(2)`. Creates a socket of the given type,
@@ -270,59 +258,77 @@ impl Kernel {
             Addr::Unix(_) => unimplemented!("AF_UNIX bind"),
         };
 
-        // Non-wildcard IPs must be configured on this host.
-        if !ip.is_unspecified() && !self.is_local(ip) {
-            return Err(Error::from(ErrorKind::AddrNotAvailable));
+        let fd = self.mk_socket(domain, ty);
+        if let Err(err) = self.bind_socket(fd, &Addr::Inet(SocketAddr::new(ip, port))) {
+            self.sockets.remove(fd);
+            return Err(err);
         }
+        Ok(fd)
+    }
 
-        // Pick a port if the caller asked for one.
-        let port = if port == 0 {
+    /// Bind an existing socket, preserving options set before bind.
+    pub fn bind_socket(&mut self, fd: Fd, addr: &Addr) -> std::io::Result<()> {
+        let st = self.lookup(fd)?;
+        if st.bound.is_some() {
+            return Err(ErrorKind::InvalidInput.into());
+        }
+        let Addr::Inet(addr) = addr else {
+            return Err(ErrorKind::InvalidInput.into());
+        };
+        let (domain, ty, reuse_addr, reuse_port) = (st.domain, st.ty, st.reuse_addr, st.reuse_port);
+        if addr.is_ipv4() != (domain == Domain::Inet) {
+            return Err(Error::from_raw_os_error(EAFNOSUPPORT));
+        }
+        // Cast destinations can be bound even though they are not local
+        // interface addresses. Keep the destination for receive filtering.
+        let ip = addr.ip();
+        if !ip.is_unspecified()
+            && !self.is_local(ip)
+            && !(ty == Type::Dgram && (ip.is_multicast() || packet::is_broadcast(ip)))
+        {
+            return Err(ErrorKind::AddrNotAvailable.into());
+        }
+        let port = if addr.port() == 0 {
             self.sockets
                 .allocate_port(domain, ty)
-                .ok_or_else(|| Error::from(ErrorKind::AddrInUse))?
+                .ok_or(ErrorKind::AddrInUse)?
         } else {
-            port
+            addr.port()
         };
-
         let key = BindKey {
             domain,
             ty,
             local_addr: ip,
             local_port: port,
         };
-
-        // Walk every existing binding on the same (domain, ty, port) to
-        // evaluate conflicts. Two scenarios:
-        //
-        // 1. Exact-tuple match. Allowed only if every socket in the
-        //    existing group AND the new socket has SO_REUSEPORT set.
-        // 2. Wildcard-vs-specific mismatch (one side bound to 0.0.0.0/::,
-        //    the other to a concrete IP). Allowed only if both sides
-        //    have SO_REUSEADDR set.
-        //
-        // Distinct concrete IPs on the same port never conflict on
-        // Linux — those just coexist regardless of options.
-        //
-        // Socket defaults (reuse_addr, reuse_port) are both `false`, so
-        // a freshly created socket never satisfies either reuse
-        // condition — that means any overlap at this step is a
-        // conflict and we can bail before creating the table entry.
-        for (existing, _ids) in self
-            .sockets
-            .bindings_on_port(key.domain, key.ty, key.local_port)
-        {
-            if existing.local_addr == key.local_addr
+        for (existing, ids) in self.sockets.bindings_on_port(domain, ty, port) {
+            if existing.local_addr == ip
                 || existing.local_addr.is_unspecified()
-                || key.local_addr.is_unspecified()
+                || ip.is_unspecified()
             {
-                return Err(Error::from(ErrorKind::AddrInUse));
+                for &id in ids {
+                    let other = self.lookup(id)?;
+                    // UDP SO_REUSEADDR permits identical and overlapping binds.
+                    // Do not apply UDP reuse semantics to TCP listeners.
+                    if !(ty == Type::Dgram
+                        && ((reuse_addr && other.reuse_addr) || (reuse_port && other.reuse_port)))
+                    {
+                        return Err(ErrorKind::AddrInUse.into());
+                    }
+                }
             }
         }
-
-        let fd = self.mk_socket(domain, ty);
         self.sockets.insert_binding(key.clone(), fd);
-        self.lookup_mut(fd).expect("socket entry present").bound = Some(key);
-        Ok(fd)
+        self.lookup_mut(fd)?.bound = Some(key);
+        Ok(())
+    }
+
+    fn resolve_multicast_v4(&self, group: IpAddr, addr: std::net::Ipv4Addr) -> Option<InterfaceId> {
+        if addr.is_unspecified() {
+            Some(self.interfaces.multicast_route(group))
+        } else {
+            self.interfaces.by_address(addr.into())
+        }
     }
 
     /// `setsockopt(2)`. Most variants are still unimplemented.
@@ -330,33 +336,75 @@ impl Kernel {
         match opt {
             SocketOption::IpAddMembership { group, iface }
             | SocketOption::IpDropMembership { group, iface } => {
-                return udp::membership(
-                    self,
-                    fd,
-                    group.into(),
-                    iface.into(),
-                    matches!(opt, SocketOption::IpAddMembership { .. }),
-                );
+                let join = matches!(opt, SocketOption::IpAddMembership { .. });
+                udp::validate_membership(self.lookup(fd)?, group.into())?;
+                let interface =
+                    self.resolve_multicast_v4(group.into(), iface)
+                        .ok_or_else(|| {
+                            Error::from_raw_os_error(if join { ENODEV } else { EADDRNOTAVAIL })
+                        })?;
+                return udp::membership(self, fd, group.into(), interface, join);
             }
             SocketOption::Ipv6JoinGroup { group, iface }
             | SocketOption::Ipv6LeaveGroup { group, iface } => {
+                let join = matches!(opt, SocketOption::Ipv6JoinGroup { .. });
                 udp::validate_membership(self.lookup(fd)?, group.into())?;
-                if iface != 0 {
-                    return Err(Error::from(ErrorKind::AddrNotAvailable));
+                // Linux interprets a zero leave index as any joined interface,
+                // unlike a zero join index, which selects the default route.
+                let interface = if iface == 0 && !join {
+                    self.lookup(fd)?
+                        .multicast_memberships()
+                        .iter()
+                        .rev()
+                        .find(|m| m.group == IpAddr::V6(group))
+                        .map(|m| m.interface)
+                } else if iface == 0 {
+                    Some(self.interfaces.multicast_route(group.into()))
+                } else {
+                    self.interfaces.by_index(iface)
                 }
-                return udp::membership(
-                    self,
-                    fd,
-                    group.into(),
-                    std::net::Ipv6Addr::UNSPECIFIED.into(),
-                    matches!(opt, SocketOption::Ipv6JoinGroup { .. }),
-                );
+                .ok_or_else(|| {
+                    Error::from_raw_os_error(if join { ENODEV } else { EADDRNOTAVAIL })
+                })?;
+                return udp::membership(self, fd, group.into(), interface, join);
+            }
+            SocketOption::IpMulticastIf(addr) => {
+                let iface = if addr.is_unspecified() {
+                    None
+                } else {
+                    Some(
+                        self.interfaces
+                            .by_address(addr.into())
+                            .ok_or_else(|| Error::from_raw_os_error(ENODEV))?,
+                    )
+                };
+                let st = self.lookup_mut(fd)?;
+                st.multicast_if_v4 = iface;
+                st.multicast_source_v4 = (!addr.is_unspecified()).then_some(addr);
+                return Ok(());
+            }
+            SocketOption::Ipv6MulticastIf(index) => {
+                let iface = if index == 0 {
+                    None
+                } else {
+                    Some(
+                        self.interfaces
+                            .by_index(index)
+                            .ok_or_else(|| Error::from_raw_os_error(ENODEV))?,
+                    )
+                };
+                self.lookup_mut(fd)?.multicast_if_v6 = iface;
+                return Ok(());
             }
             _ => {}
         }
         let st = self.lookup_mut(fd)?;
         match opt {
             SocketOption::Broadcast(v) => st.broadcast = v,
+            SocketOption::ReuseAddr(v) => st.reuse_addr = v,
+            SocketOption::ReusePort(v) => st.reuse_port = v,
+            SocketOption::IpMulticastAll(v) => st.multicast_all_v4 = v,
+            SocketOption::Ipv6MulticastAll(v) => st.multicast_all_v6 = v,
             SocketOption::IpTtl(v) => st.ttl = v,
             SocketOption::TcpNoDelay(v) => st.tcp_nodelay = v,
             SocketOption::IpMulticastTtl(v) => st.multicast_ttl_v4 = v,
@@ -373,6 +421,12 @@ impl Kernel {
         let st = self.lookup(fd)?;
         Ok(match kind {
             SocketOptionKind::Broadcast => SocketOption::Broadcast(st.broadcast),
+            SocketOptionKind::ReuseAddr => SocketOption::ReuseAddr(st.reuse_addr),
+            SocketOptionKind::ReusePort => SocketOption::ReusePort(st.reuse_port),
+            SocketOptionKind::IpMulticastAll => SocketOption::IpMulticastAll(st.multicast_all_v4),
+            SocketOptionKind::Ipv6MulticastAll => {
+                SocketOption::Ipv6MulticastAll(st.multicast_all_v6)
+            }
             SocketOptionKind::IpTtl => SocketOption::IpTtl(st.ttl),
             SocketOptionKind::TcpNoDelay => SocketOption::TcpNoDelay(st.tcp_nodelay),
             SocketOptionKind::IpMulticastTtl => SocketOption::IpMulticastTtl(st.multicast_ttl_v4),
@@ -666,10 +720,10 @@ impl Kernel {
     /// and waking pending receivers. Local delivery uses the scope
     /// selected by `egress`; it doesn't enter through this method.
     pub fn deliver(&mut self, pkt: Packet) {
-        self.deliver_on(pkt, DeliveryScope::Link);
+        self.deliver_on(pkt, InterfaceId::Link);
     }
 
-    fn deliver_on(&mut self, pkt: Packet, scope: DeliveryScope) {
+    fn deliver_on(&mut self, pkt: Packet, scope: InterfaceId) {
         match pkt.payload.clone() {
             Transport::Udp(d) => udp::deliver(self, &pkt, &d, scope),
             Transport::Tcp(s) => tcp::deliver(self, &pkt, &s),
@@ -704,9 +758,9 @@ impl Kernel {
                     Outbound::Local(pkt, scope) => self.deliver_on(pkt, scope),
                     Outbound::Network(pkt) if self.is_local(pkt.dst) => {
                         let scope = if pkt.dst.is_loopback() {
-                            DeliveryScope::Loopback
+                            InterfaceId::Loopback
                         } else {
-                            DeliveryScope::Link
+                            InterfaceId::Link
                         };
                         self.deliver_on(pkt, scope);
                     }

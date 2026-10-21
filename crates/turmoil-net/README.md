@@ -74,45 +74,66 @@ Hostnames are resolved against an in-memory DNS — each new name gets an
 IP in `192.168.0.0/16` on first sight. Pass literal `IpAddr`s if you
 need a specific address.
 
-## UDP broadcast and multicast
+## Interfaces and UDP broadcast/multicast
+
+Each host has two explicit interfaces: `lo` (index 1) and `eth0` (index 2)
+on the fabric's shared link. `Net::interfaces(host)` exposes their identities,
+addresses, and MTUs. Loopback addresses are implicit; addresses passed to
+`Net::add_host` are aliases on `eth0`, not separate interfaces. There are no
+subnet prefixes, additional links, or configurable routing tables yet.
 
 `UdpSocket` supports IPv4 broadcast (`set_broadcast`) and IPv4/IPv6
 multicast (`join_multicast_*`, `leave_multicast_*`, and
-`set_multicast_loop_*`). Multicast loopback defaults to enabled; the
-sending socket controls whether local members receive a copy.
-`set_multicast_ttl_v4(0)` limits multicast to local members.
+`set_multicast_loop_*`). Membership is keyed by group and interface:
+joining through another address on the same interface returns `AddrInUse`,
+and leaving through either alias removes that membership. Joining through
+an unknown interface returns Linux `ENODEV`.
 
-The fabric models one shared link plus each host's loopback. Broadcast
-reaches IPv4 sockets on the destination port; multicast reaches sockets
-that joined the group on that port. Wildcard binds can receive from
-either scope; concrete binds receive only within their loopback or
-link scope. Connected sockets also filter by peer. Membership ends
-when a socket leaves or closes, and repeated joins are idempotent,
-matching turmoil's existing API.
+An unspecified join interface selects the shared link when it has an address
+in that family. Loopback-only fixtures have an implicit multicast route to
+`lo`. This selection is independent of the socket's bind address. IPv6 joins
+accept indices 1 and 2 as well as default index 0. IPv6 leave with index 0
+removes the most recently joined interface for that group, matching Linux.
 
-IPv4 membership accepts any address configured on the host, plus
-implicit loopback addresses. `0.0.0.0` selects the socket's concrete
-bind address, otherwise the first configured IPv4 address, falling
-back to loopback when none is configured. Membership is tracked by
-group and selected address: leaving one address preserves other
-memberships, and multiple matching memberships still deliver one copy.
+Bind addresses filter packet destinations. Wildcard binds and matching
+multicast-group binds can receive multicast; an interface's unicast address
+is not a multicast receive filter. Binding `255.255.255.255` filters for limited
+broadcasts and preserves that address in `local_addr()`. Connected
+sockets also filter by peer. Linux's default multicast-all behavior permits
+a matching socket to receive groups joined elsewhere on the same host and
+incoming interface. Closing the last member removes that host membership.
+UDP receiver selection uses indexed destination/port lookups and host
+membership counts maintained on join, leave, and close. It visits matching
+receivers without scanning unrelated sockets or allocating a target list.
 
-Loopback memberships receive only multicast sent over loopback.
-Configured non-loopback addresses share the fabric's network link;
-local copies of sends over that link go to its members. Joining a
-group does not change the sending address. Bind a sender to a loopback
-address to send multicast over loopback. Sends use the selected scope's
-MTU, so loopback multicast can carry larger datagrams than the shared
-link permits.
+Multicast output uses the default route independently of source binding or
+membership. An IPv6 destination scope ID can select the output interface.
+On the shared link, the sending socket's multicast-loop flag controls local
+copies; TTL 0 suppresses remote delivery. IPv4 output through `lo` still
+arrives when the multicast-loop flag is disabled. Loopback source addresses
+do not turn a shared-link route into a loopback route.
 
-IPv6 index 0 uses the same address-selection rules for IPv6. Other
-indexes remain unsupported because the kernel has no interface-index
-registry. There is no subnet topology, so only `255.255.255.255` is
-broadcast; other IPv4 addresses ending in `.255` remain unicast.
+The kernel also supports multicast output-interface and multicast-all options,
+and UDP reuse options before bind. The Tokio shim has no socket2/from-std
+adapter yet, so it does not expose those additional socket configuration APIs.
 
-Rules see the original broadcast or multicast destination. Remote
-delivery fans out after rule evaluation, so a drop or delay affects all
-remote recipients. Local copies bypass rules, as unicast loopback does.
+Only `255.255.255.255` is currently classified as broadcast. Directed broadcast
+requires subnet configuration; an arbitrary address ending in `.255` remains
+unicast. UDP still rejects payloads exceeding the selected interface's MTU:
+IP fragmentation/reassembly and selectable PMTU policy remain unimplemented.
+
+Rules see the original broadcast or multicast destination. Remote delivery
+fans out after rule evaluation, so a drop or delay affects all remote
+recipients. Local copies bypass rules, as unicast loopback does.
+
+The socket scenarios in `tests/udp_cast_conformance.rs` run against both the
+simulator and real Tokio on Linux. To run the Linux side in a private network
+namespace, use `python3 crates/turmoil-net/tests/linux/udp_cast.py` from the
+workspace root (requires unprivileged user/network namespaces and iproute2).
+The manual UDP delivery scaling benchmark runs with
+`cargo test -p turmoil-net --release udp_delivery_scaling -- --ignored --nocapture`.
+It measures receiver selection and queueing, excluding socket setup and
+simulation scheduling; timing results are not used as a CI pass/fail check.
 
 ## Rules — fault injection
 

@@ -148,7 +148,8 @@ impl UdpSocket {
     }
 
     /// IPv4 multicast TTL, initially 1. Zero restricts delivery to
-    /// local members (when multicast loopback is enabled).
+    /// local delivery. On the shared link, local copies require multicast
+    /// looping; output through the loopback device is delivered directly.
     pub fn multicast_ttl_v4(&self) -> io::Result<u32> {
         match sys(|k| k.get_option(self.fd, SocketOptionKind::IpMulticastTtl))? {
             SocketOption::IpMulticastTtl(v) => Ok(v as u32),
@@ -163,14 +164,10 @@ impl UdpSocket {
         sys(|k| k.set_option(self.fd, SocketOption::IpMulticastTtl(ttl)))
     }
 
-    /// Join a group on any configured local IPv4 address or implicit
-    /// loopback address. `0.0.0.0` selects the concrete bind address,
-    /// otherwise the first configured IPv4 address, falling back to
-    /// loopback when none is configured.
-    ///
-    /// Memberships on loopback receive only multicast sent over
-    /// loopback. Other addresses share the fabric's network link.
-    /// Repeated joins on the same group and selected address are idempotent.
+    /// Join an IPv4 multicast group on the interface owning `interface`.
+    /// `0.0.0.0` selects the default multicast route, independently of
+    /// the socket's bind address. Addresses on the shared link are aliases.
+    /// Joining the same group/interface again returns `AddrInUse`.
     pub fn join_multicast_v4(&self, multiaddr: Ipv4Addr, interface: Ipv4Addr) -> io::Result<()> {
         sys(|k| {
             k.set_option(
@@ -183,8 +180,8 @@ impl UdpSocket {
         })
     }
 
-    /// Leave the group on the selected address, preserving memberships
-    /// on other addresses. Returns `AddrNotAvailable` if not joined.
+    /// Leave the group on the selected interface, preserving memberships
+    /// on other interfaces. Returns `AddrNotAvailable` if not joined.
     pub fn leave_multicast_v4(&self, multiaddr: Ipv4Addr, interface: Ipv4Addr) -> io::Result<()> {
         sys(|k| {
             k.set_option(
@@ -197,11 +194,10 @@ impl UdpSocket {
         })
     }
 
-    /// Join an IPv6 multicast group. Interface index 0 selects the
-    /// concrete bind address, otherwise the first configured IPv6
-    /// address, falling back to loopback when none is configured.
-    /// Other indexes are unsupported because the fabric has no
-    /// indexed network interfaces.
+    /// Join an IPv6 multicast group. Index 0 selects the default
+    /// multicast route; 1 is loopback and 2 is the shared link.
+    /// See [`crate::Net::interfaces`] for host interface identities.
+    /// A duplicate join returns `AddrInUse`; an unknown index returns ENODEV.
     pub fn join_multicast_v6(&self, multiaddr: &Ipv6Addr, interface: u32) -> io::Result<()> {
         sys(|k| {
             k.set_option(
@@ -214,7 +210,8 @@ impl UdpSocket {
         })
     }
 
-    /// Leave a joined group, or return `AddrNotAvailable`.
+    /// Leave a joined group, or return `AddrNotAvailable`. Index 0
+    /// removes the most recently joined interface for this group.
     pub fn leave_multicast_v6(&self, multiaddr: &Ipv6Addr, interface: u32) -> io::Result<()> {
         sys(|k| {
             k.set_option(

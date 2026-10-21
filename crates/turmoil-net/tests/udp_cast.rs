@@ -4,10 +4,30 @@ use std::time::Duration;
 
 use turmoil_net::fixture::{self, ClientServer};
 use turmoil_net::shim::tokio::net::UdpSocket;
-use turmoil_net::{Packet, Verdict};
+use turmoil_net::{InterfaceId, KernelConfig, Net, Packet, Verdict};
 
 const V4_GROUP: Ipv4Addr = Ipv4Addr::new(239, 0, 0, 255);
 const V6_GROUP: Ipv6Addr = Ipv6Addr::new(0xff08, 0, 0, 0, 0, 0, 0, 1);
+
+#[test]
+fn host_addresses_are_aliases_on_one_inspectable_interface() {
+    let mut net = Net::with_config(KernelConfig::default().mtu(1400).loopback_mtu(32000));
+    let addresses: [IpAddr; 3] = [
+        "10.0.0.1".parse().unwrap(),
+        "10.0.0.2".parse().unwrap(),
+        "fd00::1".parse().unwrap(),
+    ];
+    let host = net.add_host(addresses);
+    let interfaces = net.interfaces(host);
+    assert_eq!(interfaces.len(), 2);
+    assert_eq!(interfaces[0].id, InterfaceId::Loopback);
+    assert_eq!(interfaces[0].id.index(), 1);
+    assert_eq!(interfaces[0].mtu, 32000);
+    assert_eq!(interfaces[1].id, InterfaceId::Link);
+    assert_eq!(interfaces[1].id.index(), 2);
+    assert_eq!(interfaces[1].addresses, addresses);
+    assert_eq!(interfaces[1].mtu, 1400);
+}
 
 fn join(socket: &UdpSocket, group: IpAddr) {
     match group {
@@ -56,41 +76,52 @@ async fn empty(socket: &UdpSocket) {
 
 #[test]
 fn multicast_loop_membership_and_close() {
-    for group in [V4_GROUP.into(), V6_GROUP.into()] {
-        fixture::lo(async move {
-            let local = match group {
-                IpAddr::V4(_) => "0.0.0.0:9000",
-                IpAddr::V6(_) => "[::]:9000",
-            };
-            let socket = UdpSocket::bind(local).await.unwrap();
-            let dst = SocketAddr::new(group, 9000);
-            assert!(socket.multicast_loop_v4().unwrap());
-            assert!(socket.multicast_loop_v6().unwrap());
+    for group in [IpAddr::V4(V4_GROUP), IpAddr::V6(V6_GROUP)] {
+        ClientServer::new().server([] as [IpAddr; 0], async {}).run(
+            if group.is_ipv4() {
+                "10.0.0.1"
+            } else {
+                "fd00::1"
+            },
+            async move {
+                let local = match group {
+                    IpAddr::V4(_) => "0.0.0.0:9000",
+                    IpAddr::V6(_) => "[::]:9000",
+                };
+                let socket = UdpSocket::bind(local).await.unwrap();
+                let dst = SocketAddr::new(group, 9000);
+                assert!(socket.multicast_loop_v4().unwrap());
+                assert!(socket.multicast_loop_v6().unwrap());
 
-            join(&socket, group);
-            join(&socket, group); // Repeated joins stay idempotent.
-            socket.send_to(b"default", dst).await.unwrap();
-            // Changing the flag cannot retroactively cancel this send.
-            set_loop(&socket, group, false);
-            recv(&socket, b"default").await;
-            empty(&socket).await; // No duplicate from the second join.
+                join(&socket, group);
+                let duplicate = match group {
+                    IpAddr::V4(g) => socket.join_multicast_v4(g, Ipv4Addr::UNSPECIFIED),
+                    IpAddr::V6(g) => socket.join_multicast_v6(&g, 0),
+                };
+                assert_eq!(duplicate.unwrap_err().kind(), ErrorKind::AddrInUse);
+                socket.send_to(b"default", dst).await.unwrap();
+                // Changing the flag cannot retroactively cancel this send.
+                set_loop(&socket, group, false);
+                recv(&socket, b"default").await;
+                empty(&socket).await; // No duplicate from the second join.
 
-            socket.send_to(b"disabled", dst).await.unwrap();
-            set_loop(&socket, group, true);
-            empty(&socket).await;
-            socket.send_to(b"enabled", dst).await.unwrap();
-            recv(&socket, b"enabled").await;
+                socket.send_to(b"disabled", dst).await.unwrap();
+                set_loop(&socket, group, true);
+                empty(&socket).await;
+                socket.send_to(b"enabled", dst).await.unwrap();
+                recv(&socket, b"enabled").await;
 
-            leave(&socket, group);
-            socket.send_to(b"left", dst).await.unwrap();
-            empty(&socket).await;
+                leave(&socket, group);
+                socket.send_to(b"left", dst).await.unwrap();
+                empty(&socket).await;
 
-            join(&socket, group);
-            drop(socket);
-            let socket = UdpSocket::bind(local).await.unwrap();
-            socket.send_to(b"closed", dst).await.unwrap();
-            empty(&socket).await;
-        });
+                join(&socket, group);
+                drop(socket);
+                let socket = UdpSocket::bind(local).await.unwrap();
+                socket.send_to(b"closed", dst).await.unwrap();
+                empty(&socket).await;
+            },
+        );
     }
 }
 
@@ -110,15 +141,21 @@ fn multicast_validates_groups_and_interfaces() {
             assert_eq!(result.unwrap_err().kind(), ErrorKind::InvalidInput);
         }
         for result in [
-            v4.join_multicast_v4(V4_GROUP, Ipv4Addr::new(10, 0, 0, 99)),
             v4.leave_multicast_v4(V4_GROUP, Ipv4Addr::new(10, 0, 0, 99)),
-            v6.join_multicast_v6(&V6_GROUP, 1),
             v6.leave_multicast_v6(&V6_GROUP, 1),
             v4.leave_multicast_v4(V4_GROUP, Ipv4Addr::UNSPECIFIED),
             v6.leave_multicast_v6(&V6_GROUP, 0),
         ] {
             assert_eq!(result.unwrap_err().kind(), ErrorKind::AddrNotAvailable);
         }
+        for result in [
+            v4.join_multicast_v4(V4_GROUP, Ipv4Addr::new(10, 0, 0, 99)),
+            v6.join_multicast_v6(&V6_GROUP, 99999),
+        ] {
+            assert_eq!(result.unwrap_err().raw_os_error(), Some(19));
+        }
+        v6.join_multicast_v6(&V6_GROUP, 1).unwrap();
+        v6.leave_multicast_v6(&V6_GROUP, 1).unwrap();
         // Loopback is an implicit local address.
         v4.join_multicast_v4(V4_GROUP, Ipv4Addr::LOCALHOST).unwrap();
         v4.leave_multicast_v4(V4_GROUP, Ipv4Addr::LOCALHOST)
@@ -228,7 +265,7 @@ fn multicast_rules_affect_remote_delivery_only() {
 }
 
 #[test]
-fn ipv4_memberships_track_configured_addresses_independently() {
+fn ipv4_address_aliases_share_membership() {
     let first = Ipv4Addr::new(10, 0, 0, 2);
     let second = Ipv4Addr::new(10, 0, 0, 3);
     ClientServer::new()
@@ -245,23 +282,30 @@ fn ipv4_memberships_track_configured_addresses_independently() {
             socket
                 .join_multicast_v4(V4_GROUP, Ipv4Addr::UNSPECIFIED)
                 .unwrap();
-            socket.join_multicast_v4(V4_GROUP, first).unwrap();
-            socket.join_multicast_v4(V4_GROUP, second).unwrap();
+            for alias in [first, second] {
+                assert_eq!(
+                    socket
+                        .join_multicast_v4(V4_GROUP, alias)
+                        .unwrap_err()
+                        .kind(),
+                    ErrorKind::AddrInUse
+                );
+            }
             // A remote host's address is still not a local interface.
             assert_eq!(
                 socket
                     .join_multicast_v4(V4_GROUP, Ipv4Addr::new(10, 0, 0, 1))
                     .unwrap_err()
-                    .kind(),
-                ErrorKind::AddrNotAvailable
+                    .raw_os_error(),
+                Some(19)
             );
 
             socket.send_to(b"both", "10.0.0.1:9001").await.unwrap();
             recv(&socket, b"both").await;
-            empty(&socket).await; // Several memberships deliver only one copy.
+            empty(&socket).await; // One membership despite several address aliases.
 
-            // Unspecified selected `first`, so an explicit leave removes it.
-            socket.leave_multicast_v4(V4_GROUP, first).unwrap();
+            // Leaving through either alias removes the shared-link membership.
+            socket.leave_multicast_v4(V4_GROUP, second).unwrap();
             assert_eq!(
                 socket
                     .leave_multicast_v4(V4_GROUP, Ipv4Addr::UNSPECIFIED)
@@ -270,14 +314,12 @@ fn ipv4_memberships_track_configured_addresses_independently() {
                 ErrorKind::AddrNotAvailable
             );
             socket.send_to(b"second", "10.0.0.1:9001").await.unwrap();
-            recv(&socket, b"second").await;
+            empty(&socket).await;
 
-            socket.leave_multicast_v4(V4_GROUP, second).unwrap();
             socket.send_to(b"neither", "10.0.0.1:9001").await.unwrap();
             empty(&socket).await;
 
             socket.join_multicast_v4(V4_GROUP, first).unwrap();
-            socket.join_multicast_v4(V4_GROUP, second).unwrap();
             drop(socket);
             let socket = UdpSocket::bind("0.0.0.0:9000").await.unwrap();
             socket.send_to(b"closed", "10.0.0.1:9001").await.unwrap();
@@ -286,7 +328,7 @@ fn ipv4_memberships_track_configured_addresses_independently() {
 }
 
 #[test]
-fn ipv4_loopback_membership_is_separate_from_the_shared_link() {
+fn ipv4_loopback_membership_does_not_select_the_output_interface() {
     let local = Ipv4Addr::new(10, 0, 0, 2);
     ClientServer::new()
         .server("10.0.0.1", async {
@@ -315,7 +357,7 @@ fn ipv4_loopback_membership_is_separate_from_the_shared_link() {
 
             let lo = UdpSocket::bind("127.0.0.1:0").await.unwrap();
             lo.send_to(b"loopback", (V4_GROUP, 9000)).await.unwrap();
-            assert!(recv(&socket, b"loopback").await.ip().is_loopback());
+            empty(&socket).await; // Binding a loopback source does not select lo.
 
             // Joining the network link doesn't replace loopback membership.
             socket.join_multicast_v4(V4_GROUP, local).unwrap();
@@ -327,7 +369,6 @@ fn ipv4_loopback_membership_is_separate_from_the_shared_link() {
             lo.send_to(b"still loopback", (V4_GROUP, 9000))
                 .await
                 .unwrap();
-            recv(&socket, b"still loopback").await;
             empty(&socket).await;
 
             socket

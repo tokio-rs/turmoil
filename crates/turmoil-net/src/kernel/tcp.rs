@@ -848,6 +848,8 @@ fn local_endpoint(k: &Kernel, fd: Fd) -> SocketAddr {
                 IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::LOCALHOST),
             },
             Some(p) => k
+                .interfaces
+                .get(super::InterfaceId::Link)
                 .addresses
                 .iter()
                 .copied()
@@ -868,7 +870,9 @@ fn auto_bind(k: &mut Kernel, fd: Fd, domain: Domain, dst: IpAddr) -> Result<()> 
             IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::LOCALHOST),
         }
     } else {
-        k.addresses
+        k.interfaces
+            .get(super::InterfaceId::Link)
+            .addresses
             .iter()
             .copied()
             .find(|a| a.is_ipv4() == dst.is_ipv4())
@@ -1334,9 +1338,9 @@ fn mss_for(k: &Kernel, src_ip: IpAddr) -> usize {
         IpAddr::V6(_) => packet::IPV6_HEADER_SIZE as u32,
     };
     let mtu = if src_ip.is_loopback() {
-        k.loopback_mtu
+        k.interfaces.get(super::InterfaceId::Loopback).mtu
     } else {
-        k.mtu
+        k.interfaces.get(super::InterfaceId::Link).mtu
     };
     mtu.saturating_sub(ip_hdr)
         .saturating_sub(packet::TCP_HEADER_SIZE as u32) as usize

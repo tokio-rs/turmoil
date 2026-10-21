@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::task::Waker;
 use std::time::Duration;
 
+use super::InterfaceId;
 use bytes::{Bytes, BytesMut};
 
 /// Linux default `ip_local_port_range`.
@@ -75,7 +76,7 @@ pub enum SocketOption {
     Broadcast(bool),
     /// `SO_REUSEADDR`. simulated (affects bind conflict rules).
     ReuseAddr(bool),
-    /// `SO_REUSEPORT`. simulated (load-balances accept across listeners).
+    /// `SO_REUSEPORT`. simulated for UDP bind and flow selection.
     ReusePort(bool),
     /// `SO_LINGER`. simulated (controls close behavior for SOCK_STREAM).
     Linger(Option<Duration>),
@@ -107,6 +108,10 @@ pub enum SocketOption {
     IpMulticastTtl(u8),
     /// `IP_MULTICAST_LOOP`. simulated (whether sender sees own multicast).
     IpMulticastLoop(bool),
+    /// `IP_MULTICAST_IF`. simulated; unspecified restores route selection.
+    IpMulticastIf(Ipv4Addr),
+    /// `IP_MULTICAST_ALL`. simulated; defaults to true.
+    IpMulticastAll(bool),
     /// `IP_ADD_MEMBERSHIP`. simulated.
     IpAddMembership { group: Ipv4Addr, iface: Ipv4Addr },
     /// `IP_DROP_MEMBERSHIP`. simulated.
@@ -119,6 +124,10 @@ pub enum SocketOption {
     Ipv6MulticastHops(u8),
     /// `IPV6_MULTICAST_LOOP`. simulated.
     Ipv6MulticastLoop(bool),
+    /// `IPV6_MULTICAST_IF`. simulated; zero restores route selection.
+    Ipv6MulticastIf(u32),
+    /// `IPV6_MULTICAST_ALL`. simulated; defaults to true.
+    Ipv6MulticastAll(bool),
     /// `IPV6_JOIN_GROUP`. simulated.
     Ipv6JoinGroup { group: Ipv6Addr, iface: u32 },
     /// `IPV6_LEAVE_GROUP`. simulated.
@@ -144,9 +153,11 @@ pub enum SocketOptionKind {
     IpTtl,
     IpMulticastTtl,
     IpMulticastLoop,
+    IpMulticastAll,
     Ipv6Only,
     Ipv6MulticastHops,
     Ipv6MulticastLoop,
+    Ipv6MulticastAll,
 }
 
 /// A kernel socket handle. Opaque, fd-like, `Copy` — carries no state
@@ -275,13 +286,11 @@ impl ListenState {
     }
 }
 
-/// A socket's multicast subscription on a selected local address.
-/// Addresses on the shared link have independent memberships, while
-/// loopback memberships only receive packets sent over loopback.
+/// A socket's multicast subscription on a host interface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MulticastMembership {
     pub group: IpAddr,
-    pub interface: IpAddr,
+    pub interface: InterfaceId,
 }
 
 /// Kernel-internal per-socket state. Tracks creation parameters, the
@@ -298,15 +307,22 @@ pub struct Socket {
     /// `_to`/`_from`. For TCP this is the connected remote endpoint.
     pub peer: Option<Addr>,
     pub broadcast: bool,
+    pub reuse_addr: bool,
+    pub reuse_port: bool,
     /// `IP_TTL` — applied to outgoing UDP packets.
     pub ttl: u8,
     pub multicast_ttl_v4: u8,
     pub multicast_hops_v6: u8,
     pub multicast_loop_v4: bool,
     pub multicast_loop_v6: bool,
+    pub multicast_if_v4: Option<InterfaceId>,
+    pub multicast_source_v4: Option<Ipv4Addr>,
+    pub multicast_if_v6: Option<InterfaceId>,
+    pub multicast_all_v4: bool,
+    pub multicast_all_v6: bool,
     /// Membership belongs to the socket, so close removes it. Retain
-    /// the selected address so leaving one interface preserves others.
-    pub multicast_memberships: IndexSet<MulticastMembership>,
+    /// the interface identity so aliases refer to the same membership.
+    multicast_memberships: IndexSet<MulticastMembership>,
     /// `TCP_NODELAY` — stored only. We don't model Nagle at all, so
     /// reading it back round-trips whatever the app set. See the
     /// `TcpNoDelay` variant on [`SocketOption`] for the TODO.
@@ -344,6 +360,10 @@ pub struct Socket {
 }
 
 impl Socket {
+    pub fn multicast_memberships(&self) -> &IndexSet<MulticastMembership> {
+        &self.multicast_memberships
+    }
+
     pub fn new(domain: Domain, ty: Type) -> Self {
         Self {
             domain,
@@ -351,11 +371,18 @@ impl Socket {
             bound: None,
             peer: None,
             broadcast: false,
+            reuse_addr: false,
+            reuse_port: false,
             ttl: 64,
             multicast_ttl_v4: 1,
             multicast_hops_v6: 1,
             multicast_loop_v4: true,
             multicast_loop_v6: true,
+            multicast_if_v4: None,
+            multicast_source_v4: None,
+            multicast_if_v6: None,
+            multicast_all_v4: true,
+            multicast_all_v6: true,
             multicast_memberships: IndexSet::new(),
             tcp_nodelay: false,
             recv_queue: VecDeque::new(),
@@ -424,6 +451,9 @@ pub struct SocketTable {
     /// (not single `Fd`) because `SO_REUSEPORT` permits multiple
     /// sockets to share the exact same tuple.
     bindings: IndexMap<BindKey, Vec<Fd>>,
+    /// Number of subscribing sockets for each host/group/interface.
+    /// Updated with the socket memberships, never rebuilt during delivery.
+    multicast_members: IndexMap<MulticastMembership, usize>,
     /// 4-tuple index for TCP inbound demux: (local, remote) → fd.
     /// Populated by `poll_connect` and `accept_syn`, cleared on
     /// socket removal. Never contains wildcard locals — client
@@ -439,6 +469,7 @@ impl SocketTable {
             next_id: 1,
             sockets: IndexMap::new(),
             bindings: IndexMap::new(),
+            multicast_members: IndexMap::new(),
             connections: IndexMap::new(),
             ports: PortAllocator::new(DEFAULT_EPHEMERAL_PORTS),
         }
@@ -447,6 +478,9 @@ impl SocketTable {
     pub fn insert(&mut self, socket: Socket) -> Fd {
         let fd = Fd(self.next_id);
         self.next_id += 1;
+        for &membership in &socket.multicast_memberships {
+            *self.multicast_members.entry(membership).or_default() += 1;
+        }
         self.sockets.insert(fd, socket);
         fd
     }
@@ -466,12 +500,16 @@ impl SocketTable {
     /// Remove a socket from the table, also clearing any binding or
     /// 4-tuple connection entry that points at it.
     pub fn remove(&mut self, fd: Fd) -> Option<Socket> {
+        let socket = self.sockets.shift_remove(&fd)?;
+        for membership in &socket.multicast_memberships {
+            self.release_membership(membership);
+        }
         self.bindings.retain(|_, fds| {
             fds.retain(|&f| f != fd);
             !fds.is_empty()
         });
         self.connections.retain(|_, f| *f != fd);
-        self.sockets.shift_remove(&fd)
+        Some(socket)
     }
 
     /// All sockets bound to `key`, in bind order.
@@ -484,6 +522,66 @@ impl SocketTable {
 
     pub fn insert_binding(&mut self, key: BindKey, fd: Fd) {
         self.bindings.entry(key).or_default().push(fd);
+    }
+
+    /// Visit matching sockets without allocating a per-packet target list.
+    /// Borrow the binding index and socket storage separately so enqueuing
+    /// data cannot invalidate the list being traversed.
+    pub fn for_each_bound_mut(&mut self, key: &BindKey, mut visit: impl FnMut(&mut Socket)) {
+        if let Some(ids) = self.bindings.get(key) {
+            for fd in ids {
+                visit(
+                    self.sockets
+                        .get_mut(fd)
+                        .expect("binding points at a live socket"),
+                );
+            }
+        }
+    }
+
+    pub fn has_membership(&self, membership: &MulticastMembership) -> bool {
+        self.multicast_members.contains_key(membership)
+    }
+
+    /// Returns false for a duplicate join without changing the host count.
+    pub fn join_multicast(&mut self, fd: Fd, membership: MulticastMembership) -> bool {
+        if !self
+            .sockets
+            .get_mut(&fd)
+            .expect("socket validated")
+            .multicast_memberships
+            .insert(membership)
+        {
+            return false;
+        }
+        *self.multicast_members.entry(membership).or_default() += 1;
+        true
+    }
+
+    /// Returns false for a missing membership without changing the host count.
+    pub fn leave_multicast(&mut self, fd: Fd, membership: &MulticastMembership) -> bool {
+        if !self
+            .sockets
+            .get_mut(&fd)
+            .expect("socket validated")
+            .multicast_memberships
+            .shift_remove(membership)
+        {
+            return false;
+        }
+        self.release_membership(membership);
+        true
+    }
+
+    fn release_membership(&mut self, membership: &MulticastMembership) {
+        let count = self
+            .multicast_members
+            .get_mut(membership)
+            .expect("membership is indexed");
+        *count -= 1;
+        if *count == 0 {
+            self.multicast_members.swap_remove(membership);
+        }
     }
 
     /// Index a TCP connection by 4-tuple. Panics if `local` is
