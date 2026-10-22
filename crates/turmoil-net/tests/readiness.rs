@@ -436,3 +436,19 @@ fn lookup_host_resolves_like_to_socket_addrs() {
         );
     });
 }
+
+#[test]
+fn fin_does_not_wake_blocked_writers() {
+    fixture::lo_with_config(tiny(), async {
+        let (mut stream, mut peer) = pair(9112).await.unwrap();
+        fill(&mut stream).await;
+        let mut write = task::spawn(stream.writable());
+        assert_pending!(write.poll());
+
+        peer.shutdown().await.unwrap();
+        sleep(Duration::from_millis(10)).await;
+        // The FIN frees no send buffer space.
+        assert!(!write.is_woken());
+        assert_pending!(write.poll());
+    });
+}
