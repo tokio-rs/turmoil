@@ -17,7 +17,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::io::{AsyncRead, AsyncWrite, Interest, ReadBuf, Ready};
 
 use crate::shim::tokio::net::tcp::stream::{noop_cx, TcpStream};
 use crate::sys;
@@ -60,6 +60,16 @@ impl OwnedReadHalf {
     /// call.
     pub fn reunite(self, other: OwnedWriteHalf) -> Result<TcpStream, ReuniteError> {
         reunite(self, other)
+    }
+
+    /// See [`TcpStream::ready`].
+    pub async fn ready(&self, interest: Interest) -> io::Result<Ready> {
+        self.inner.ready(interest).await
+    }
+
+    /// See [`TcpStream::readable`].
+    pub async fn readable(&self) -> io::Result<()> {
+        self.inner.readable().await
     }
 
     pub fn try_read(&self, buf: &mut [u8]) -> io::Result<usize> {
@@ -109,6 +119,16 @@ impl OwnedWriteHalf {
     pub fn forget(mut self) {
         self.shutdown_on_drop = false;
         drop(self);
+    }
+
+    /// See [`TcpStream::ready`].
+    pub async fn ready(&self, interest: Interest) -> io::Result<Ready> {
+        self.inner.ready(interest).await
+    }
+
+    /// See [`TcpStream::writable`].
+    pub async fn writable(&self) -> io::Result<()> {
+        self.inner.writable().await
     }
 
     pub fn try_write(&self, buf: &[u8]) -> io::Result<usize> {

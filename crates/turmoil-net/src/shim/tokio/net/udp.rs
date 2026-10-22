@@ -5,9 +5,10 @@ use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::task::{Context, Poll, Waker};
 
-use tokio::io::ReadBuf;
+use tokio::io::{Interest, ReadBuf, Ready};
 
 use crate::kernel::{Addr, Fd, SocketOption, SocketOptionKind, Type};
+use crate::shim::tokio::net::tcp::stream::to_ready;
 use crate::shim::tokio::net::ToSocketAddrs;
 use crate::sys;
 
@@ -107,6 +108,44 @@ impl UdpSocket {
             Poll::Ready(Ok(Addr::Unix(_))) => panic!("UdpSocket is Addr::Inet"),
             Poll::Ready(Err(e)) => Err(e),
             Poll::Pending => Err(io::ErrorKind::WouldBlock.into()),
+        }
+    }
+
+    /// Waits for any of the requested ready states. Sends never block,
+    /// so the socket is always writable.
+    pub async fn ready(&self, interest: Interest) -> io::Result<Ready> {
+        poll_fn(|cx| self.poll_ready(cx, interest)).await
+    }
+
+    /// Waits until a datagram is queued.
+    pub async fn readable(&self) -> io::Result<()> {
+        self.ready(Interest::READABLE).await.map(|_| ())
+    }
+
+    /// Waits until a send would not block, which is immediately.
+    pub async fn writable(&self) -> io::Result<()> {
+        self.ready(Interest::WRITABLE).await.map(|_| ())
+    }
+
+    pub fn poll_recv_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.poll_ready(cx, Interest::READABLE).map_ok(|_| ())
+    }
+
+    pub fn poll_send_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.poll_ready(cx, Interest::WRITABLE).map_ok(|_| ())
+    }
+
+    fn poll_ready(&self, cx: &mut Context<'_>, interest: Interest) -> Poll<io::Result<Ready>> {
+        let ready = sys(|k| {
+            let ready = to_ready(k.readiness(self.fd)?, interest);
+            if ready.is_empty() {
+                k.register_read_waker(self.fd, cx.waker())?;
+            }
+            Ok(ready)
+        });
+        match ready {
+            Ok(ready) if ready.is_empty() => Poll::Pending,
+            ready => Poll::Ready(ready),
         }
     }
 
