@@ -735,3 +735,156 @@ fn tcp_syn_retx_exhaustion_times_out() {
             assert_eq!(err.kind(), ErrorKind::TimedOut);
         });
 }
+
+fn is_pure_ack(pkt: &Packet) -> bool {
+    matches!(&pkt.payload, Transport::Tcp(s)
+        if s.flags.ack && !s.flags.syn && !s.flags.fin && !s.flags.rst && s.payload.is_empty())
+}
+
+#[test]
+fn tcp_lost_ack_is_recovered_by_duplicate_ack() {
+    // Drop the server's ACK of the client's data. The client
+    // retransmits; the server must re-ACK the duplicate instead of
+    // dropping it silently, or the client aborts on retx exhaustion.
+    ClientServer::new()
+        .server("server", async move {
+            let listener = TcpListener::bind("0.0.0.0:9000").await.unwrap();
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 5];
+            sock.read_exact(&mut buf).await.unwrap();
+            // Outlast retx exhaustion so only a duplicate ACK can save
+            // the connection.
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            sock.write_all(b"ok").await.unwrap();
+        })
+        .run("client", async move {
+            let server = turmoil_net::lookup_host("server").unwrap();
+            let mut dropped = false;
+            rule(move |pkt: &Packet| {
+                if !dropped && pkt.src == server && is_pure_ack(pkt) {
+                    dropped = true;
+                    return Verdict::Drop;
+                }
+                Verdict::Pass
+            })
+            .forget();
+            let mut c = TcpStream::connect("server:9000").await.unwrap();
+            c.write_all(b"hello").await.unwrap();
+            let mut buf = [0u8; 2];
+            c.read_exact(&mut buf).await.unwrap();
+            assert_eq!(&buf, b"ok");
+        });
+}
+
+#[test]
+fn tcp_small_reads_reopen_zero_window() {
+    // Fill the receiver's window, then drain it one byte at a time.
+    // No single read frees half the buffer, so the receiver must still
+    // advertise the reopened window or the sender stalls forever.
+    const N: usize = 64;
+    let cfg = KernelConfig::default().send_buf_cap(8).recv_buf_cap(8);
+    ClientServer::with_config(cfg)
+        .server("server", async move {
+            let listener = TcpListener::bind("0.0.0.0:9000").await.unwrap();
+            let (mut sock, _) = listener.accept().await.unwrap();
+            sock.write_all(&[7; N]).await.unwrap();
+        })
+        .run("client", async move {
+            let mut c = TcpStream::connect("server:9000").await.unwrap();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::timeout(Duration::from_secs(5), async {
+                for _ in 0..N {
+                    assert_eq!(c.read_u8().await.unwrap(), 7);
+                }
+            })
+            .await
+            .expect("sender stalled on a zero window");
+        });
+}
+
+#[test]
+fn tcp_zero_window_probe_recovers_lost_window_update() {
+    // Drop the receiver's first window update after the window closes.
+    // The sender's persist probes elicit a fresh ACK with the open
+    // window.
+    const N: usize = 64;
+    let cfg = KernelConfig::default().send_buf_cap(8).recv_buf_cap(8);
+    ClientServer::with_config(cfg)
+        .server("server", async move {
+            let listener = TcpListener::bind("0.0.0.0:9000").await.unwrap();
+            let (mut sock, _) = listener.accept().await.unwrap();
+            sock.write_all(&[7; N]).await.unwrap();
+        })
+        .run("client", async move {
+            let client = turmoil_net::lookup_host("client").unwrap();
+            let mut closed = false;
+            let mut dropped = false;
+            rule(move |pkt: &Packet| {
+                let Transport::Tcp(s) = &pkt.payload else {
+                    return Verdict::Pass;
+                };
+                if pkt.src != client || !is_pure_ack(pkt) {
+                    return Verdict::Pass;
+                }
+                closed |= s.window == 0;
+                if closed && !dropped && s.window > 0 {
+                    dropped = true;
+                    return Verdict::Drop;
+                }
+                Verdict::Pass
+            })
+            .forget();
+            let mut c = TcpStream::connect("server:9000").await.unwrap();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let mut buf = vec![0u8; N];
+            tokio::time::timeout(Duration::from_secs(5), c.read_exact(&mut buf))
+                .await
+                .expect("sender never probed the zero window")
+                .unwrap();
+            assert_eq!(buf, vec![7; N]);
+        });
+}
+
+#[test]
+fn tcp_data_to_closed_socket_is_reset() {
+    // The server closes cleanly; its socket lingers in FIN_WAIT2. Data
+    // the client sends afterwards has no reader, so the server resets
+    // the connection. A RST in CLOSE_WAIT surfaces as EPIPE.
+    ClientServer::new()
+        .server("server", async move {
+            let listener = TcpListener::bind("0.0.0.0:9000").await.unwrap();
+            let (sock, _) = listener.accept().await.unwrap();
+            drop(sock);
+            std::future::pending::<()>().await;
+        })
+        .run("client", async move {
+            let mut c = TcpStream::connect("server:9000").await.unwrap();
+            assert_eq!(c.read(&mut [0; 8]).await.unwrap(), 0);
+            let kind = tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    if let Err(e) = c.write_all(b"x").await {
+                        break e.kind();
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("write never failed");
+            assert_eq!(kind, ErrorKind::BrokenPipe);
+        });
+}
+
+#[test]
+fn tcp_zero_length_read_completes_immediately() {
+    fixture::lo(async {
+        let listener = TcpListener::bind("127.0.0.1:8710").await.unwrap();
+        let (mut client, (_server, _)) =
+            tokio::try_join!(TcpStream::connect("127.0.0.1:8710"), listener.accept()).unwrap();
+        let n = tokio::time::timeout(Duration::from_secs(1), client.read(&mut []))
+            .await
+            .expect("zero-length read waited for data")
+            .unwrap();
+        assert_eq!(n, 0);
+        assert_eq!(client.peek(&mut []).await.unwrap(), 0);
+    });
+}

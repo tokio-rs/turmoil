@@ -99,6 +99,7 @@ pub(super) fn poll_connect(
             peer_fin: false,
             fin_seq: None,
             reset: false,
+            reset_error: ErrorKind::ConnectionReset,
             timed_out: false,
             egress_since_ack: 0,
             retx_attempts: 0,
@@ -276,8 +277,8 @@ fn handle_on_connection(
 }
 
 /// ACK processing, in-order data receipt, FIN handling, and waker
-/// plumbing. Out-of-order segments are dropped — v1's fabric is
-/// reliable.
+/// plumbing. Out-of-order segments are dropped and answered with a
+/// duplicate ACK so the sender learns where to resume.
 fn handle_established(
     k: &mut Kernel,
     fd: Fd,
@@ -285,6 +286,18 @@ fn handle_established(
     remote: SocketAddr,
     s: &TcpSegment,
 ) {
+    // Data for a socket the app already closed has no reader. Linux
+    // resets the connection (`tcp_rcv_state_process` on an orphan in
+    // FIN_WAIT) so the peer stops sending into the void.
+    let st = k.lookup(fd).unwrap();
+    let rcv_nxt = st.tcb.as_ref().unwrap().rcv_nxt;
+    let end = s.seq.wrapping_add(s.payload.len() as u32);
+    if st.fd_closed && !s.payload.is_empty() && seq_gt(end, rcv_nxt) {
+        emit_rst(k, local, remote, s);
+        abort_connection(k, fd);
+        return;
+    }
+
     let mut wake_write = false;
     let mut wake_read = false;
     let mut send_ack = false;
@@ -293,6 +306,12 @@ fn handle_established(
     {
         let st = k.lookup_mut(fd).unwrap();
         let tcb = st.tcb.as_mut().unwrap();
+        // A retransmitted SYN-ACK, data or FIN that we can't accept, or a
+        // window probe (`seq = rcv_nxt - 1`). RFC 9293 §3.10.7.4: reply
+        // with an ACK carrying our current state. Without this a lost ACK
+        // leaves the sender retransmitting into silence until it aborts.
+        let probe = s.payload.is_empty() && s.seq == tcb.rcv_nxt.wrapping_sub(1);
+        let mut unacceptable = s.flags.syn || probe;
 
         // ACK: drain ACK'd bytes from send_buf, refresh advertised
         // window. Any ACK is worth waking a parked writer for — either
@@ -334,23 +353,32 @@ fn handle_established(
         // Data: accept if it lands exactly at rcv_nxt and fits under
         // the receive cap. Gaps, overlaps, and overruns all drop.
         let tcb = st.tcb.as_mut().unwrap();
-        if !s.payload.is_empty() && s.seq == tcb.rcv_nxt && !tcb.peer_fin {
-            let room = recv_cap.saturating_sub(tcb.recv_buf.len());
-            let n = s.payload.len().min(room);
-            if n > 0 {
-                tcb.recv_buf.extend_from_slice(&s.payload[..n]);
-                tcb.rcv_nxt = tcb.rcv_nxt.wrapping_add(n as u32);
-                wake_read = true;
-                send_ack = true;
+        if !s.payload.is_empty() {
+            let mut n = 0;
+            if s.seq == tcb.rcv_nxt && !tcb.peer_fin {
+                let room = recv_cap.saturating_sub(tcb.recv_buf.len());
+                n = s.payload.len().min(room);
+                if n > 0 {
+                    tcb.recv_buf.extend_from_slice(&s.payload[..n]);
+                    tcb.rcv_nxt = tcb.rcv_nxt.wrapping_add(n as u32);
+                    wake_read = true;
+                    send_ack = true;
+                }
             }
+            unacceptable |= n < s.payload.len();
         }
 
         // FIN: consumes one sequence number right after any payload.
         // Accept only if it lands in order.
         let tcb = st.tcb.as_mut().unwrap();
-        if s.flags.fin && !tcb.peer_fin {
+        if s.flags.fin && tcb.peer_fin {
+            // Retransmitted FIN — our ACK of it was lost.
+            unacceptable = true;
+        } else if s.flags.fin {
             let fin_seq = s.seq.wrapping_add(s.payload.len() as u32);
-            if fin_seq == tcb.rcv_nxt {
+            if fin_seq != tcb.rcv_nxt {
+                unacceptable = true;
+            } else {
                 tcb.peer_fin = true;
                 tcb.rcv_nxt = tcb.rcv_nxt.wrapping_add(1);
                 send_ack = true;
@@ -366,6 +394,8 @@ fn handle_established(
                 };
             }
         }
+
+        send_ack |= unacceptable;
 
         if wake_write {
             st.wake_write();
@@ -463,6 +493,7 @@ fn accept_syn(
             peer_fin: false,
             fin_seq: None,
             reset: false,
+            reset_error: ErrorKind::ConnectionReset,
             timed_out: false,
             egress_since_ack: 0,
             retx_attempts: 0,
@@ -744,7 +775,7 @@ enum AbortReason {
 /// stronger signal — but in practice only one ever fires per TCB.
 fn abort_error(tcb: &Tcb) -> Option<Error> {
     if tcb.reset {
-        Some(Error::from(ErrorKind::ConnectionReset))
+        Some(Error::from(tcb.reset_error))
     } else if tcb.timed_out {
         Some(Error::from(ErrorKind::TimedOut))
     } else {
@@ -755,11 +786,18 @@ fn abort_error(tcb: &Tcb) -> Option<Error> {
 fn abort_with(k: &mut Kernel, fd: Fd, reason: AbortReason) {
     let st = k.lookup_mut(fd).unwrap();
     if let Some(tcb) = st.tcb.as_mut() {
-        tcb.state = TcpState::Closed;
         match reason {
-            AbortReason::Reset => tcb.reset = true,
+            AbortReason::Reset => {
+                tcb.reset = true;
+                // Mirrors `tcp_reset`: the peer already finished, so the
+                // failure is a write into a closed pipe.
+                if tcb.state == TcpState::CloseWait {
+                    tcb.reset_error = ErrorKind::BrokenPipe;
+                }
+            }
             AbortReason::TimedOut => tcb.timed_out = true,
         }
+        tcb.state = TcpState::Closed;
         tcb.send_buf.clear();
         tcb.recv_buf.clear();
     }
@@ -1026,6 +1064,10 @@ pub(super) fn poll_recv_vectored(
         if let Some(e) = abort_err {
             return Poll::Ready(Err(e));
         }
+        // A zero-length read completes immediately, as `recv(2)` does.
+        if bufs.iter().all(|b| b.is_empty()) {
+            return Poll::Ready(Ok(0));
+        }
         if empty {
             // Clean EOF — peer sent FIN and we've drained everything.
             // `Ready(Ok(0))` is the standard EOF signal.
@@ -1042,6 +1084,7 @@ pub(super) fn poll_recv_vectored(
         }
         let local = bound_endpoint(st);
         let tcb = st.tcb.as_mut().unwrap();
+        let window_before = recv_cap.saturating_sub(tcb.recv_buf.len());
         let mut n = 0;
         for buf in bufs {
             let len = tcb.recv_buf.len().min(buf.len());
@@ -1052,12 +1095,17 @@ pub(super) fn poll_recv_vectored(
                 break;
             }
         }
-        // Window-update trigger: if we freed ≥ half the recv cap,
-        // advertise. Crude SWS avoidance; refine alongside real flow
-        // control.
-        let should_update = n >= recv_cap / 2;
-        (n, should_update, local, peer)
+        // Window-update trigger: advertise once the window reopens to a
+        // useful size, or when we freed ≥ half the recv cap. Without the
+        // first rule a peer stalled on a (nearly) zero window waits
+        // forever when the app drains in small reads.
+        let window_after = recv_cap.saturating_sub(tcb.recv_buf.len());
+        (n, (window_before, window_after), local, peer)
     };
+    let (window_before, window_after) = should_update_window;
+    let useful = (recv_cap / 2).min(mss_for(k, local.ip())).max(1);
+    let should_update_window =
+        n >= recv_cap / 2 || (window_before < useful && window_after >= useful);
 
     if should_update_window {
         let (snd_nxt, rcv_nxt, window) = {
@@ -1107,6 +1155,9 @@ pub(super) fn poll_peek(
     };
     if let Some(e) = abort_error(tcb) {
         return Poll::Ready(Err(e));
+    }
+    if buf.is_empty() {
+        return Poll::Ready(Ok(0));
     }
     if tcb.recv_buf.is_empty() {
         if tcb.peer_fin {
@@ -1195,6 +1246,66 @@ pub(super) fn check_retx(k: &mut Kernel) {
     }
     for fd in abort {
         abort_timed_out(k, fd);
+    }
+    probe_zero_windows(k, threshold);
+}
+
+/// Persist timer. A sender stalled on a zero window relies on the
+/// peer's window update, which can be lost. Every `threshold` egress
+/// passes, send a probe (`seq = snd_una - 1`) that the peer answers
+/// with an ACK carrying its current window. Unlike retransmits, probes
+/// never abort the connection — Linux keeps probing a live peer.
+fn probe_zero_windows(k: &mut Kernel, threshold: u32) {
+    let stalled: Vec<Fd> = k
+        .sockets
+        .iter()
+        .filter(|(_, st)| {
+            st.tcb.as_ref().is_some_and(|t| {
+                let sending = matches!(
+                    t.state,
+                    TcpState::Established
+                        | TcpState::CloseWait
+                        | TcpState::FinWait1
+                        | TcpState::Closing
+                        | TcpState::LastAck
+                );
+                let fin_pending = t.fin_seq.is_some_and(|fs| fs == t.snd_nxt);
+                sending
+                    && t.snd_wnd == 0
+                    && t.snd_una == t.snd_nxt
+                    && (!t.send_buf.is_empty() || fin_pending)
+            })
+        })
+        .map(|(fd, _)| fd)
+        .collect();
+    for fd in stalled {
+        let st = k.sockets.get_mut(fd).unwrap();
+        let local = bound_endpoint(st);
+        let tcb = st.tcb.as_mut().unwrap();
+        tcb.egress_since_ack += 1;
+        if tcb.egress_since_ack < threshold {
+            continue;
+        }
+        tcb.egress_since_ack = 0;
+        let (remote, seq, ack) = (tcb.peer, tcb.snd_una.wrapping_sub(1), tcb.rcv_nxt);
+        let window = advertised_window(k.recv_buf_cap, tcb.recv_buf.len());
+        emit(
+            k,
+            local,
+            remote,
+            TcpSegment {
+                src_port: local.port(),
+                dst_port: remote.port(),
+                seq,
+                ack,
+                flags: TcpFlags {
+                    ack: true,
+                    ..TcpFlags::default()
+                },
+                window,
+                payload: Bytes::new(),
+            },
+        );
     }
 }
 
@@ -1352,6 +1463,11 @@ fn mss_for(k: &Kernel, src_ip: IpAddr) -> usize {
 fn bound_endpoint(st: &Socket) -> SocketAddr {
     let bind = st.bound.as_ref().expect("bound at handshake time");
     SocketAddr::new(bind.local_addr, bind.local_port)
+}
+
+/// `a > b` in sequence space (RFC 1982 serial arithmetic).
+fn seq_gt(a: u32, b: u32) -> bool {
+    (a.wrapping_sub(b) as i32) > 0
 }
 
 fn advertised_window(recv_buf_cap: usize, recv_buf_len: usize) -> u16 {
