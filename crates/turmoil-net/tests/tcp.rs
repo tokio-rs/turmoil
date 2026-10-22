@@ -888,3 +888,24 @@ fn tcp_zero_length_read_completes_immediately() {
         assert_eq!(client.peek(&mut []).await.unwrap(), 0);
     });
 }
+
+#[test]
+fn tcp_zero_length_write_ignores_full_buffers() {
+    let cfg = KernelConfig::default().send_buf_cap(1).recv_buf_cap(1);
+    fixture::lo_with_config(cfg, async {
+        let listener = TcpListener::bind("127.0.0.1:8711").await.unwrap();
+        let (mut client, (_server, _)) =
+            tokio::try_join!(TcpStream::connect("127.0.0.1:8711"), listener.accept()).unwrap();
+        // One byte waits unread at the peer, one in our send buffer.
+        client.write_all(b"xy").await.unwrap();
+        assert_eq!(
+            client.try_write(b"z").unwrap_err().kind(),
+            ErrorKind::WouldBlock
+        );
+        let n = tokio::time::timeout(Duration::from_secs(1), client.write(b""))
+            .await
+            .expect("empty write waited for buffer space")
+            .unwrap();
+        assert_eq!(n, 0);
+    });
+}
