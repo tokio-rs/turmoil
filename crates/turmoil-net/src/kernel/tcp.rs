@@ -970,6 +970,10 @@ pub(super) fn poll_send(
     if !matches!(tcb.state, TcpState::Established | TcpState::CloseWait) {
         return Poll::Ready(Err(Error::from(ErrorKind::NotConnected)));
     }
+    // An empty write needs no buffer space, so it never waits.
+    if buf.is_empty() {
+        return Poll::Ready(Ok(0));
+    }
     let space = send_cap.saturating_sub(tcb.send_buf.len());
     if space == 0 {
         st.register_write_waker(cx.waker());
