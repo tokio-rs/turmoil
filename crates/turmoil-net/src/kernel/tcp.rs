@@ -1177,6 +1177,35 @@ pub(super) fn poll_peek(
     Poll::Ready(Ok(n))
 }
 
+/// Mirrors `tcp_poll`: an abort sets every flag; a FIN closes the read
+/// side; `write_closed` needs both directions shut, like `EPOLLHUP`.
+pub(super) fn readiness(st: &Socket, send_cap: usize) -> super::Readiness {
+    let Some(tcb) = st.tcb.as_ref() else {
+        return super::Readiness::default();
+    };
+    if tcb.reset || tcb.timed_out {
+        return super::Readiness {
+            readable: true,
+            writable: true,
+            read_closed: true,
+            write_closed: true,
+            error: true,
+        };
+    }
+    let closed = tcb.state == TcpState::Closed;
+    let read_closed = tcb.peer_fin || closed;
+    let write_closed = closed || (tcb.wr_closed && tcb.peer_fin);
+    let can_send = matches!(tcb.state, TcpState::Established | TcpState::CloseWait)
+        && tcb.send_buf.len() < send_cap;
+    super::Readiness {
+        readable: read_closed || !tcb.recv_buf.is_empty(),
+        writable: write_closed || tcb.wr_closed || can_send,
+        read_closed,
+        write_closed,
+        error: false,
+    }
+}
+
 /// Count-based retransmit sweep. For each TCB with unacked data,
 /// increment the "egress passes since ACK progress" counter. Once it
 /// crosses `retx_threshold`, rewind `snd_nxt = snd_una` so the next
