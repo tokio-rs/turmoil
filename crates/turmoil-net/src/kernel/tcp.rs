@@ -314,8 +314,8 @@ fn handle_established(
         let mut unacceptable = s.flags.syn || probe;
 
         // ACK: drain ACK'd bytes from send_buf, refresh advertised
-        // window. Any ACK is worth waking a parked writer for — either
-        // bytes drained or the window grew.
+        // window. Wake parked writers only on progress — bytes drained
+        // or the window grew — so a bare FIN or duplicate ACK doesn't.
         if s.flags.ack {
             let acked = s.ack.wrapping_sub(tcb.snd_una);
             let in_flight = tcb.snd_nxt.wrapping_sub(tcb.snd_una);
@@ -335,6 +335,7 @@ fn handle_established(
                 // Progress — retx machinery resets.
                 tcb.egress_since_ack = 0;
                 tcb.retx_attempts = 0;
+                wake_write = true;
 
                 // Advance state machine on FIN-ACK.
                 if fin_acked {
@@ -346,8 +347,8 @@ fn handle_established(
                     };
                 }
             }
+            wake_write |= s.window > tcb.snd_wnd;
             tcb.snd_wnd = s.window;
-            wake_write = true;
         }
 
         // Data: accept if it lands exactly at rcv_nxt and fits under
