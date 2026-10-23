@@ -60,6 +60,10 @@ pub(crate) struct Link {
 
     /// How often sending a message works vs. the message getting dropped
     pub(crate) message_loss: Option<MessageLoss>,
+
+    /// How TCP resends the segments the network drops. Only the
+    /// simulation-wide value applies.
+    pub(crate) tcp_retransmit: Option<TcpRetransmit>,
 }
 
 /// Configure latency behavior between two hosts.
@@ -90,6 +94,57 @@ pub(crate) struct MessageLoss {
 
     /// Probability of a failed link returning
     pub(crate) repair_rate: f64,
+}
+
+/// How TCP resends the segments that a partition or message loss drops.
+///
+/// A lost segment is resent after a retransmission timeout (RTO) drawn from
+/// `rto`. Every further loss of the same segment doubles its RTO, up to
+/// `max_rto`. Once `retries` resends are lost as well, the sender waits one
+/// more RTO and gives up: its end of the connection resets, and reads and
+/// writes fail as they do after a RST. The peer learns of it from the RST its
+/// next segment draws. SYN and FIN segments are resent like data. A RST is
+/// never resent. UDP stays lossy.
+///
+/// Without it, a dropped segment is gone for good and its stream stalls
+/// forever.
+///
+/// This models loss recovery only, not TCP's machinery. Limits:
+/// - There are no ACKs, congestion window or keepalive. A segment is resent
+///   only when the network drops it, and a connection that sends nothing
+///   never notices a dead peer.
+/// - A one-way partition loses only the segments sent across it. Segments
+///   flowing the other way are still delivered, although their ACKs would be
+///   lost on a real network and trigger resends there.
+/// - Loss is bursty: a partition drops everything in flight, and the resends
+///   it schedules come back together once their timers fire.
+///
+/// The defaults are Linux's:
+/// - `rto`: 200ms (`TCP_RTO_MIN`, the floor an estimate from a fast link
+///   settles on) to 1s (`TCP_TIMEOUT_INIT`, before any estimate)
+/// - `max_rto`: 120s (`TCP_RTO_MAX`)
+/// - `retries`: 15 (`net.ipv4.tcp_retries2`)
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TcpRetransmit {
+    /// The range a lost segment's first RTO is drawn from.
+    pub rto: RangeInclusive<Duration>,
+
+    /// The RTO stops doubling here.
+    pub max_rto: Duration,
+
+    /// How many resends of one segment may be lost before the connection
+    /// resets.
+    pub retries: u32,
+}
+
+impl Default for TcpRetransmit {
+    fn default() -> Self {
+        Self {
+            rto: Duration::from_millis(200)..=Duration::from_secs(1),
+            max_rto: Duration::from_secs(120),
+            retries: 15,
+        }
+    }
 }
 
 impl Default for Config {

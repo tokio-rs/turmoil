@@ -10,7 +10,7 @@ use tokio::{sync::oneshot, time::timeout};
 use turmoil::{
     lookup,
     net::{self, UdpSocket},
-    Builder, IpVersion, Result,
+    Builder, IpVersion, Result, TcpRetransmit,
 };
 
 const PORT: u16 = 1738;
@@ -514,6 +514,39 @@ fn network_partition() -> Result {
         send_ping(&sock).await?;
 
         assert!(timeout(Duration::from_secs(1), recv_pong(&sock))
+            .await
+            .is_err());
+
+        Ok(())
+    });
+
+    sim.run()
+}
+
+#[test]
+fn tcp_retransmit_leaves_datagrams_lost() -> Result {
+    let mut sim = Builder::new()
+        .tcp_retransmit(TcpRetransmit::default())
+        .build();
+
+    sim.host("server", || async {
+        let sock = bind().await?;
+
+        while let Ok(origin) = recv_ping(&sock).await {
+            let _ = send_pong(&sock, origin).await;
+        }
+
+        Ok(())
+    });
+
+    sim.client("client", async {
+        turmoil::partition("client", "server");
+
+        let sock = bind().await?;
+        send_ping(&sock).await?;
+        turmoil::repair("client", "server");
+
+        assert!(timeout(Duration::from_secs(5), recv_pong(&sock))
             .await
             .is_err());
 

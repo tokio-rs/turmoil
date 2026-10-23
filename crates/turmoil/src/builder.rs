@@ -77,6 +77,7 @@ impl Builder {
             link: config::Link {
                 latency: Some(config::Latency::default()),
                 message_loss: Some(config::MessageLoss::default()),
+                tcp_retransmit: None,
             },
             rng_seed: None,
         }
@@ -120,10 +121,9 @@ impl Builder {
         self
     }
 
-    /// The failure rate of messages on the network. For TCP
-    /// this will break connections as currently there are
-    /// no re-send capabilities. With UDP this is useful for
-    /// testing network flakiness.
+    /// The failure rate of messages on the network. For TCP this will break
+    /// connections unless [`Builder::tcp_retransmit`] resends the dropped
+    /// segments. With UDP this is useful for testing network flakiness.
     pub fn fail_rate(&mut self, value: f64) -> &mut Self {
         self.link.message_loss_mut().fail_rate = value;
         self
@@ -133,6 +133,18 @@ impl Builder {
     /// frequently a link is repaired after breaking.
     pub fn repair_rate(&mut self, value: f64) -> &mut Self {
         self.link.message_loss_mut().repair_rate = value;
+        self
+    }
+
+    /// Resends the TCP segments that partitions and message loss drop, as real
+    /// TCP does, and resets a connection whose resends keep getting lost. Off
+    /// by default, which drops such segments for good.
+    pub fn tcp_retransmit(&mut self, value: TcpRetransmit) -> &mut Self {
+        assert!(
+            !value.rto.start().is_zero() && value.rto.start() <= value.rto.end(),
+            "the RTO range must be non-empty and above zero"
+        );
+        self.link.tcp_retransmit = Some(value);
         self
     }
 

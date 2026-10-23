@@ -1,4 +1,4 @@
-use crate::envelope::{Envelope, Protocol};
+use crate::envelope::{Envelope, Protocol, Segment};
 use crate::host::Host;
 use crate::rt::Rt;
 use crate::{config, TRACING_TARGET};
@@ -8,6 +8,7 @@ use rand::{Rng, RngCore};
 use rand_distr::{Distribution, Exp};
 use std::collections::VecDeque;
 use std::io::{Error, ErrorKind, Result};
+use std::mem;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 use tokio::time::Instant;
@@ -258,35 +259,33 @@ impl Topology {
     }
 
     pub(crate) fn hold(&mut self, a: IpAddr, b: IpAddr) {
-        self.get_link_mut(&Pair::new(a, b)).hold();
+        link_mut(&mut self.links, &Pair::new(a, b)).hold();
     }
 
     pub(crate) fn release(&mut self, a: IpAddr, b: IpAddr) {
-        self.get_link_mut(&Pair::new(a, b)).release();
+        link_mut(&mut self.links, &Pair::new(a, b)).release();
     }
 
-    pub(crate) fn partition(&mut self, a: IpAddr, b: IpAddr) {
-        self.get_link_mut(&Pair::new(a, b)).explicit_partition();
+    pub(crate) fn partition(&mut self, rand: &mut dyn RngCore, a: IpAddr, b: IpAddr) {
+        link_mut(&mut self.links, &Pair::new(a, b)).explicit_partition(&self.config, rand);
     }
 
-    pub(crate) fn partition_oneway(&mut self, a: IpAddr, b: IpAddr) {
-        let link = &mut self.get_link_mut(&Pair::new(a, b));
-        link.partition_oneway(a, b);
+    pub(crate) fn partition_oneway(&mut self, rand: &mut dyn RngCore, a: IpAddr, b: IpAddr) {
+        link_mut(&mut self.links, &Pair::new(a, b)).partition_oneway(&self.config, rand, a, b);
     }
 
     pub(crate) fn repair(&mut self, a: IpAddr, b: IpAddr) {
-        self.get_link_mut(&Pair::new(a, b)).explicit_repair();
+        link_mut(&mut self.links, &Pair::new(a, b)).explicit_repair();
     }
 
     pub(crate) fn repair_oneway(&mut self, a: IpAddr, b: IpAddr) {
-        let link = &mut self.get_link_mut(&Pair::new(a, b));
-        link.repair_oneway(a, b);
+        link_mut(&mut self.links, &Pair::new(a, b)).repair_oneway(a, b);
     }
 
-    pub(crate) fn tick_by(&mut self, duration: Duration) {
+    pub(crate) fn tick_by(&mut self, rand: &mut dyn RngCore, duration: Duration) {
         let _ = self.rt.tick(duration);
         for link in self.links.values_mut() {
-            link.tick(self.rt.now());
+            link.tick(&self.config, rand, self.rt.now());
         }
     }
 
@@ -295,13 +294,13 @@ impl Topology {
             iter: self.links.iter_mut(),
         }
     }
+}
 
-    #[inline]
-    fn get_link_mut(&mut self, pair: &Pair) -> &mut Link {
-        self.links
-            .get_mut(pair)
-            .unwrap_or_else(|| panic!("unable to find link between {pair:?}"))
-    }
+#[inline]
+fn link_mut<'a>(links: &'a mut IndexMap<Pair, Link>, pair: &Pair) -> &'a mut Link {
+    links
+        .get_mut(pair)
+        .unwrap_or_else(|| panic!("unable to find link between {pair:?}"))
 }
 
 /// Represents a message sent between two hosts on the network.
@@ -310,6 +309,8 @@ struct Sent {
     dst: SocketAddr,
     status: DeliveryStatus,
     protocol: Protocol,
+    /// Set once the network lost this TCP segment.
+    backoff: Option<Backoff>,
 }
 
 impl Sent {
@@ -321,6 +322,15 @@ impl Sent {
 enum DeliveryStatus {
     DeliverAfter(Instant),
     Hold,
+    /// A lost TCP segment waits out its retransmission timeout.
+    Resend(Instant),
+}
+
+#[derive(Clone, Copy)]
+struct Backoff {
+    rto: Duration,
+    /// How many times the network lost the segment.
+    losses: u32,
 }
 
 impl Link {
@@ -346,7 +356,7 @@ impl Link {
         tracing::trace!(target: TRACING_TARGET, ?src, ?dst, protocol = %message, "Send");
 
         self.rand_partition_or_repair(global_config, rand);
-        let result = self.enqueue(global_config, rand, src, dst, message);
+        let result = self.enqueue(global_config, rand, src, dst, message, None);
         self.process_deliverables();
         result
     }
@@ -378,6 +388,7 @@ impl Link {
         src: SocketAddr,
         dst: SocketAddr,
         message: Protocol,
+        backoff: Option<Backoff>,
     ) -> Result<()> {
         let state = self.get_state_for_message(src.ip(), dst.ip());
         let status = match state {
@@ -392,6 +403,7 @@ impl Link {
             }
             _ => {
                 tracing::trace!(target: TRACING_TARGET,?src, ?dst, protocol = %message, "Drop");
+                self.lose(global_config, rand, src, dst, message, backoff);
                 return Ok(());
             }
         };
@@ -401,14 +413,132 @@ impl Link {
             dst,
             status,
             protocol: message,
+            backoff,
         };
 
         self.sent.push_back(sent);
         Ok(())
     }
 
-    fn tick(&mut self, now: Instant) {
+    /// The network lost a message. TCP resends a segment once its
+    /// retransmission timeout passes, doubling the timeout on every loss.
+    /// Anything else is gone.
+    fn lose(
+        &mut self,
+        global_config: &config::Link,
+        rand: &mut dyn RngCore,
+        src: SocketAddr,
+        dst: SocketAddr,
+        message: Protocol,
+        backoff: Option<Backoff>,
+    ) {
+        let Some(retransmit) = &global_config.tcp_retransmit else {
+            return;
+        };
+        if !matches!(
+            message,
+            Protocol::Tcp(Segment::Syn(_) | Segment::Data(..) | Segment::Fin(_))
+        ) {
+            return;
+        }
+        let backoff = match backoff {
+            None => Backoff {
+                rto: rand.random_range(retransmit.rto.clone()),
+                losses: 1,
+            },
+            Some(Backoff { rto, losses }) => Backoff {
+                rto: retransmit.max_rto.min(rto * 2),
+                losses: losses + 1,
+            },
+        };
+        self.sent.push_back(Sent {
+            src,
+            dst,
+            status: DeliveryStatus::Resend(self.now + backoff.rto),
+            protocol: message,
+            backoff: Some(backoff),
+        });
+    }
+
+    /// Loses every message in flight that `lost` picks. Segments already
+    /// waiting to be resent keep their timers.
+    fn lose_in_flight(
+        &mut self,
+        global_config: &config::Link,
+        rand: &mut dyn RngCore,
+        lost: impl Fn(&Sent) -> bool,
+    ) {
+        for sent in mem::take(&mut self.sent) {
+            if matches!(sent.status, DeliveryStatus::Resend(_)) || !lost(&sent) {
+                self.sent.push_back(sent);
+            } else {
+                self.lose(
+                    global_config,
+                    rand,
+                    sent.src,
+                    sent.dst,
+                    sent.protocol,
+                    sent.backoff,
+                );
+            }
+        }
+    }
+
+    /// Sends again every lost segment whose timeout passed. A segment whose
+    /// last allowed resend was lost too resets its sender's connection
+    /// instead.
+    fn resend_due(&mut self, global_config: &config::Link, rand: &mut dyn RngCore) {
+        while let Some(index) = self
+            .sent
+            .iter()
+            .position(|sent| matches!(sent.status, DeliveryStatus::Resend(at) if at <= self.now))
+        {
+            let sent = self.sent.remove(index).expect("the index is in bounds");
+            let retransmit = global_config
+                .tcp_retransmit
+                .as_ref()
+                .expect("only TCP resends");
+            let backoff = sent.backoff.expect("a lost segment has a backoff");
+            if backoff.losses > retransmit.retries {
+                self.reset(sent);
+                continue;
+            }
+            tracing::trace!(target: TRACING_TARGET, src = ?sent.src, dst = ?sent.dst, protocol = %sent.protocol, "Resend");
+            self.rand_partition_or_repair(global_config, rand);
+            let _ = self.enqueue(
+                global_config,
+                rand,
+                sent.src,
+                sent.dst,
+                sent.protocol,
+                sent.backoff,
+            );
+        }
+    }
+
+    /// The sender gives up on `sent`, as Linux does with `ETIMEDOUT`: its end
+    /// of the connection resets as though the peer had sent a RST, and the
+    /// rest of the stream is no longer resent. The peer is not told.
+    fn reset(&mut self, sent: Sent) {
+        tracing::trace!(target: TRACING_TARGET, src = ?sent.src, dst = ?sent.dst, protocol = %sent.protocol, "Reset");
+        self.sent.retain(|other| {
+            !(other.src == sent.src
+                && other.dst == sent.dst
+                && matches!(other.status, DeliveryStatus::Resend(_)))
+        });
+        self.deliverable
+            .entry(sent.src.ip())
+            .or_default()
+            .push_back(Envelope {
+                src: sent.dst,
+                dst: sent.src,
+                message: Protocol::Tcp(Segment::Rst),
+            });
+    }
+
+    fn tick(&mut self, global_config: &config::Link, rand: &mut dyn RngCore, now: Instant) {
         self.now = now;
+        self.resend_due(global_config, rand);
         self.process_deliverables();
     }
 
@@ -469,7 +599,7 @@ impl Link {
                 self.state_a_b = State::RandPartition;
                 self.state_b_a = State::RandPartition;
 
-                self.sent.clear();
+                self.lose_in_flight(global_config, rand, |_| true);
             }
             (State::RandPartition, _) | (_, State::RandPartition)
                 if self.rand_repair(global_config.message_loss(), rand) =>
@@ -485,7 +615,9 @@ impl Link {
         self.state_b_a = State::Hold;
 
         for sent in &mut self.sent {
-            sent.status = DeliveryStatus::Hold;
+            if !matches!(sent.status, DeliveryStatus::Resend(_)) {
+                sent.status = DeliveryStatus::Hold;
+            }
         }
     }
 
@@ -500,21 +632,27 @@ impl Link {
         }
     }
 
-    fn explicit_partition(&mut self) {
+    fn explicit_partition(&mut self, global_config: &config::Link, rand: &mut dyn RngCore) {
         self.state_a_b = State::ExplicitPartition;
         self.state_b_a = State::ExplicitPartition;
 
-        self.sent.clear();
+        self.lose_in_flight(global_config, rand, |_| true);
     }
 
-    fn partition_oneway(&mut self, from: IpAddr, to: IpAddr) {
+    fn partition_oneway(
+        &mut self,
+        global_config: &config::Link,
+        rand: &mut dyn RngCore,
+        from: IpAddr,
+        to: IpAddr,
+    ) {
         if from < to {
             self.state_a_b = State::ExplicitPartition;
         } else {
             self.state_b_a = State::ExplicitPartition;
         }
 
-        self.sent.retain(|sent| sent.src.ip() != from);
+        self.lose_in_flight(global_config, rand, |sent| sent.src.ip() == from);
     }
 
     fn repair_oneway(&mut self, from: IpAddr, to: IpAddr) {
