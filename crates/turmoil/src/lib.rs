@@ -181,6 +181,7 @@ pub use builder::Builder;
 
 mod config;
 use config::Config;
+pub use config::TcpRetransmit;
 
 mod dns;
 use dns::Dns;

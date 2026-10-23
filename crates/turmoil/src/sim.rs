@@ -424,7 +424,11 @@ impl<'a> Sim<'a> {
         // Tick the networking, processing messages. This is done before
         // ticking any other runtime, as they might be waiting on network
         // IO. (It also might be waiting on something else, such as time.)
-        self.world.borrow_mut().topology.tick_by(tick);
+        {
+            let mut world = self.world.borrow_mut();
+            let World { rng, topology, .. } = world.deref_mut();
+            topology.tick_by(rng, tick);
+        }
 
         // Tick each host runtimes with running software. If the software
         // completes, extract the result and return early if an error is

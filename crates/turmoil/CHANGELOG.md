@@ -8,6 +8,13 @@
   `OwnedReadHalf::poll_peek(&mut half, cx, buf)`, or use
   `half.poll_peek(cx, buf)`. This requires a breaking release.
 
+### Added
+
+- Add opt-in TCP retransmission with `Builder::tcp_retransmit`. Segments that
+  message loss or a partition drops are resent after an exponentially backed
+  off retransmission timeout, and a connection whose resends keep getting lost
+  resets.
+
 ### Changed
 
 - The `unstable-fs` and `unstable-io_uring` features now re-export from

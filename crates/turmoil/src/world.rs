@@ -150,11 +150,11 @@ impl World {
     }
 
     pub(crate) fn partition(&mut self, a: IpAddr, b: IpAddr) {
-        self.topology.partition(a, b);
+        self.topology.partition(&mut self.rng, a, b);
     }
 
     pub(crate) fn partition_oneway(&mut self, a: IpAddr, b: IpAddr) {
-        self.topology.partition_oneway(a, b);
+        self.topology.partition_oneway(&mut self.rng, a, b);
     }
 
     pub(crate) fn partition_many(&mut self, a: impl ToIpAddrs, b: impl ToIpAddrs) {
