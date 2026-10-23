@@ -3,10 +3,7 @@ use crate::envelope::Protocol;
 use crate::host::HostTimer;
 use crate::ip::IpVersionAddrIter;
 use crate::net::udp::MulticastGroups;
-use crate::{
-    config, for_pairs, Dns, Host, Result as TurmoilResult, ToIpAddr, ToIpAddrs, Topology,
-    TRACING_TARGET,
-};
+use crate::{config, for_pairs, Dns, Host, ToIpAddr, ToIpAddrs, Topology, TRACING_TARGET};
 
 use indexmap::IndexMap;
 use rand::RngCore;
@@ -81,15 +78,15 @@ impl World {
         }
     }
 
-    pub(crate) fn try_current<R>(f: impl FnOnce(&World) -> R) -> TurmoilResult<R> {
-        if CURRENT.is_set() {
-            CURRENT.with(|current| match current.try_borrow() {
-                Ok(world) => Ok(f(&world)),
-                Err(_) => Err("World already borrowed".into()),
-            })
-        } else {
-            Err("World not set".into())
+    /// Run `f` on the world if it is set and not already borrowed.
+    ///
+    /// Returns `None` otherwise. This must not allocate: it backs the public
+    /// clock queries, which may be called from inside a global allocator.
+    pub(crate) fn try_current<R>(f: impl FnOnce(&World) -> R) -> Option<R> {
+        if !CURRENT.is_set() {
+            return None;
         }
+        CURRENT.with(|current| current.try_borrow().ok().map(|world| f(&world)))
     }
 
     pub(crate) fn enter<R>(world: &RefCell<World>, f: impl FnOnce() -> R) -> R {
@@ -106,9 +103,9 @@ impl World {
         self.hosts.get(&addr).expect("host missing")
     }
 
-    pub(crate) fn try_current_host(&self) -> TurmoilResult<&Host> {
-        let addr = self.current.ok_or("current host missing")?;
-        self.hosts.get(&addr).ok_or_else(|| "host missing".into())
+    /// Returns the currently executing host, if any, without allocating.
+    pub(crate) fn try_current_host(&self) -> Option<&Host> {
+        self.hosts.get(&self.current?)
     }
 
     pub(crate) fn lookup(&mut self, host: impl ToIpAddr) -> IpAddr {
