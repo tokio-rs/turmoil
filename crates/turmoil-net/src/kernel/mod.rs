@@ -12,11 +12,15 @@
 use std::collections::VecDeque;
 use std::io::{Error, ErrorKind};
 use std::net::{IpAddr, SocketAddr};
+use std::ops::RangeInclusive;
 use std::task::{Context, Poll, Waker};
 
+use indexmap::IndexMap;
 use tokio::io::ReadBuf;
 
-use crate::kernel::socket::{BindKey, SocketTable, DEFAULT_RECV_BUF_CAP, DEFAULT_SEND_BUF_CAP};
+use crate::kernel::socket::{
+    BindKey, SocketTable, DEFAULT_EPHEMERAL_PORTS, DEFAULT_RECV_BUF_CAP, DEFAULT_SEND_BUF_CAP,
+};
 
 mod interface;
 mod packet;
@@ -53,7 +57,7 @@ pub const DEFAULT_BACKLOG: usize = 1024;
 pub const DEFAULT_RETX_THRESHOLD: u32 = 3;
 
 /// Default retransmit attempts before a TCP connection is aborted
-/// with `ConnectionReset`. Roughly analogous to Linux's
+/// with `TimedOut`. Roughly analogous to Linux's
 /// `tcp_retries2` (default 15) but tuned for count-based retx — we
 /// don't need the long tail, tests want to observe failure quickly.
 pub const DEFAULT_RETX_MAX: u32 = 5;
@@ -72,6 +76,16 @@ pub struct KernelConfig {
     pub default_backlog: usize,
     pub retx_threshold: u32,
     pub retx_max: u32,
+    /// Egress passes before an orphaned FIN_WAIT2 connection expires.
+    pub fin_wait2_timeout: u32,
+    /// Egress passes to remember a clean close for duplicate FIN ACKs.
+    /// This does not reserve the connection's local port.
+    pub time_wait_timeout: u32,
+    /// Ports handed out for `:0` binds and implicit binds on
+    /// `connect`/`sendto`. Linux `ip_local_port_range`.
+    pub ephemeral_ports: RangeInclusive<u16>,
+    /// Datagrams queued per UDP socket before new arrivals are dropped.
+    pub udp_recv_queue_cap: usize,
 }
 
 impl Default for KernelConfig {
@@ -84,6 +98,10 @@ impl Default for KernelConfig {
             default_backlog: DEFAULT_BACKLOG,
             retx_threshold: DEFAULT_RETX_THRESHOLD,
             retx_max: DEFAULT_RETX_MAX,
+            fin_wait2_timeout: 60_000,
+            time_wait_timeout: 120_000,
+            ephemeral_ports: DEFAULT_EPHEMERAL_PORTS,
+            udp_recv_queue_cap: usize::MAX,
         }
     }
 }
@@ -115,6 +133,22 @@ impl KernelConfig {
     }
     pub fn retx_max(mut self, v: u32) -> Self {
         self.retx_max = v;
+        self
+    }
+    pub fn ephemeral_ports(mut self, v: RangeInclusive<u16>) -> Self {
+        self.ephemeral_ports = v;
+        self
+    }
+    pub fn udp_recv_queue_cap(mut self, v: usize) -> Self {
+        self.udp_recv_queue_cap = v;
+        self
+    }
+    pub fn fin_wait2_timeout(mut self, v: u32) -> Self {
+        self.fin_wait2_timeout = v;
+        self
+    }
+    pub fn time_wait_timeout(mut self, v: u32) -> Self {
+        self.time_wait_timeout = v;
         self
     }
 }
@@ -172,6 +206,12 @@ pub struct Kernel {
     pub(crate) default_backlog: usize,
     pub(crate) retx_threshold: u32,
     pub(crate) retx_max: u32,
+    fin_wait2_timeout: u32,
+    time_wait_timeout: u32,
+    tick: u64,
+    closed_connections: IndexMap<(SocketAddr, SocketAddr), tcp::ClosedConnection>,
+    closed_expirations: VecDeque<(u64, (SocketAddr, SocketAddr))>,
+    pub(crate) udp_recv_queue_cap: usize,
     /// Packets queued by `poll_send_*` awaiting `egress()`.
     outbound: VecDeque<Outbound>,
     /// Monotonic TCP initial-sequence-number source. Deterministic by
@@ -188,16 +228,34 @@ impl Kernel {
 
     pub fn with_config(cfg: KernelConfig) -> Self {
         Self {
-            sockets: SocketTable::new(),
+            sockets: SocketTable::with_ports(cfg.ephemeral_ports),
             interfaces: Interfaces::new(cfg.mtu, cfg.loopback_mtu),
             send_buf_cap: cfg.send_buf_cap,
             recv_buf_cap: cfg.recv_buf_cap,
             default_backlog: cfg.default_backlog,
             retx_threshold: cfg.retx_threshold,
             retx_max: cfg.retx_max,
+            fin_wait2_timeout: cfg.fin_wait2_timeout,
+            time_wait_timeout: cfg.time_wait_timeout,
+            tick: 0,
+            closed_connections: IndexMap::new(),
+            closed_expirations: VecDeque::new(),
+            udp_recv_queue_cap: cfg.udp_recv_queue_cap,
             outbound: VecDeque::new(),
             tcp_isn: 0x0100_0000,
         }
+    }
+
+    /// Power-cycle the stack: discard every socket and queued packet
+    /// without emitting FIN or RST, as when a host crashes. Interfaces
+    /// and configuration survive. Fds are never reused, so handles
+    /// from before the reset fail with `NotFound` instead of aliasing
+    /// new sockets.
+    pub fn reset(&mut self) {
+        self.sockets.clear();
+        self.outbound.clear();
+        self.closed_connections.clear();
+        self.closed_expirations.clear();
     }
 
     /// Create a new socket in this kernel's socket table.
@@ -215,12 +273,9 @@ impl Kernel {
     /// any binding. For an active TCP connection, decides between a
     /// clean close (silent) and an abortive close (emits RST):
     ///
-    /// - RST if the app drops with unread bytes still queued in
-    ///   `recv_buf`, or with a live write side that never sent FIN.
-    ///   Matches Linux behavior and the `tokio::net::TcpStream` Drop
-    ///   semantics the upstream crate recently fixed.
-    /// - Silent close otherwise — the connection already reached a
-    ///   clean terminal state via FIN exchange.
+    /// - RST if the app drops with unread bytes still queued.
+    /// - FIN after queued writes if the connection is still active.
+    /// - Silent close if the connection is already terminal.
     ///
     /// Idempotent on an already-closed fd.
     pub fn close(&mut self, fd: Fd) {
@@ -324,11 +379,14 @@ impl Kernel {
             {
                 for &id in ids {
                     let other = self.lookup(id)?;
-                    // UDP SO_REUSEADDR permits identical and overlapping binds.
-                    // Do not apply UDP reuse semantics to TCP listeners.
-                    if !(ty == Type::Dgram
-                        && ((reuse_addr && other.reuse_addr) || (reuse_port && other.reuse_port)))
-                    {
+                    let reusable = match ty {
+                        Type::Dgram => {
+                            (reuse_addr && other.reuse_addr) || (reuse_port && other.reuse_port)
+                        }
+                        Type::Stream => reuse_addr && other.reuse_addr && other.tcb.is_some(),
+                        Type::SeqPacket => false,
+                    };
+                    if !reusable {
                         return Err(ErrorKind::AddrInUse.into());
                     }
                 }
@@ -541,12 +599,13 @@ impl Kernel {
         }
         match ty {
             Type::Dgram => {
+                let peer = udp::connect_peer(self, fd, *peer)?;
                 if !is_bound {
                     if let Err(e) = udp::auto_bind(self, fd, domain, ty, peer.ip()) {
                         return Poll::Ready(Err(e));
                     }
                 }
-                self.lookup_mut(fd).expect("socket present").peer = Some(Addr::Inet(*peer));
+                self.lookup_mut(fd).expect("socket present").peer = Some(Addr::Inet(peer));
                 Poll::Ready(Ok(()))
             }
             Type::Stream => tcp::poll_connect(self, fd, cx, domain, *peer, is_bound),
@@ -581,13 +640,9 @@ impl Kernel {
         };
         let listen = st.listen.as_mut().expect("poll_accept on non-listener fd");
         if let Some(child) = listen.ready.pop_front() {
-            let peer = self
-                .lookup(child)
-                .expect("accepted fd present")
-                .tcb
-                .as_ref()
-                .expect("accepted fd has TCB")
-                .peer;
+            let child_socket = self.lookup_mut(child).expect("accepted fd present");
+            child_socket.parent_listener = None;
+            let peer = child_socket.tcb.as_ref().expect("accepted fd has TCB").peer;
             return Poll::Ready(Ok((child, peer)));
         }
         if !listen.accept_wakers.iter().any(|w| w.will_wake(cx.waker())) {
@@ -787,9 +842,8 @@ impl Kernel {
     /// that an ACK folded through `deliver` can open a window and let
     /// the next segmentation pass pick up queued bytes.
     pub fn egress(&mut self, out: &mut Vec<Packet>) {
-        // Count-based retx check runs once per egress, before
-        // segmentation — if it rewinds snd_nxt for a socket, this
-        // call's segment_all pass picks up the re-emission.
+        self.tick = self.tick.saturating_add(1);
+        tcp::expire_closed(self);
         tcp::check_retx(self);
         loop {
             tcp::segment_all(self);

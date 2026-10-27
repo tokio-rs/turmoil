@@ -5,10 +5,10 @@ use std::io;
 use std::net::SocketAddr;
 use std::task::{Context, Poll};
 
-use crate::kernel::{Addr, Fd, SocketOption, SocketOptionKind, Type};
+use crate::kernel::{Addr, Domain, Fd, SocketOption, SocketOptionKind, Type};
 use crate::shim::tokio::net::tcp::TcpStream;
 use crate::shim::tokio::net::ToSocketAddrs;
-use crate::sys;
+use crate::{sys, sys_if_installed};
 
 #[derive(Debug)]
 pub struct TcpListener {
@@ -20,9 +20,25 @@ impl TcpListener {
         let addr = addr.to_socket_addr()?;
         let fd = sys(|k| {
             let backlog = k.default_backlog;
-            let fd = k.bind(&Addr::Inet(addr), Type::Stream)?;
-            k.listen(fd, backlog)?;
-            Ok::<_, io::Error>(fd)
+            let domain = if addr.is_ipv4() {
+                Domain::Inet
+            } else {
+                Domain::Inet6
+            };
+            let fd = k.open(domain, Type::Stream);
+            // Tokio's Unix listener enables SO_REUSEADDR before binding.
+            // Accepted children inherit it, allowing a replacement listener
+            // to bind while those connections finish closing.
+            let result = (|| {
+                k.set_option(fd, SocketOption::ReuseAddr(true))?;
+                k.bind_socket(fd, &Addr::Inet(addr))?;
+                k.listen(fd, backlog)?;
+                Ok::<_, io::Error>(fd)
+            })();
+            if result.is_err() {
+                k.close(fd);
+            }
+            result
         })?;
         Ok(Self { fd })
     }
@@ -63,6 +79,6 @@ impl TcpListener {
 
 impl Drop for TcpListener {
     fn drop(&mut self) {
-        sys(|k| k.close(self.fd));
+        sys_if_installed(|k| k.close(self.fd));
     }
 }

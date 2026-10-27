@@ -23,6 +23,43 @@ use crate::kernel::packet::{self, Packet, Transport, UdpDatagram};
 use crate::kernel::socket::{Addr, BindKey, Domain, Fd, MulticastMembership, Socket, Type};
 use crate::kernel::{InterfaceId, Kernel, EMSGSIZE};
 
+/// A link-local IPv6 connect needs an interface, either in the peer
+/// address or inherited from a link-local bind. Linux rejects a
+/// wildcard-bound, unscoped connect with EINVAL rather than accepting
+/// it and silently filtering all replies.
+pub(super) fn connect_peer(k: &Kernel, fd: Fd, peer: SocketAddr) -> Result<SocketAddr> {
+    let SocketAddr::V6(mut peer) = peer else {
+        return Ok(peer);
+    };
+    if peer.ip().is_unicast_link_local() {
+        let bound_interface = k
+            .lookup(fd)?
+            .bound
+            .as_ref()
+            .filter(|bind| matches!(bind.local_addr, IpAddr::V6(ip) if ip.is_unicast_link_local()))
+            .and_then(|bind| k.interfaces.by_address(bind.local_addr));
+        let interface = if peer.scope_id() == 0 {
+            bound_interface.ok_or(ErrorKind::InvalidInput)?
+        } else {
+            let interface = k
+                .interfaces
+                .by_index(peer.scope_id())
+                .ok_or(ErrorKind::NetworkUnreachable)?;
+            if bound_interface.is_some_and(|bound| bound != interface) {
+                return Err(ErrorKind::InvalidInput.into());
+            }
+            interface
+        };
+        // All non-loopback addresses live on Link in this model; lo
+        // cannot route a link-local peer even though its index exists.
+        if interface == InterfaceId::Loopback {
+            return Err(ErrorKind::NetworkUnreachable.into());
+        }
+        peer.set_scope_id(interface.index());
+    }
+    Ok(peer.into())
+}
+
 pub(super) fn recv(
     st: &mut Socket,
     cx: &mut Context<'_>,
@@ -172,6 +209,7 @@ pub(super) fn peek_from(
 }
 
 pub(super) fn deliver(k: &mut Kernel, pkt: &Packet, d: &UdpDatagram, scope: InterfaceId) {
+    let cap = k.udp_recv_queue_cap;
     // Linux rejects loopback-source packets arriving on a non-loopback device
     // under the default route_localnet policy. Source binding is not routing.
     if (pkt.is_broadcast() || pkt.dst.is_multicast())
@@ -213,7 +251,7 @@ pub(super) fn deliver(k: &mut Kernel, pkt: &Packet, d: &UdpDatagram, scope: Inte
                     st.multicast_all_v6
                 };
                 if !multicast || all || st.multicast_memberships().contains(&membership) {
-                    enqueue(st, pkt, d, scope);
+                    enqueue(st, pkt, d, scope, cap);
                 }
             });
         }
@@ -232,6 +270,7 @@ pub(super) fn deliver(k: &mut Kernel, pkt: &Packet, d: &UdpDatagram, scope: Inte
                 pkt,
                 d,
                 scope,
+                cap,
             );
             return;
         }
@@ -289,6 +328,7 @@ pub(super) fn deliver(k: &mut Kernel, pkt: &Packet, d: &UdpDatagram, scope: Inte
         pkt,
         d,
         scope,
+        cap,
     );
 }
 
@@ -302,12 +342,16 @@ fn source_endpoint(ip: IpAddr, port: u16, interface: InterfaceId) -> Addr {
     Addr::Inet(addr)
 }
 
-fn enqueue(st: &mut Socket, pkt: &Packet, d: &UdpDatagram, interface: InterfaceId) {
+fn enqueue(st: &mut Socket, pkt: &Packet, d: &UdpDatagram, interface: InterfaceId, cap: usize) {
     let from = source_endpoint(pkt.src, d.src_port, interface);
     if let Some(peer) = &st.peer {
         if peer != &from {
             return;
         }
+    }
+    // A full receive queue drops the datagram, like a full SO_RCVBUF.
+    if st.recv_queue.len() >= cap {
+        return;
     }
     st.recv_queue.push_back((from, d.payload.clone()));
     st.wake_read();

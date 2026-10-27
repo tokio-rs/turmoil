@@ -10,7 +10,7 @@ use tokio::io::{Interest, ReadBuf, Ready};
 use crate::kernel::{Addr, Fd, SocketOption, SocketOptionKind, Type};
 use crate::shim::tokio::net::tcp::stream::to_ready;
 use crate::shim::tokio::net::ToSocketAddrs;
-use crate::sys;
+use crate::{sys, sys_if_installed};
 
 #[derive(Debug)]
 pub struct UdpSocket {
@@ -38,6 +38,11 @@ impl UdpSocket {
         }
     }
 
+    /// Select a peer and filter incoming datagrams to that peer.
+    ///
+    /// Link-local IPv6 peers need a scope ID, unless the socket is
+    /// bound to a link-local interface address. A wildcard-bound socket
+    /// connecting to an unscoped link-local peer returns `InvalidInput`.
     pub async fn connect<A: ToSocketAddrs>(&self, addr: A) -> io::Result<()> {
         let addr = addr.to_socket_addr()?;
         poll_fn(|cx| sys(|k| k.poll_connect(self.fd, cx, &Addr::Inet(addr)))).await
@@ -291,6 +296,6 @@ fn unwrap_try(p: Poll<io::Result<usize>>) -> io::Result<usize> {
 
 impl Drop for UdpSocket {
     fn drop(&mut self) {
-        sys(|k| k.close(self.fd));
+        sys_if_installed(|k| k.close(self.fd));
     }
 }
