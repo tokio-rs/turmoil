@@ -38,7 +38,8 @@ use crate::fabric::Fabric;
 pub use crate::fabric::HostId;
 use crate::kernel::Kernel;
 pub use crate::kernel::{
-    Interface, InterfaceId, KernelConfig, Packet, TcpFlags, TcpSegment, Transport, UdpDatagram,
+    Interface, InterfaceId, IpFragment, KernelConfig, Packet, TcpFlags, TcpSegment, Transport,
+    UdpDatagram,
 };
 pub use crate::netstat::{Netstat, NetstatEntry, NetstatState, Proto};
 pub use crate::rule::{Latency, Rule, RuleGuard, RuleId, Verdict};

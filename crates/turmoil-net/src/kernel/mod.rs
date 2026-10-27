@@ -22,6 +22,7 @@ use crate::kernel::socket::{
     BindKey, SocketTable, DEFAULT_EPHEMERAL_PORTS, DEFAULT_RECV_BUF_CAP, DEFAULT_SEND_BUF_CAP,
 };
 
+mod fragment;
 mod interface;
 mod packet;
 mod socket;
@@ -37,7 +38,7 @@ pub use socket::{Addr, Domain, Fd, SocketOption, SocketOptionKind, Type};
 // for netstat
 pub use socket::{ListenState, Socket, Tcb, TcpState};
 // for rules
-pub use packet::{Packet, TcpFlags, TcpSegment, Transport, UdpDatagram};
+pub use packet::{IpFragment, Packet, TcpFlags, TcpSegment, Transport, UdpDatagram};
 
 /// Default MTU for non-loopback traffic (bytes). Matches standard Ethernet.
 pub const DEFAULT_MTU: u32 = 1500;
@@ -86,6 +87,14 @@ pub struct KernelConfig {
     pub ephemeral_ports: RangeInclusive<u16>,
     /// Datagrams queued per UDP socket before new arrivals are dropped.
     pub udp_recv_queue_cap: usize,
+    /// Fragment UDP datagrams larger than the output MTU.
+    pub udp_fragmentation: bool,
+    /// IPv4 reassembly lifetime in egress passes; IPv6 uses twice this.
+    pub fragment_timeout: u32,
+    /// Maximum bytes buffered across incomplete datagrams on one host.
+    pub fragment_buffer_cap: usize,
+    /// Maximum incomplete or rejected datagrams per host.
+    pub fragment_queue_cap: usize,
 }
 
 impl Default for KernelConfig {
@@ -102,6 +111,10 @@ impl Default for KernelConfig {
             time_wait_timeout: 120_000,
             ephemeral_ports: DEFAULT_EPHEMERAL_PORTS,
             udp_recv_queue_cap: usize::MAX,
+            udp_fragmentation: true,
+            fragment_timeout: 30_000,
+            fragment_buffer_cap: 4 * 1024 * 1024,
+            fragment_queue_cap: 1024,
         }
     }
 }
@@ -149,6 +162,22 @@ impl KernelConfig {
     }
     pub fn time_wait_timeout(mut self, v: u32) -> Self {
         self.time_wait_timeout = v;
+        self
+    }
+    pub fn udp_fragmentation(mut self, v: bool) -> Self {
+        self.udp_fragmentation = v;
+        self
+    }
+    pub fn fragment_timeout(mut self, v: u32) -> Self {
+        self.fragment_timeout = v;
+        self
+    }
+    pub fn fragment_buffer_cap(mut self, v: usize) -> Self {
+        self.fragment_buffer_cap = v;
+        self
+    }
+    pub fn fragment_queue_cap(mut self, v: usize) -> Self {
+        self.fragment_queue_cap = v;
         self
     }
 }
@@ -212,6 +241,9 @@ pub struct Kernel {
     closed_connections: IndexMap<(SocketAddr, SocketAddr), tcp::ClosedConnection>,
     closed_expirations: VecDeque<(u64, (SocketAddr, SocketAddr))>,
     pub(crate) udp_recv_queue_cap: usize,
+    udp_fragmentation: bool,
+    ip_id: u32,
+    fragments: fragment::Reassembly,
     /// Packets queued by `poll_send_*` awaiting `egress()`.
     outbound: VecDeque<Outbound>,
     /// Monotonic TCP initial-sequence-number source. Deterministic by
@@ -241,6 +273,13 @@ impl Kernel {
             closed_connections: IndexMap::new(),
             closed_expirations: VecDeque::new(),
             udp_recv_queue_cap: cfg.udp_recv_queue_cap,
+            udp_fragmentation: cfg.udp_fragmentation,
+            ip_id: 0,
+            fragments: fragment::Reassembly::new(
+                cfg.fragment_timeout,
+                cfg.fragment_buffer_cap,
+                cfg.fragment_queue_cap,
+            ),
             outbound: VecDeque::new(),
             tcp_isn: 0x0100_0000,
         }
@@ -256,6 +295,7 @@ impl Kernel {
         self.outbound.clear();
         self.closed_connections.clear();
         self.closed_expirations.clear();
+        self.fragments.clear();
     }
 
     /// Create a new socket in this kernel's socket table.
@@ -826,6 +866,14 @@ impl Kernel {
         match pkt.payload.clone() {
             Transport::Udp(d) => udp::deliver(self, &pkt, &d, scope),
             Transport::Tcp(s) => tcp::deliver(self, &pkt, &s),
+            Transport::Fragment(f) => {
+                if let Some(packet) = self.fragments.receive(&pkt, &f, scope, self.tick) {
+                    let Transport::Udp(d) = &packet.payload else {
+                        unreachable!()
+                    };
+                    udp::deliver(self, &packet, d, scope);
+                }
+            }
         }
     }
 
@@ -843,6 +891,7 @@ impl Kernel {
     /// the next segmentation pass pick up queued bytes.
     pub fn egress(&mut self, out: &mut Vec<Packet>) {
         self.tick = self.tick.saturating_add(1);
+        self.fragments.expire(self.tick);
         tcp::expire_closed(self);
         tcp::check_retx(self);
         loop {
