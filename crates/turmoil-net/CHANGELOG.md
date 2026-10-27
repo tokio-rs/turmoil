@@ -1,3 +1,15 @@
+# Unreleased
+
+### Fixed
+
+- Failed TCP half reunification returns usable original halves without
+  shutting down the write side.
+- TCP connect succeeds when the peer sends FIN after the handshake but
+  before the connect future is polled again, preserving buffered data.
+- Link-local IPv6 UDP connect retains the effective interface scope.
+  Unscoped peers now return `InvalidInput` unless a link-local bind
+  supplies the interface, matching Linux.
+
 # 0.1.0 (May 4, 2026)
 
 Initial release. `turmoil-net` is a deterministic simulated socket
