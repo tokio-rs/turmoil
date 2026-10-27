@@ -45,7 +45,13 @@ impl Packet {
             IpAddr::V4(_) => IPV4_HEADER_SIZE,
             IpAddr::V6(_) => IPV6_HEADER_SIZE,
         } as u32;
-        ip_hdr + self.payload.size()
+        let fragment_header =
+            if self.dst.is_ipv6() && matches!(self.payload, Transport::Fragment(_)) {
+                8
+            } else {
+                0
+            };
+        ip_hdr + fragment_header + self.payload.size()
     }
 }
 
@@ -58,6 +64,8 @@ pub(super) fn is_broadcast(ip: IpAddr) -> bool {
 pub enum Transport {
     Udp(UdpDatagram),
     Tcp(TcpSegment),
+    /// An IP fragment of a UDP datagram. TCP already segments to the MTU.
+    Fragment(IpFragment),
 }
 
 impl Transport {
@@ -66,7 +74,33 @@ impl Transport {
         match self {
             Transport::Udp(d) => UDP_HEADER_SIZE as u32 + d.payload.len() as u32,
             Transport::Tcp(s) => TCP_HEADER_SIZE as u32 + s.payload.len() as u32,
+            Transport::Fragment(f) => f.payload.len() as u32,
         }
+    }
+}
+
+/// Fragment of an IP payload carrying UDP. `offset` is measured in
+/// bytes from the UDP header and is always a multiple of eight.
+/// Only the first fragment contains that header (eight bytes).
+/// Checksums, like those of unfragmented packets, are not modeled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IpFragment {
+    pub id: u32,
+    pub offset: u32,
+    pub more: bool,
+    pub payload: Bytes,
+}
+
+impl IpFragment {
+    /// UDP ports are present only in the first fragment.
+    pub fn ports(&self) -> Option<(u16, u16)> {
+        if self.offset != 0 || self.payload.len() < UDP_HEADER_SIZE as usize {
+            return None;
+        }
+        Some((
+            u16::from_be_bytes([self.payload[0], self.payload[1]]),
+            u16::from_be_bytes([self.payload[2], self.payload[3]]),
+        ))
     }
 }
 
