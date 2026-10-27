@@ -89,6 +89,15 @@ pub trait ToIpAddr: sealed::Sealed {
     /// `netstat` that have no business inventing addresses.
     #[doc(hidden)]
     fn try_to_ip_addr(&self, dns: &Dns) -> Option<IpAddr>;
+
+    #[doc(hidden)]
+    fn try_to_ip_addr_with(
+        &self,
+        dns: &Dns,
+        _resolve: &dyn Fn(&str) -> Option<IpAddr>,
+    ) -> Option<IpAddr> {
+        self.try_to_ip_addr(dns)
+    }
 }
 
 /// A value that resolves to zero or more [`IpAddr`]s. Blanket impl
@@ -105,6 +114,13 @@ impl ToIpAddr for str {
     fn try_to_ip_addr(&self, dns: &Dns) -> Option<IpAddr> {
         dns.lookup(self)
     }
+    fn try_to_ip_addr_with(
+        &self,
+        _: &Dns,
+        resolve: &dyn Fn(&str) -> Option<IpAddr>,
+    ) -> Option<IpAddr> {
+        resolve(self)
+    }
 }
 
 impl ToIpAddr for String {
@@ -114,6 +130,13 @@ impl ToIpAddr for String {
     fn try_to_ip_addr(&self, dns: &Dns) -> Option<IpAddr> {
         dns.lookup(self)
     }
+    fn try_to_ip_addr_with(
+        &self,
+        _: &Dns,
+        resolve: &dyn Fn(&str) -> Option<IpAddr>,
+    ) -> Option<IpAddr> {
+        resolve(self)
+    }
 }
 
 impl ToIpAddr for &str {
@@ -122,6 +145,13 @@ impl ToIpAddr for &str {
     }
     fn try_to_ip_addr(&self, dns: &Dns) -> Option<IpAddr> {
         dns.lookup(self)
+    }
+    fn try_to_ip_addr_with(
+        &self,
+        _: &Dns,
+        resolve: &dyn Fn(&str) -> Option<IpAddr>,
+    ) -> Option<IpAddr> {
+        resolve(self)
     }
 }
 

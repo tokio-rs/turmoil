@@ -46,6 +46,80 @@ fn run(test: impl Future<Output = ()> + 'static) {
     }
 }
 
+#[test]
+#[cfg_attr(parity_tokio, ignore = "requires private Linux network namespace")]
+fn link_local_connect_requires_an_interface() {
+    run(async {
+        for (scope, expected) in [
+            (0, ErrorKind::InvalidInput),
+            (1, ErrorKind::NetworkUnreachable),
+            (9999, ErrorKind::NetworkUnreachable),
+        ] {
+            // A failed Linux connect can retain the selected device.
+            // Use a fresh socket to test each initially unbound route.
+            let socket = UdpSocket::bind("[::]:0").await.unwrap();
+            let peer = SocketAddrV6::new("fe80::1".parse().unwrap(), 9000, 0, scope);
+            assert_eq!(
+                socket.connect(peer).await.unwrap_err().kind(),
+                expected,
+                "scope {scope}"
+            );
+            assert_eq!(
+                socket.peer_addr().unwrap_err().kind(),
+                ErrorKind::NotConnected
+            );
+        }
+    });
+}
+
+#[test]
+#[cfg_attr(parity_tokio, ignore = "requires private Linux network namespace")]
+fn connected_link_local_udp_preserves_the_effective_scope() {
+    run(async {
+        let ip = "fe80::1".parse().unwrap();
+        for bound_interface in [false, true] {
+            let local = SocketAddrV6::new(ip, 0, 0, 2);
+            let server = UdpSocket::bind(local).await.unwrap();
+            let client = if bound_interface {
+                UdpSocket::bind(local).await.unwrap()
+            } else {
+                UdpSocket::bind("[::]:0").await.unwrap()
+            };
+            let mut peer = match server.local_addr().unwrap() {
+                SocketAddr::V6(peer) => peer,
+                _ => unreachable!(),
+            };
+            if bound_interface {
+                peer.set_scope_id(1);
+                assert_eq!(
+                    client.connect(peer).await.unwrap_err().kind(),
+                    ErrorKind::InvalidInput
+                );
+            }
+            peer.set_scope_id(if bound_interface { 0 } else { 2 });
+            client.connect(peer).await.unwrap();
+            assert_eq!(
+                client.peer_addr().unwrap(),
+                SocketAddrV6::new(ip, peer.port(), 0, 2).into()
+            );
+            client.send(b"ping").await.unwrap();
+            let mut buf = [0; 4];
+            let (n, source) =
+                tokio::time::timeout(Duration::from_secs(1), server.recv_from(&mut buf))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(&buf[..n], b"ping");
+            server.send_to(b"pong", source).await.unwrap();
+            let n = tokio::time::timeout(Duration::from_secs(1), client.recv(&mut buf))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(&buf[..n], b"pong");
+        }
+    });
+}
+
 async fn received(socket: &UdpSocket) -> bool {
     let mut buf = [0; 8];
     match tokio::time::timeout(Duration::from_millis(40), socket.recv_from(&mut buf)).await {
