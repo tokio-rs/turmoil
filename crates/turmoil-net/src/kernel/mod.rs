@@ -12,7 +12,7 @@
 use std::collections::VecDeque;
 use std::io::{Error, ErrorKind};
 use std::net::{IpAddr, SocketAddr};
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, Waker};
 
 use tokio::io::ReadBuf;
 
@@ -117,6 +117,22 @@ impl KernelConfig {
         self.retx_max = v;
         self
     }
+}
+
+/// Level-triggered readiness of a socket, the facts `poll(2)` reports.
+/// Shims map these onto `tokio::io::Ready`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Readiness {
+    /// A read would not block: data, EOF, or an error is pending.
+    pub readable: bool,
+    /// A write would not block: buffer space, or an error is pending.
+    pub writable: bool,
+    /// The peer finished sending, or the connection is gone.
+    pub read_closed: bool,
+    /// Both directions are shut down, or the connection is gone.
+    pub write_closed: bool,
+    /// The connection was reset or timed out.
+    pub error: bool,
 }
 
 /// Linux errno for `EAFNOSUPPORT`. Used where we want `kind() ==
@@ -649,6 +665,34 @@ impl Kernel {
             Poll::Ready(result) => result,
             Poll::Pending => Err(ErrorKind::WouldBlock.into()),
         }
+    }
+
+    /// `poll(2)` for one socket. Never registers a waker — pair with
+    /// [`Self::register_read_waker`] / [`Self::register_write_waker`]
+    /// when the caller needs to park.
+    pub fn readiness(&self, fd: Fd) -> std::io::Result<Readiness> {
+        let st = self.lookup(fd)?;
+        Ok(match st.ty {
+            Type::Stream => tcp::readiness(st, self.send_buf_cap),
+            Type::Dgram => Readiness {
+                readable: !st.recv_queue.is_empty(),
+                writable: true,
+                ..Readiness::default()
+            },
+            Type::SeqPacket => unimplemented!("SOCK_SEQPACKET readiness"),
+        })
+    }
+
+    /// Wake `waker` on the next read-side event (data, FIN, RST).
+    pub fn register_read_waker(&mut self, fd: Fd, waker: &Waker) -> std::io::Result<()> {
+        self.lookup_mut(fd)?.register_read_waker(waker);
+        Ok(())
+    }
+
+    /// Wake `waker` on the next write-side event (ACK, window, RST).
+    pub fn register_write_waker(&mut self, fd: Fd, waker: &Waker) -> std::io::Result<()> {
+        self.lookup_mut(fd)?.register_write_waker(waker);
+        Ok(())
     }
 
     /// `shutdown(SHUT_WR)`. TCP-only in practice; UDP sockets have no
