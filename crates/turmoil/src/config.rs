@@ -19,8 +19,8 @@ use crate::fs::FsConfig;
 /// - tick: 1ms
 /// - epoch: the current system time
 /// - ephemeral_ports: 49152..=65535
-/// - tcp_capacity: 64
-/// - udp_capacity: 64
+/// - tcp_capacity: 64 KiB send and receive buffers
+/// - udp_capacity: 64 datagrams
 #[derive(Clone)]
 pub(crate) struct Config {
     /// How long the test should run for in simulated time.
@@ -34,10 +34,11 @@ pub(crate) struct Config {
 
     pub(crate) ephemeral_ports: RangeInclusive<u16>,
 
-    /// Max size of the tcp receive buffer
-    pub(crate) tcp_capacity: usize,
+    /// Per-socket TCP send and receive buffer size, in bytes. `None`
+    /// keeps the network stack's default.
+    pub(crate) tcp_capacity: Option<usize>,
 
-    /// Max size of the udp receive buffer
+    /// Datagrams queued per UDP socket before arrivals are dropped
     pub(crate) udp_capacity: usize,
 
     /// Enables tokio IO driver
@@ -50,6 +51,43 @@ pub(crate) struct Config {
     /// Filesystem configuration
     #[cfg(feature = "unstable-fs")]
     pub(crate) fs: FsConfig,
+}
+
+/// TCP retransmits after this long without an ACK, matching Linux's
+/// initial RTO. Stretched for links slow enough to exceed it.
+const MIN_RTO: Duration = Duration::from_secs(1);
+
+impl Config {
+    /// Per-host network stack settings.
+    ///
+    /// The stack retransmits after a number of egress passes rather
+    /// than elapsed time; turmoil egresses once per tick, so the count
+    /// is the RTO in ticks.
+    pub(crate) fn kernel(&self, max_latency: Duration) -> turmoil_net::KernelConfig {
+        let mut kernel = turmoil_net::KernelConfig::default()
+            .ephemeral_ports(self.ephemeral_ports.clone())
+            .udp_recv_queue_cap(self.udp_capacity)
+            .retx_threshold(self.retx_threshold(max_latency))
+            .fin_wait2_timeout(self.network_ticks(Duration::from_secs(60)))
+            .time_wait_timeout(self.network_ticks(Duration::from_secs(120)))
+            .fragment_timeout(self.network_ticks(Duration::from_secs(30)));
+        if let Some(capacity) = self.tcp_capacity {
+            kernel = kernel.send_buf_cap(capacity).recv_buf_cap(capacity);
+        }
+        kernel
+    }
+
+    pub(crate) fn retx_threshold(&self, max_latency: Duration) -> u32 {
+        self.network_ticks(MIN_RTO.max(max_latency.saturating_mul(3)))
+    }
+
+    fn network_ticks(&self, duration: Duration) -> u32 {
+        duration
+            .as_nanos()
+            .div_ceil(self.tick.as_nanos().max(1))
+            .try_into()
+            .unwrap_or(u32::MAX)
+    }
 }
 
 /// Configures link behavior.
@@ -99,7 +137,7 @@ impl Default for Config {
             tick: Duration::from_millis(1),
             epoch: SystemTime::now(),
             ephemeral_ports: 49152..=65535,
-            tcp_capacity: 64,
+            tcp_capacity: None,
             udp_capacity: 64,
             enable_tokio_io: false,
             random_node_order: false,
