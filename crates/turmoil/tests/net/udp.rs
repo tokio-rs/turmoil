@@ -38,7 +38,7 @@ async fn send_ping(sock: &net::UdpSocket) -> Result<()> {
 }
 
 fn try_send_ping(sock: &net::UdpSocket) -> Result<()> {
-    sock.try_send_to(b"ping", (lookup("server"), 1738))?;
+    sock.try_send_to(b"ping", (lookup("server"), 1738).into())?;
 
     Ok(())
 }
@@ -280,8 +280,7 @@ fn udp_ipv4_multicast_loop() -> Result {
         socket.recv_from(&mut buf).await?;
         assert_eq!([1], buf);
 
-        // Enable multicast loop.
-        socket.join_multicast_v4(multicast_addr, Ipv4Addr::UNSPECIFIED)?;
+        // Enable multicast loop. Joining again would be EADDRINUSE.
         socket.set_multicast_loop_v4(true)?;
 
         let _ = socket.send_to(&[2], dst).await?;
@@ -332,8 +331,7 @@ fn udp_ipv6_multicast_loop() -> Result {
         socket.recv_from(&mut buf).await?;
         assert_eq!([1], buf);
 
-        // Enable multicast loop.
-        socket.join_multicast_v6(&multicast_addr, 0)?;
+        // Enable multicast loop. Joining again would be EADDRINUSE.
         socket.set_multicast_loop_v6(true)?;
 
         let _ = socket.send_to(&[2], dst).await?;
@@ -648,26 +646,34 @@ fn bind_ipv6_socket() -> Result {
     sim.run()
 }
 
+// As on Linux, wildcard binds succeed in either family, but a host has
+// no source address to reach a peer outside its network's family.
 #[test]
-#[should_panic]
-fn bind_ipv4_version_missmatch() {
+fn ipv4_unreachable_on_ipv6_network() -> Result {
     let mut sim = Builder::new().ip_version(IpVersion::V6).build();
     sim.client("client", async move {
-        let _sock = bind_to_v4(0).await?;
+        let sock = bind_to_v4(0).await?;
+        assert_error_kind(
+            sock.send_to(b"x", "192.168.0.2:80").await,
+            ErrorKind::AddrNotAvailable,
+        );
         Ok(())
     });
-    sim.run().unwrap()
+    sim.run()
 }
 
 #[test]
-#[should_panic]
-fn bind_ipv6_version_missmatch() {
+fn ipv6_unreachable_on_ipv4_network() -> Result {
     let mut sim = Builder::new().ip_version(IpVersion::V4).build();
     sim.client("client", async move {
-        let _sock = bind_to_v6(0).await?;
+        let sock = bind_to_v6(0).await?;
+        assert_error_kind(
+            sock.send_to(b"x", "[fe80::2]:80").await,
+            ErrorKind::AddrNotAvailable,
+        );
         Ok(())
     });
-    sim.run().unwrap()
+    sim.run()
 }
 
 #[test]
@@ -676,10 +682,7 @@ fn non_zero_ipv4_bind() -> Result {
     sim.client("client", async move {
         let sock = UdpSocket::bind("1.1.1.1:1").await;
 
-        let Err(err) = sock else {
-            panic!("socket creation should have failed")
-        };
-        assert_eq!(err.to_string(), "1.1.1.1 is not supported");
+        assert_error_kind(sock, ErrorKind::AddrNotAvailable);
         Ok(())
     });
     sim.run()
@@ -838,10 +841,14 @@ fn loopback_localhost_public_v4() -> Result {
             socket.send_to(&expected, peer).await.unwrap();
         });
 
+        // The listener is bound to loopback, so a datagram to the host's
+        // public address finds no socket and is dropped.
         let bind_addr = SocketAddr::new(bind_addr.ip(), 0);
         let socket = UdpSocket::bind(bind_addr).await?;
-        let res = socket.send_to(&expected, connect_addr).await;
-        assert_error_kind(res, io::ErrorKind::ConnectionRefused);
+        socket.send_to(&expected, connect_addr).await?;
+        let mut buf = [0; 5];
+        let reply = timeout(Duration::from_secs(1), socket.recv_from(&mut buf)).await;
+        assert!(reply.is_err());
 
         Ok(())
     });
@@ -889,10 +896,14 @@ fn loopback_localhost_public_v6() -> Result {
             socket.send_to(&expected, peer).await.unwrap();
         });
 
+        // The listener is bound to loopback, so a datagram to the host's
+        // public address finds no socket and is dropped.
         let bind_addr = SocketAddr::new(bind_addr.ip(), 0);
         let socket = UdpSocket::bind(bind_addr).await?;
-        let res = socket.send_to(&expected, connect_addr).await;
-        assert_error_kind(res, io::ErrorKind::ConnectionRefused);
+        socket.send_to(&expected, connect_addr).await?;
+        let mut buf = [0; 5];
+        let reply = timeout(Duration::from_secs(1), socket.recv_from(&mut buf)).await;
+        assert!(reply.is_err());
 
         Ok(())
     });
@@ -993,15 +1004,9 @@ fn socket_to_nonexistent_node() -> Result {
     sim.client("client", async move {
         assert_eq!(lookup("client"), Ipv4Addr::new(192, 168, 0, 1));
         let sock = UdpSocket::bind("0.0.0.0:0").await?;
-        let send = sock.send_to(b"Hello world!", "192.168.0.2:80").await;
-        assert!(
-            send.is_err(),
-            "Send operation should have failed, since node does not exist"
-        );
-
-        let err = send.unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::ConnectionRefused);
-        assert_eq!(err.to_string(), "Connection refused");
+        // UDP is connectionless: the send succeeds and the datagram is
+        // lost.
+        sock.send_to(b"Hello world!", "192.168.0.2:80").await?;
 
         Ok(())
     });

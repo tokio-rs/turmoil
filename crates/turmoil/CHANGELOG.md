@@ -1,5 +1,10 @@
 # Unreleased
 
+### Fixed
+
+- Broadcast and multicast from loopback-bound UDP sockets no longer
+  attempt to create a topology link from a host to itself.
+
 ### Breaking
 
 - `turmoil::net::tcp::OwnedReadHalf::poll_peek` now takes `&mut self`

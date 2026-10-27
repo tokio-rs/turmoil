@@ -93,8 +93,9 @@ fn try_read_vectored_scatter_and_partial_reads() -> Result {
 
 #[test]
 fn try_read_vectored_crosses_segments_and_releases_capacity() -> Result {
+    // Three-byte send and receive buffers.
     let mut sim = Builder::new()
-        .tcp_capacity(2)
+        .tcp_capacity(3)
         .tick_duration(Duration::from_millis(1))
         .build();
     sim.client("client", async {
@@ -102,27 +103,34 @@ fn try_read_vectored_crosses_segments_and_releases_capacity() -> Result {
         let (client, (mut server, _)) =
             tokio::try_join!(TcpStream::connect(("127.0.0.1", PORT)), listener.accept())?;
         assert_eq!(client.try_write(b"ab")?, 2);
-        assert_eq!(client.try_write(b"cdef")?, 4);
+        assert_eq!(client.try_write(b"cdef")?, 1);
         assert_error_kind(client.try_write(b"g"), ErrorKind::WouldBlock);
-        // Loopback delivery runs on the next simulation tick. Let both
-        // segments arrive without consuming either one.
+        // Loopback delivery runs on the next simulation tick. Both
+        // segments land in the server's receive buffer, which frees the
+        // send buffer for bytes the closed window holds back.
         tokio::time::sleep(Duration::from_millis(10)).await;
+        assert_eq!(client.try_write(b"def")?, 3);
         assert_error_kind(client.try_write(b"g"), ErrorKind::WouldBlock);
-        let mut first = [0; 3];
-        let mut second = [0; 3];
+        let mut first = [0; 2];
+        let mut second = [0; 2];
         let (read, write) = server.into_split();
         assert_eq!(
             read.try_read_vectored(&mut [
                 IoSliceMut::new(&mut first),
                 IoSliceMut::new(&mut second),
             ])?,
-            6
+            3
         );
-        assert_eq!(&first, b"abc");
-        assert_eq!(&second, b"def");
+        assert_eq!(&first, b"ab");
+        assert_eq!(&second[..1], b"c");
+        // Reading reopens the window; the held bytes drain and free
+        // space again.
+        client.writable().await?;
         assert_eq!(client.try_write(b"g")?, 1);
         server = read.reunite(write)?;
-        assert_eq!(server.read_u8().await?, b'g');
+        let mut rest = [0; 4];
+        server.read_exact(&mut rest).await?;
+        assert_eq!(&rest, b"defg");
         Ok(())
     });
     sim.run()
@@ -130,7 +138,9 @@ fn try_read_vectored_crosses_segments_and_releases_capacity() -> Result {
 
 #[test]
 fn ready_then_try_read_vectored() -> Result {
-    let mut sim = Builder::new().tcp_capacity(1).build();
+    // Each four-byte write fits the server's receive buffer, leaving room
+    // in the window for the FIN.
+    let mut sim = Builder::new().tcp_capacity(5).build();
     sim.client("client", async {
         let listener = TcpListener::bind(("127.0.0.1", PORT)).await?;
         let (mut client, (mut server, _)) =
@@ -161,7 +171,7 @@ fn ready_then_try_read_vectored() -> Result {
                 .is_err()
         );
 
-        // Readiness must release capacity, and FIN must not need a channel slot.
+        // Readiness must release capacity.
         client.write_all(b"efgh").await?;
         client.shutdown().await?;
         sleep(Duration::from_secs(1)).await;
@@ -241,9 +251,10 @@ fn network_partitions_during_connect() -> Result {
     sim.client("client", async {
         turmoil::partition("client", "server");
 
+        // SYNs vanish, so connect gives up once retransmits run out.
         assert_error_kind(
             TcpStream::connect(("server", PORT)).await,
-            io::ErrorKind::ConnectionRefused,
+            io::ErrorKind::TimedOut,
         );
 
         turmoil::repair("client", "server");
@@ -298,8 +309,9 @@ fn release_bind_on_drop() -> Result {
 
 #[test]
 fn ephemeral_port_does_not_leak_on_server_shutdown() -> Result {
+    // Each connection takes a three-way handshake plus the server's FIN.
     let mut sim = Builder::new()
-        .simulation_duration(Duration::from_secs(60))
+        .simulation_duration(Duration::from_secs(120))
         .min_message_latency(Duration::from_millis(1))
         .max_message_latency(Duration::from_millis(1))
         .build();
@@ -430,9 +442,13 @@ fn hold_and_release_once_connected() -> Result {
 fn network_partition_once_connected() -> Result {
     let mut sim = Builder::new().build();
 
+    let accepted = Rc::new(Notify::new());
+    let notify = accepted.clone();
+
     sim.client("server", async move {
         let listener = bind().await?;
         let (mut s, _) = listener.accept().await?;
+        notify.notify_one();
 
         assert!(timeout(Duration::from_secs(1), s.read_u8()).await.is_err());
 
@@ -444,6 +460,9 @@ fn network_partition_once_connected() -> Result {
     sim.client("client", async move {
         let mut s = TcpStream::connect(("server", PORT)).await?;
 
+        // `connect` returns before the server sees the final ACK; let the
+        // handshake finish so the server can accept.
+        accepted.notified().await;
         turmoil::partition("server", "client");
 
         s.write_u8(1).await?;
@@ -527,16 +546,19 @@ fn accept_front_of_line_dropped() -> Result {
     });
 
     sim.client("client", async move {
-        // Queue up a number of broken connections at the server.
+        // Queue up a number of abandoned connections at the server. The
+        // handshakes complete into the accept backlog, so connect returns
+        // before the server accepts.
         for _ in 0..5 {
             let connect = TcpStream::connect(("server", PORT));
-            assert!(timeout(Duration::from_secs(1), connect).await.is_err());
+            drop(timeout(Duration::from_secs(1), connect).await??);
         }
 
         // After allowing the server to accept, the next connection attempt
         // should succeed.
         notify.notify_one();
-        let _ = TcpStream::connect(("server", PORT)).await?;
+        let mut s = TcpStream::connect(("server", PORT)).await?;
+        s.write_u8(1).await?;
 
         Ok(())
     });
@@ -741,8 +763,14 @@ fn drop_listener_with_non_empty_queue() -> Result {
         tokio::time::sleep(tick).await;
         notify.notify_one();
 
+        // Closing the listener resets every unaccepted connection. A
+        // handshake still in flight is refused; one that completed into
+        // the backlog connects, then sees the reset.
         for fut in conns {
-            assert_error_kind(fut.await?, io::ErrorKind::ConnectionRefused);
+            match fut.await? {
+                Err(err) => assert_eq!(err.kind(), io::ErrorKind::ConnectionRefused),
+                Ok(mut s) => assert_error_kind(s.read_u8().await, io::ErrorKind::ConnectionReset),
+            }
         }
 
         Ok(())
@@ -799,6 +827,8 @@ fn hangup() -> Result {
 
     sim.client("client", async move {
         let s = TcpStream::connect(("server", PORT)).await?;
+        // The server's side establishes when the final ACK lands.
+        tokio::time::sleep(Duration::from_secs(1)).await;
 
         assert_eq!(1, turmoil::established_tcp_stream_count());
         assert_eq!(1, turmoil::established_tcp_stream_count_on("server"));
@@ -847,7 +877,8 @@ fn shutdown_write() -> Result {
 
         s.shutdown().await?;
 
-        assert_error_kind(s.shutdown().await, io::ErrorKind::NotConnected);
+        // Shutting down again is a no-op, as on Linux.
+        s.shutdown().await?;
         assert_error_kind(s.write_u8(1).await, io::ErrorKind::BrokenPipe);
 
         // Ensure the other half is still open
@@ -1001,8 +1032,9 @@ fn split() -> Result {
     sim.run()
 }
 
-#[test_case(1; "full receive channel")]
-#[test_case(2; "spare receive capacity")]
+// The FIN needs one byte of window, like any sequence number.
+#[test_case(65; "tight receive buffer")]
+#[test_case(128; "spare receive buffer")]
 fn ready_reports_close_behind_unread_data(capacity: usize) -> Result {
     let mut sim = Builder::new().tcp_capacity(capacity).build();
 
@@ -1140,10 +1172,12 @@ fn ready_reports_reset() -> Result {
     sim.run()
 }
 
-#[test_case(1; "exhausted credits")]
-#[test_case(2; "spare credits")]
-fn ready_writable_reports_reset(capacity: usize) -> Result {
-    let mut sim = Builder::new().tcp_capacity(capacity).build();
+#[test_case(b"unreadun"; "full buffers")]
+#[test_case(b"un"; "spare buffer space")]
+fn ready_writable_reports_reset(unread: &'static [u8]) -> Result {
+    // Four-byte buffers: eight unread bytes fill the server's receive
+    // buffer and our send buffer.
+    let mut sim = Builder::new().tcp_capacity(4).build();
 
     sim.client("server", async {
         let listener = bind().await?;
@@ -1155,9 +1189,9 @@ fn ready_writable_reports_reset(capacity: usize) -> Result {
 
     sim.client("client", async move {
         let mut s = TcpStream::connect(("server", PORT)).await?;
-        s.write_all(b"unread").await?;
+        s.write_all(unread).await?;
 
-        if capacity > 1 {
+        if unread.len() < 8 {
             sleep(Duration::from_secs(2)).await;
         }
 
@@ -1166,7 +1200,9 @@ fn ready_writable_reports_reset(capacity: usize) -> Result {
         assert!(start.elapsed() < Duration::from_secs(2));
         assert!(ready.is_write_closed(), "{ready:?}");
         assert!(!ready.is_read_closed(), "{ready:?}");
-        assert_error_kind(s.writable().await, ErrorKind::BrokenPipe);
+        // As in tokio, readiness succeeds; the write reports the reset.
+        s.writable().await?;
+        assert_error_kind(s.try_write(b"x"), ErrorKind::ConnectionReset);
         Ok(())
     });
 
@@ -1175,7 +1211,7 @@ fn ready_writable_reports_reset(capacity: usize) -> Result {
 
 #[test]
 fn write_blocked_on_flow_control_fails_on_reset() -> Result {
-    let mut sim = Builder::new().tcp_capacity(1).build();
+    let mut sim = Builder::new().tcp_capacity(3).build();
 
     sim.client("server", async {
         let listener = bind().await?;
@@ -1187,13 +1223,14 @@ fn write_blocked_on_flow_control_fails_on_reset() -> Result {
 
     sim.client("client", async move {
         let mut s = TcpStream::connect(("server", PORT)).await?;
-        s.write_all(b"one").await?;
+        // Fill the server's receive buffer and our send buffer.
+        s.write_all(b"onetwo").await?;
 
-        // No credits remain, so only the reset can wake this write.
+        // No space remains, so only the reset can wake this write.
         let start = Instant::now();
-        let res = timeout(Duration::from_secs(3), s.write_all(b"two")).await?;
+        let res = timeout(Duration::from_secs(3), s.write_all(b"six")).await?;
         assert!(start.elapsed() < Duration::from_secs(2));
-        assert_error_kind(res, ErrorKind::BrokenPipe);
+        assert_error_kind(res, ErrorKind::ConnectionReset);
         Ok(())
     });
 
@@ -1212,9 +1249,10 @@ fn empty_write_does_not_wait_for_credits() -> Result {
 
     sim.client("client", async move {
         let mut s = TcpStream::connect(("server", PORT)).await?;
-        s.write_all(b"one").await?;
+        // Fill the server's receive buffer and our send buffer.
+        s.write_all(b"xy").await?;
 
-        // The server never reads, so the credit is never returned.
+        // The server never reads, so space never frees up.
         assert_eq!(0, timeout(Duration::from_secs(1), s.write(b"")).await??);
 
         let (_, mut w) = s.into_split();
@@ -1225,24 +1263,29 @@ fn empty_write_does_not_wait_for_credits() -> Result {
     sim.run()
 }
 
-#[test_case(Interest::ERROR; "error only")]
-#[test_case(Interest::ERROR | Interest::READABLE; "error and readable")]
-#[test_case(Interest::ERROR | Interest::WRITABLE; "error and writable")]
-fn ready_rejects_unsupported_interests(interest: Interest) -> Result {
+#[test]
+fn ready_error_interest_waits_for_reset() -> Result {
     let mut sim = Builder::new().build();
 
-    sim.host("server", || async {
+    sim.client("server", async {
         let listener = bind().await?;
-        let (_s, _) = listener.accept().await?;
-        future::pending().await
+        let (s, _) = listener.accept().await?;
+        sleep(Duration::from_secs(1)).await;
+        drop(s);
+        Ok(())
     });
 
     sim.client("client", async move {
-        let s = TcpStream::connect(("server", PORT)).await?;
-        assert_error_kind(
-            timeout(Duration::from_secs(1), s.ready(interest)).await?,
-            ErrorKind::InvalidInput,
-        );
+        let mut s = TcpStream::connect(("server", PORT)).await?;
+        s.write_all(b"unread").await?;
+
+        // A healthy connection has no error to report.
+        let healthy = timeout(Duration::from_millis(500), s.ready(Interest::ERROR)).await;
+        assert!(healthy.is_err());
+
+        let ready = timeout(Duration::from_secs(3), s.ready(Interest::ERROR)).await??;
+        assert!(ready.is_error(), "{ready:?}");
+        assert!(!ready.is_readable(), "{ready:?}");
         Ok(())
     });
 
@@ -1419,8 +1462,8 @@ fn concurrent_readable_and_writable_waiters_observe_reset() -> Result {
 
     sim.client("client", async move {
         let mut s = TcpStream::connect(("server", PORT)).await?;
-        // Exhaust send credits so only the reset can wake the write waiter.
-        s.write_all(b"one").await?;
+        // Fill both buffers so only the reset can wake the write waiter.
+        s.write_all(b"xy").await?;
 
         let s = std::sync::Arc::new(s);
         let w = s.clone();
@@ -1434,8 +1477,10 @@ fn concurrent_readable_and_writable_waiters_observe_reset() -> Result {
             tokio::join!(writable, readable)
         })
         .await?;
-        assert_error_kind(write?, ErrorKind::BrokenPipe);
+        // As in tokio, readiness succeeds; I/O reports the reset.
+        write??;
         read??;
+        assert_error_kind(s.try_write(b"z"), ErrorKind::ConnectionReset);
         Ok(())
     });
 
@@ -1481,8 +1526,8 @@ fn two_writable_waiters_both_wake() -> Result {
         let listener = bind().await?;
         let (mut writer, (mut reader, _)) =
             tokio::try_join!(TcpStream::connect(("127.0.0.1", PORT)), listener.accept())?;
-        // Exhaust send credits so both waiters block on the peer reading.
-        writer.write_all(b"x").await?;
+        // Fill both buffers so both waiters block on the peer reading.
+        writer.write_all(b"xy").await?;
         let writer = std::sync::Arc::new(writer);
 
         let w = writer.clone();
@@ -1669,26 +1714,34 @@ fn bind_ipv6_socket() -> Result {
     sim.run()
 }
 
+// As on Linux, wildcard binds succeed in either family, but a host has
+// no source address to reach a peer outside its network's family.
 #[test]
-#[should_panic]
-fn bind_ipv4_version_missmatch() {
+fn ipv4_unreachable_on_ipv6_network() -> Result {
     let mut sim = Builder::new().ip_version(IpVersion::V6).build();
     sim.client("client", async move {
         let _sock = bind_to_v4(0).await?;
+        assert_error_kind(
+            TcpStream::connect("192.168.0.2:80").await,
+            ErrorKind::AddrNotAvailable,
+        );
         Ok(())
     });
-    sim.run().unwrap()
+    sim.run()
 }
 
 #[test]
-#[should_panic]
-fn bind_ipv6_version_missmatch() {
+fn ipv6_unreachable_on_ipv4_network() -> Result {
     let mut sim = Builder::new().ip_version(IpVersion::V4).build();
     sim.client("client", async move {
         let _sock = bind_to_v6(0).await?;
+        assert_error_kind(
+            TcpStream::connect("[fe80::2]:80").await,
+            ErrorKind::AddrNotAvailable,
+        );
         Ok(())
     });
-    sim.run().unwrap()
+    sim.run()
 }
 
 #[test]
@@ -1697,10 +1750,7 @@ fn non_zero_bind() -> Result {
     sim.client("client", async move {
         let sock = TcpListener::bind("1.1.1.1:1").await;
 
-        let Err(err) = sock else {
-            panic!("bind should have failed")
-        };
-        assert_eq!(err.to_string(), "1.1.1.1:1 is not supported");
+        assert_error_kind(sock, ErrorKind::AddrNotAvailable);
         Ok(())
     });
     sim.run()
@@ -1989,58 +2039,21 @@ fn remote_dropped() -> Result {
 }
 
 #[test]
-#[should_panic(expected = "192.168.0.1:80 server socket buffer full")]
-fn socket_capacity() {
-    let mut sim = Builder::new()
-        .min_message_latency(Duration::from_millis(1))
-        .max_message_latency(Duration::from_millis(1))
-        .tcp_capacity(1)
-        .build();
-
-    sim.host("server", || async {
-        let l = TcpListener::bind(("0.0.0.0", 80)).await?;
-
-        loop {
-            _ = l.accept().await?;
-        }
-    });
-
-    sim.client("client1", async move {
-        _ = TcpStream::connect("server:80").await?;
-        Ok(())
-    });
-
-    sim.client("client2", async move {
-        _ = TcpStream::connect("server:80").await?;
-        Ok(())
-    });
-
-    _ = sim.run();
-}
-
-#[test]
 fn socket_to_nonexistent_node() -> Result {
     let mut sim = Builder::new().build();
     sim.client("client", async move {
         assert_eq!(lookup("client"), Ipv4Addr::new(192, 168, 0, 1));
         let sock = TcpStream::connect("192.168.0.2:80").await;
-        assert!(
-            sock.is_err(),
-            "Send operation should have failed, since node does not exist"
-        );
 
-        let err = sock.unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::ConnectionRefused);
-        assert_eq!(err.to_string(), "Connection refused");
+        assert_error_kind(sock, ErrorKind::ConnectionRefused);
 
         Ok(())
     });
     sim.run()
 }
 
-#[should_panic]
 #[test]
-fn exhaust_ephemeral_ports() {
+fn exhaust_ephemeral_ports() -> Result {
     let mut sim = Builder::new()
         .tick_duration(Duration::from_millis(1))
         .ephemeral_ports(49152..=49162)
@@ -2058,12 +2071,19 @@ fn exhaust_ephemeral_ports() {
         });
 
         let mut socks = vec![];
-        loop {
-            socks.push(TcpStream::connect("127.0.0.1:1738").await?);
-        }
+        let err = loop {
+            match TcpStream::connect("127.0.0.1:1738").await {
+                Ok(sock) => socks.push(sock),
+                Err(err) => break err,
+            }
+        };
+        assert_eq!(err.kind(), ErrorKind::AddrInUse);
+        assert_eq!(socks.len(), 11);
+
+        Ok(())
     });
 
-    _ = sim.run()
+    sim.run()
 }
 
 #[test]
@@ -2293,17 +2313,28 @@ fn tcp_backpressure_with_oneway_partition() {
         .max_message_latency(Duration::from_millis(1))
         .build();
 
-    sim.host("server", || async {
-        let listener = bind().await?;
-        let (mut conn, _) = listener.accept().await?;
+    let accepted = Rc::new(Notify::new());
+    let notify = accepted.clone();
 
-        conn.write_all(b"hello").await?;
+    sim.host("server", move || {
+        let notify = notify.clone();
+        async move {
+            let listener = bind().await?;
+            let (mut conn, _) = listener.accept().await?;
+            notify.notify_one();
 
-        future::pending().await
+            // Fits the client's receive buffer: with ACKs cut off, the server
+            // can't learn that the window reopened.
+            conn.write_all(b"hell").await?;
+
+            future::pending().await
+        }
     });
 
     sim.client("client", async move {
         let mut stream = TcpStream::connect(("server", PORT)).await?;
+        // The handshake's final ACK must reach the server first.
+        accepted.notified().await;
 
         // Partition client→server only; server→client remains open
         turmoil::partition_oneway("client", "server");
@@ -2317,9 +2348,9 @@ fn tcp_backpressure_with_oneway_partition() {
         assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
 
         // Server→client: reads succeed (healthy direction)
-        let mut buf = [0u8; 5];
+        let mut buf = [0u8; 4];
         stream.read_exact(&mut buf).await?;
-        assert_eq!(&buf, b"hello");
+        assert_eq!(&buf, b"hell");
 
         Ok(())
     });

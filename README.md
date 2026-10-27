@@ -5,10 +5,10 @@
 <p align="center"><em>Add hardship to your tests.</em></p>
 
 Turmoil is a family of crates for deterministic simulation testing of
-distributed systems. It runs multiple concurrent hosts within a single thread
-and injects "hardship" — latency, drops, partitions, crashes, torn writes —
-into the simulated network and filesystem, under manual control or a seeded
-RNG.
+distributed systems. Each simulated host has its own Tokio runtime. Turmoil
+steps hosts in turn and injects faults — latency, drops, partitions, crashes,
+torn writes — into the simulated network and filesystem, under manual control
+or a seeded RNG.
 
 [![Build Status][actions-badge]][actions-url]
 [![Discord chat][discord-badge]][discord-url]

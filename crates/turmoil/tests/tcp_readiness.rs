@@ -14,6 +14,13 @@ use turmoil::{
     Builder, Result,
 };
 
+/// Leave `stream` with nothing to read and no room to write: with
+/// one-byte buffers, the first byte waits unread at the peer and the
+/// second in our send buffer behind a zero window.
+async fn fill(stream: &mut TcpStream) -> io::Result<()> {
+    stream.write_all(b"xy").await
+}
+
 async fn pair() -> io::Result<(TcpStream, TcpStream)> {
     let listener = TcpListener::bind("127.0.0.1:1234").await?;
     let (stream, (peer, _)) =
@@ -57,16 +64,17 @@ fn try_write_after_reset(capacity: usize) -> Result {
     let mut sim = Builder::new().tcp_capacity(capacity).build();
     sim.client("client", async {
         let (mut stream, peer) = pair().await?;
-        stream.write_all(b"x").await?;
+        // With one-byte buffers this leaves no space; with two, some.
+        stream.write_all(b"xy").await?;
         sleep(Duration::from_secs(1)).await;
-        drop(peer); // Unread data causes RST without returning send credits.
+        drop(peer); // Unread data causes RST.
         sleep(Duration::from_secs(1)).await;
 
         assert!(stream.ready(Interest::WRITABLE).await?.is_write_closed());
-        // Repeated writes must report the terminal error, regardless of credits.
+        // Repeated writes must report the terminal error, regardless of space.
         for _ in 0..3 {
             assert_eq!(
-                ErrorKind::BrokenPipe,
+                ErrorKind::ConnectionReset,
                 stream.try_write(b"y").unwrap_err().kind()
             );
         }
@@ -92,7 +100,7 @@ fn async_waiters_release_task_wakers(method: Wait, cancel: bool) -> Result {
     sim.client("client", async move {
         let (mut stream, mut peer) = pair().await?;
         if cancel {
-            stream.write_all(b"x").await?; // Neither direction is ready.
+            fill(&mut stream).await?; // Neither direction is ready.
         } else {
             peer.write_all(b"x").await?;
             sleep(Duration::from_secs(1)).await; // Both directions are ready.
@@ -127,7 +135,7 @@ fn cancellation_preserves_other_waiters(method: Wait) -> Result {
     let mut sim = Builder::new().tcp_capacity(1).build();
     sim.client("client", async move {
         let (mut stream, mut peer) = pair().await?;
-        stream.write_all(b"x").await?;
+        fill(&mut stream).await?;
         let mut first = task::spawn(method.run(&stream));
         let mut second = task::spawn(method.run(&stream));
         let mut cancelled = task::spawn(method.run(&stream));
@@ -164,7 +172,7 @@ fn waiter_rearms_after_readiness_is_consumed(method: Wait) -> Result {
     let mut sim = Builder::new().tcp_capacity(1).build();
     sim.client("client", async move {
         let (mut stream, mut peer) = pair().await?;
-        stream.write_all(b"x").await?;
+        fill(&mut stream).await?;
         let mut waiter = task::spawn(method.run(&stream));
         assert_pending!(waiter.poll());
 
@@ -225,7 +233,7 @@ fn poll_and_async_waiters_are_independent(method: PollWait, poll_first: bool) ->
     let mut sim = Builder::new().tcp_capacity(1).build();
     sim.client("client", async move {
         let (mut stream, mut peer) = pair().await?;
-        stream.write_all(b"x").await?;
+        fill(&mut stream).await?;
         let async_method = if matches!(method, PollWait::Writable) {
             Wait::Writable
         } else {
@@ -265,8 +273,8 @@ fn completed_combined_ready_preserves_write_waiter(reset: bool) -> Result {
     let mut sim = Builder::new().tcp_capacity(1).build();
     sim.client("client", async move {
         let (mut stream, mut peer) = pair().await?;
-        stream.write_all(b"x").await?;
-        peer.write_all(b"y").await?;
+        fill(&mut stream).await?;
+        peer.write_all(b"z").await?;
         sleep(Duration::from_secs(1)).await;
         let mut blocked_writer = task::spawn(stream.writable());
         assert_pending!(blocked_writer.poll());
@@ -280,14 +288,17 @@ fn completed_combined_ready_preserves_write_waiter(reset: bool) -> Result {
             drop(peer);
             sleep(Duration::from_secs(1)).await;
             assert!(blocked_writer.is_woken());
+            // As in tokio, readiness succeeds; the write reports the reset.
+            assert_ready_ok!(blocked_writer.poll());
+            drop(blocked_writer);
             assert_eq!(
-                ErrorKind::BrokenPipe,
-                tokio_test::assert_ready!(blocked_writer.poll())
-                    .unwrap_err()
-                    .kind()
+                ErrorKind::ConnectionReset,
+                stream.try_write(b"w").unwrap_err().kind()
             );
         } else {
+            // Reading reopens the window, which drains our send buffer.
             peer.read_u8().await?;
+            sleep(Duration::from_secs(1)).await;
             assert!(blocked_writer.is_woken());
             assert_ready_ok!(blocked_writer.poll());
         }
@@ -328,7 +339,7 @@ fn multiple_waiters_observe_connection_close(reset: bool) -> Result {
     let mut sim = Builder::new().tcp_capacity(1).build();
     sim.client("client", async move {
         let (mut stream, mut peer) = pair().await?;
-        stream.write_all(b"unread").await?;
+        fill(&mut stream).await?; // Leaves unread data at the peer.
         sleep(Duration::from_secs(1)).await;
         let mut read_a = task::spawn(stream.readable());
         let mut read_b = task::spawn(stream.readable());
@@ -360,12 +371,9 @@ fn multiple_waiters_observe_connection_close(reset: bool) -> Result {
         if reset {
             assert!(write_a.is_woken());
             assert!(write_b.is_woken());
-            for result in [
-                tokio_test::assert_ready!(write_a.poll()),
-                tokio_test::assert_ready!(write_b.poll()),
-            ] {
-                assert_eq!(ErrorKind::BrokenPipe, result.unwrap_err().kind());
-            }
+            // As in tokio, readiness succeeds; I/O reports the reset.
+            assert_ready_ok!(write_a.poll());
+            assert_ready_ok!(write_b.poll());
             for result in [
                 tokio_test::assert_ready!(peek_a.poll()),
                 tokio_test::assert_ready!(peek_b.poll()),
@@ -373,7 +381,7 @@ fn multiple_waiters_observe_connection_close(reset: bool) -> Result {
                 assert_eq!(ErrorKind::ConnectionReset, result.unwrap_err().kind());
             }
         } else {
-            // FIN closes reads but does not return send credits.
+            // FIN closes reads but frees no send buffer space.
             assert!(!write_a.is_woken());
             assert!(!write_b.is_woken());
             assert_pending!(write_a.poll());

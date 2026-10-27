@@ -2,7 +2,6 @@ use rand::{rngs::SmallRng, seq::SliceRandom, Rng, SeedableRng};
 use std::cell::RefCell;
 use std::future::Future;
 use std::net::IpAddr;
-use std::ops::DerefMut;
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
@@ -103,7 +102,9 @@ impl<'a> Sim<'a> {
             rng: Some(rng),
         };
 
+        self.world.borrow_mut().current = Some(addr);
         let rt = World::enter(&self.world, || Rt::client(nodename, client, config));
+        self.world.borrow_mut().current = None;
 
         self.rts.insert(addr, rt);
     }
@@ -148,7 +149,9 @@ impl<'a> Sim<'a> {
             rng: Some(rng),
         };
 
+        self.world.borrow_mut().current = Some(addr);
         let rt = World::enter(&self.world, || Rt::host(nodename, host, config));
+        self.world.borrow_mut().current = None;
 
         self.rts.insert(addr, rt);
     }
@@ -156,6 +159,10 @@ impl<'a> Sim<'a> {
     /// Crashes the resolved hosts. Nothing will be running on the matched hosts
     /// after this method. You can use [`Sim::bounce`] to start the hosts up
     /// again.
+    ///
+    /// The host loses power: its sockets vanish without a FIN or RST, and
+    /// packets sent to it are lost until it is bounced. Afterwards it
+    /// answers stale connections with a RST.
     ///
     /// For filesystem simulation (requires `unstable-fs` feature), this
     /// discards any pending (unsynced) writes. Data that was synced via
@@ -186,6 +193,11 @@ impl<'a> Sim<'a> {
 
                 tracing::trace!(target: TRACING_TARGET, addr = ?h, "Crash");
             });
+
+            // The host lost power: whatever the dying software queued
+            // never leaves, and peers learn of the crash only from
+            // silence or, after a bounce, a RST.
+            self.world.borrow_mut().crash_net(h);
         }
 
         self.world.borrow_mut().current = None;
@@ -195,6 +207,7 @@ impl<'a> Sim<'a> {
     pub fn bounce(&mut self, addrs: impl ToIpAddrs) {
         self.run_with_hosts(addrs, |addr, rt| {
             rt.bounce();
+            World::current(|world| world.revive(addr));
 
             tracing::trace!(target: TRACING_TARGET, addr = ?addr, "Bounce");
         });
@@ -314,10 +327,9 @@ impl<'a> Sim<'a> {
 
     /// Set the max message latency for all links.
     pub fn set_max_message_latency(&self, value: Duration) {
-        self.world
-            .borrow_mut()
-            .topology
-            .set_max_message_latency(value);
+        let mut world = self.world.borrow_mut();
+        world.topology.set_max_message_latency(value);
+        world.refresh_retx_threshold(&self.config);
     }
 
     /// Set the message latency for any links matching `a` and `b`.
@@ -332,6 +344,7 @@ impl<'a> Sim<'a> {
         for_pairs(&a, &b, |a, b| {
             world.topology.set_link_message_latency(a, b, value);
         });
+        world.refresh_retx_threshold(&self.config);
     }
 
     /// Set the max message latency for any links matching `a` and `b`.
@@ -348,6 +361,7 @@ impl<'a> Sim<'a> {
         for_pairs(&a, &b, |a, b| {
             world.topology.set_link_max_message_latency(a, b, value);
         });
+        world.refresh_retx_threshold(&self.config);
     }
 
     /// Set the message latency distribution curve for all links.
@@ -424,6 +438,8 @@ impl<'a> Sim<'a> {
         // Tick the networking, processing messages. This is done before
         // ticking any other runtime, as they might be waiting on network
         // IO. (It also might be waiting on something else, such as time.)
+        // Hosts send at this network time; links deliver on later steps,
+        // or later in this one for zero latency.
         self.world.borrow_mut().topology.tick_by(tick);
 
         // Tick each host runtimes with running software. If the software
@@ -442,15 +458,9 @@ impl<'a> Sim<'a> {
             let _span_guard = tracing::span!(Level::INFO, "node", name = &*rt.nodename,).entered();
             {
                 let mut world = self.world.borrow_mut();
-                // We need to move deliverable messages off the network and
-                // into the dst host. This requires two mutable borrows.
-                let World {
-                    rng,
-                    topology,
-                    hosts,
-                    ..
-                } = world.deref_mut();
-                topology.deliver_messages(rng, hosts.get_mut(&addr).expect("missing host"));
+                // Move deliverable messages off the network and into the
+                // host's stack, which may wake its software.
+                world.deliver(addr);
 
                 // Set the current host (see method docs)
                 world.current = Some(addr);
@@ -499,13 +509,21 @@ impl<'a> Sim<'a> {
             let mut world = self.world.borrow_mut();
             world.current = None;
 
+            // Put what the software sent this tick on the network.
+            world.egress(addr);
             world.tick(addr, tick);
         }
 
         // Tick the nodes that are not actively running (i.e., crashed) to ensure their clock keeps up
         // with the rest of the simulation when they are restarted (bounced).
+        //
+        // A host whose software finished still has a network stack:
+        // lingering sockets finish closing, and new arrivals get a RST.
+        // A crashed host drops everything.
         for (&addr, _rt) in stopped {
             let mut world = self.world.borrow_mut();
+            world.deliver(addr);
+            world.egress(addr);
             world.tick(addr, tick);
         }
 
@@ -1081,13 +1099,23 @@ mod test {
             Ok(())
         });
 
+        // The SYN is held.
         assert!(!sim.step()?);
 
-        sim.links(|mut l| {
-            let a_to_b = l.next().unwrap();
-            a_to_b.deliver_all();
-        });
+        let deliver = |sim: &Sim| {
+            sim.links(|mut l| {
+                let a_to_b = l.next().unwrap();
+                assert_eq!(1, a_to_b.count());
+            });
+            sim.links(|mut l| l.next().unwrap().deliver_all());
+        };
 
+        // Deliver the SYN; the link still holds the SYN-ACK.
+        deliver(&sim);
+        assert!(!sim.step()?);
+
+        // Delivering the SYN-ACK completes the handshake.
+        deliver(&sim);
         assert!(sim.step()?);
 
         Ok(())
@@ -1154,12 +1182,14 @@ mod test {
             Ok(())
         });
 
+        // The server accepts once the handshake's final ACK lands, one
+        // trip after `connect` returns; its write takes another.
         sim.client("client", async move {
             let mut s = TcpStream::connect("server:1234").await?;
 
             let start = Instant::now();
             s.read_u8().await?;
-            assert_eq!(global, start.elapsed());
+            assert_eq!(2 * global, start.elapsed());
 
             Ok(())
         });
@@ -1173,7 +1203,7 @@ mod test {
 
             let start = Instant::now();
             s.read_u8().await?;
-            assert_eq!(degraded, start.elapsed());
+            assert_eq!(2 * degraded, start.elapsed());
 
             Ok(())
         });

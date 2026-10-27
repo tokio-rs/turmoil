@@ -23,10 +23,6 @@ pub enum Kind<'a> {
 
     /// A runtime that is running simulated host software.
     Host { software: Software<'a> },
-
-    /// A runtime without any software. The network topology uses this for
-    /// time tracking and message delivery.
-    NoSoftware,
 }
 
 /// Runtime configuration.
@@ -103,20 +99,6 @@ impl<'a> Rt<'a> {
             local,
             nodename,
             handle: Some(handle),
-            config,
-        }
-    }
-
-    pub(crate) fn no_software() -> Self {
-        let mut config = Config::default();
-        let (tokio, local) = init(&mut config);
-
-        Self {
-            kind: Kind::NoSoftware,
-            tokio,
-            local,
-            nodename: String::new().into(),
-            handle: None,
             config,
         }
     }
