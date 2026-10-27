@@ -1,16 +1,13 @@
-use crate::envelope::{Envelope, Protocol};
-use crate::host::Host;
-use crate::rt::Rt;
 use crate::{config, TRACING_TARGET};
 
 use indexmap::IndexMap;
 use rand::{Rng, RngCore};
 use rand_distr::{Distribution, Exp};
 use std::collections::VecDeque;
-use std::io::{Error, ErrorKind, Result};
+use std::fmt::{self, Display};
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
-use tokio::time::Instant;
+use turmoil_net::{Packet, Transport};
 
 /// Describes the network topology.
 pub(crate) struct Topology {
@@ -19,10 +16,8 @@ pub(crate) struct Topology {
     /// Specific configuration overrides between specific hosts.
     links: IndexMap<Pair, Link>,
 
-    /// We don't use a Rt for async. Right now, we just use it to tick time
-    /// forward in the same way we do it elsewhere. We'd like to represent
-    /// network state with async in the future.
-    rt: Rt<'static>,
+    /// Network time, moved forward with [`Topology::tick_by`].
+    now: Duration,
 }
 
 /// This type is used as the key in the [`Topology::links`] map. See [`new`]
@@ -54,7 +49,7 @@ pub struct LinksIter<'a> {
 pub struct LinkIter<'a> {
     a: IpAddr,
     b: IpAddr,
-    now: Instant,
+    now: Duration,
     iter: std::collections::vec_deque::IterMut<'a, Sent>,
 }
 
@@ -77,21 +72,21 @@ impl LinkIter<'_> {
 /// Provides a reference to a message that is currently inflight on the network
 /// from one host to another.
 pub struct SentRef<'a> {
-    src: SocketAddr,
-    dst: SocketAddr,
-    now: Instant,
+    now: Duration,
     sent: &'a mut Sent,
 }
 
 impl SentRef<'_> {
-    /// The (src, dst) [`SocketAddr`] pair for the message.
+    /// The (src, dst) [`SocketAddr`] pair for the message. For a broadcast
+    /// or multicast, `dst` is the group address. Non-initial fragments
+    /// have no transport header, so their ports are reported as zero.
     pub fn pair(&self) -> (SocketAddr, SocketAddr) {
-        (self.src, self.dst)
+        endpoints(&self.sent.packet)
     }
 
-    /// The message [`Protocol`].
-    pub fn protocol(&self) -> &Protocol {
-        &self.sent.protocol
+    /// The packet in flight.
+    pub fn packet(&self) -> &Packet {
+        &self.sent.packet
     }
 
     /// Schedule the message for delivery the next time the simulation steps,
@@ -123,8 +118,6 @@ impl<'a> Iterator for LinkIter<'a> {
         let sent = self.iter.next()?;
 
         Some(SentRef {
-            src: sent.src,
-            dst: sent.dst,
             now: self.now,
             sent,
         })
@@ -149,11 +142,15 @@ struct Link {
     /// or are on hold.
     sent: VecDeque<Sent>,
 
-    /// Messages that are ready to be delivered.
-    deliverable: IndexMap<IpAddr, VecDeque<Envelope>>,
+    /// Messages that are ready to be delivered, keyed by receiving host.
+    deliverable: IndexMap<IpAddr, VecDeque<Packet>>,
+
+    /// Latest delivery time for each directed TCP connection under
+    /// the default latency distribution. Explicit rules may reorder.
+    tcp_tail: IndexMap<(SocketAddr, SocketAddr), Duration>,
 
     /// The current network time, moved forward with [`Link::tick`].
-    now: Instant,
+    now: Duration,
 }
 
 /// States that a link between two nodes can be in.
@@ -177,18 +174,26 @@ impl Topology {
         Topology {
             config,
             links: IndexMap::new(),
-            rt: Rt::no_software(),
+            now: Duration::ZERO,
         }
     }
 
     /// Register a link between two hosts
     pub(crate) fn register(&mut self, a: IpAddr, b: IpAddr) {
         let pair = Pair::new(a, b);
-        assert!(self.links.insert(pair, Link::new(self.rt.now())).is_none());
+        assert!(self.links.insert(pair, Link::new(self.now)).is_none());
     }
 
     pub(crate) fn set_max_message_latency(&mut self, value: Duration) {
         self.config.latency_mut().max_message_latency = value;
+    }
+
+    pub(crate) fn max_message_latency(&self) -> Duration {
+        self.links
+            .values()
+            .filter_map(|link| link.config.latency.as_ref())
+            .map(|latency| latency.max_message_latency)
+            .fold(self.config.latency().max_message_latency, Duration::max)
     }
 
     pub(crate) fn set_link_message_latency(&mut self, a: IpAddr, b: IpAddr, value: Duration) {
@@ -228,33 +233,37 @@ impl Topology {
             .fail_rate = value;
     }
 
-    // Send a `message` from `src` to `dst`. This method returns immediately,
-    // and message delivery happens at a later time (or never, if the link is
-    // broken).
+    /// Put `packet` on the link from host `from` to host `to`. Delivery
+    /// happens at a later time, or never if the link is broken. `delay`
+    /// overrides the link's latency.
     pub(crate) fn enqueue_message(
         &mut self,
         rand: &mut dyn RngCore,
-        src: SocketAddr,
-        dst: SocketAddr,
-        message: Protocol,
-    ) -> Result<()> {
-        if let Some(link) = self.links.get_mut(&Pair::new(src.ip(), dst.ip())) {
-            link.enqueue_message(&self.config, rand, src, dst, message)
-        } else {
-            Err(Error::new(
-                ErrorKind::ConnectionRefused,
-                "Connection refused",
-            ))
+        from: IpAddr,
+        to: IpAddr,
+        packet: Packet,
+        delay: Option<Duration>,
+    ) {
+        match self.links.get_mut(&Pair::new(from, to)) {
+            Some(link) => link.enqueue_message(&self.config, rand, from, to, packet, delay),
+            None => {
+                let (src, dst) = endpoints(&packet);
+                tracing::trace!(target: TRACING_TARGET, ?src, ?dst, protocol = %Summary(&packet), "Drop (no link)");
+            }
         }
     }
 
-    // Move messages from any network links to the `dst` host.
-    pub(crate) fn deliver_messages(&mut self, rand: &mut dyn RngCore, dst: &mut Host) {
+    /// Take the messages ready for delivery to host `dst`.
+    pub(crate) fn take_deliverable(&mut self, dst: IpAddr) -> Vec<Packet> {
+        let mut packets = Vec::new();
         for (pair, link) in &mut self.links {
-            if pair.0 == dst.addr || pair.1 == dst.addr {
-                link.deliver_messages(&self.config, rand, dst);
+            if pair.0 == dst || pair.1 == dst {
+                if let Some(queue) = link.deliverable.get_mut(&dst) {
+                    packets.extend(queue.drain(..));
+                }
             }
         }
+        packets
     }
 
     pub(crate) fn hold(&mut self, a: IpAddr, b: IpAddr) {
@@ -284,9 +293,9 @@ impl Topology {
     }
 
     pub(crate) fn tick_by(&mut self, duration: Duration) {
-        let _ = self.rt.tick(duration);
+        self.now += duration;
         for link in self.links.values_mut() {
-            link.tick(self.rt.now());
+            link.tick(self.now);
         }
     }
 
@@ -306,31 +315,36 @@ impl Topology {
 
 /// Represents a message sent between two hosts on the network.
 struct Sent {
-    src: SocketAddr,
-    dst: SocketAddr,
+    /// Sending host.
+    from: IpAddr,
+    /// Receiving host. Differs from `packet.dst` for broadcast and
+    /// multicast copies.
+    to: IpAddr,
     status: DeliveryStatus,
-    protocol: Protocol,
+    packet: Packet,
+    ordered: bool,
 }
 
 impl Sent {
-    fn deliver(&mut self, now: Instant) {
+    fn deliver(&mut self, now: Duration) {
         self.status = DeliveryStatus::DeliverAfter(now);
     }
 }
 
 enum DeliveryStatus {
-    DeliverAfter(Instant),
+    DeliverAfter(Duration),
     Hold,
 }
 
 impl Link {
-    fn new(now: Instant) -> Link {
+    fn new(now: Duration) -> Link {
         Link {
             state_a_b: State::Healthy,
             state_b_a: State::Healthy,
             config: config::Link::default(),
             sent: VecDeque::new(),
             deliverable: IndexMap::new(),
+            tcp_tail: IndexMap::new(),
             now,
         }
     }
@@ -339,16 +353,17 @@ impl Link {
         &mut self,
         global_config: &config::Link,
         rand: &mut dyn RngCore,
-        src: SocketAddr,
-        dst: SocketAddr,
-        message: Protocol,
-    ) -> Result<()> {
-        tracing::trace!(target: TRACING_TARGET, ?src, ?dst, protocol = %message, "Send");
+        from: IpAddr,
+        to: IpAddr,
+        packet: Packet,
+        delay: Option<Duration>,
+    ) {
+        let (src, dst) = endpoints(&packet);
+        tracing::trace!(target: TRACING_TARGET, ?src, ?dst, protocol = %Summary(&packet), "Send");
 
         self.rand_partition_or_repair(global_config, rand);
-        let result = self.enqueue(global_config, rand, src, dst, message);
+        self.enqueue(global_config, rand, from, to, packet, delay);
         self.process_deliverables();
-        result
     }
 
     fn get_state_for_message(&self, src: IpAddr, dst: IpAddr) -> State {
@@ -370,44 +385,50 @@ impl Link {
     //
     // Messages may be dropped, sit on the link for a while (due to latency, or
     // because the link has stalled), or be delivered immediately.
-    // Link will return an Err(()) if the socket buffer is full.
     fn enqueue(
         &mut self,
         global_config: &config::Link,
         rand: &mut dyn RngCore,
-        src: SocketAddr,
-        dst: SocketAddr,
-        message: Protocol,
-    ) -> Result<()> {
-        let state = self.get_state_for_message(src.ip(), dst.ip());
+        from: IpAddr,
+        to: IpAddr,
+        packet: Packet,
+        delay: Option<Duration>,
+    ) {
+        let state = self.get_state_for_message(from, to);
+        let ordered = delay.is_none() && matches!(packet.payload, Transport::Tcp(_));
         let status = match state {
             State::Healthy => {
-                let delay = self.delay(global_config.latency(), rand);
-                DeliveryStatus::DeliverAfter(self.now + delay)
+                let delay = delay.unwrap_or_else(|| self.delay(global_config.latency(), rand));
+                let mut at = self.now + delay;
+                if ordered {
+                    let tail = self.tcp_tail.entry(endpoints(&packet)).or_default();
+                    at = at.max(*tail);
+                    *tail = at;
+                }
+                DeliveryStatus::DeliverAfter(at)
             }
-            // Only A->B is blocked, so B can send, so we can send if src is B
             State::Hold => {
-                tracing::trace!(target: TRACING_TARGET,?src, ?dst, protocol = %message, "Hold");
+                let (src, dst) = endpoints(&packet);
+                tracing::trace!(target: TRACING_TARGET, ?src, ?dst, protocol = %Summary(&packet), "Hold");
                 DeliveryStatus::Hold
             }
             _ => {
-                tracing::trace!(target: TRACING_TARGET,?src, ?dst, protocol = %message, "Drop");
-                return Ok(());
+                let (src, dst) = endpoints(&packet);
+                tracing::trace!(target: TRACING_TARGET, ?src, ?dst, protocol = %Summary(&packet), "Drop");
+                return;
             }
         };
 
-        let sent = Sent {
-            src,
-            dst,
+        self.sent.push_back(Sent {
+            from,
+            to,
             status,
-            protocol: message,
-        };
-
-        self.sent.push_back(sent);
-        Ok(())
+            packet,
+            ordered,
+        });
     }
 
-    fn tick(&mut self, now: Instant) {
+    fn tick(&mut self, now: Duration) {
         self.now = now;
         self.process_deliverables();
     }
@@ -422,41 +443,27 @@ impl Link {
             if let DeliveryStatus::DeliverAfter(time) = sent.status {
                 if time <= self.now {
                     let sent = self.sent.remove(index).unwrap();
-                    let envelope = Envelope {
-                        src: sent.src,
-                        dst: sent.dst,
-                        message: sent.protocol,
-                    };
                     self.deliverable
-                        .entry(sent.dst.ip())
+                        .entry(sent.to)
                         .or_default()
-                        .push_back(envelope);
+                        .push_back(sent.packet);
                     deliverable += 1;
                 }
             }
         }
+        if deliverable > 0 {
+            self.refresh_tcp_tails();
+        }
     }
 
-    // FIXME: This implementation does not respect message delivery order. If
-    // host A and host B are ordered (by addr), and B sends before A, then this
-    // method will deliver A's message before B's.
-    fn deliver_messages(
-        &mut self,
-        global_config: &config::Link,
-        rand: &mut dyn RngCore,
-        host: &mut Host,
-    ) {
-        let deliverable = self
-            .deliverable
-            .entry(host.addr)
-            .or_default()
-            .drain(..)
-            .collect::<Vec<Envelope>>();
-
-        for message in deliverable {
-            let (src, dst) = (message.src, message.dst);
-            if let Err(message) = host.receive_from_network(message) {
-                let _ = self.enqueue_message(global_config, rand, dst, src, message);
+    fn refresh_tcp_tails(&mut self) {
+        self.tcp_tail.clear();
+        for sent in &self.sent {
+            if sent.ordered {
+                if let DeliveryStatus::DeliverAfter(at) = sent.status {
+                    let tail = self.tcp_tail.entry(endpoints(&sent.packet)).or_default();
+                    *tail = (*tail).max(at);
+                }
             }
         }
     }
@@ -470,6 +477,7 @@ impl Link {
                 self.state_b_a = State::RandPartition;
 
                 self.sent.clear();
+                self.tcp_tail.clear();
             }
             (State::RandPartition, _) | (_, State::RandPartition)
                 if self.rand_repair(global_config.message_loss(), rand) =>
@@ -487,6 +495,7 @@ impl Link {
         for sent in &mut self.sent {
             sent.status = DeliveryStatus::Hold;
         }
+        self.tcp_tail.clear();
     }
 
     // This link becomes healthy, and any held messages are scheduled for delivery.
@@ -498,6 +507,7 @@ impl Link {
                 sent.deliver(self.now);
             }
         }
+        self.refresh_tcp_tails();
     }
 
     fn explicit_partition(&mut self) {
@@ -505,6 +515,7 @@ impl Link {
         self.state_b_a = State::ExplicitPartition;
 
         self.sent.clear();
+        self.tcp_tail.clear();
     }
 
     fn partition_oneway(&mut self, from: IpAddr, to: IpAddr) {
@@ -514,7 +525,8 @@ impl Link {
             self.state_b_a = State::ExplicitPartition;
         }
 
-        self.sent.retain(|sent| sent.src.ip() != from);
+        self.sent.retain(|sent| sent.from != from);
+        self.refresh_tcp_tails();
     }
 
     fn repair_oneway(&mut self, from: IpAddr, to: IpAddr) {
@@ -562,6 +574,67 @@ impl Link {
         self.config
             .message_loss
             .get_or_insert_with(|| global.clone())
+    }
+}
+
+/// Source and destination endpoints of `packet`.
+pub(crate) fn endpoints(packet: &Packet) -> (SocketAddr, SocketAddr) {
+    let (src, dst) = match &packet.payload {
+        Transport::Tcp(s) => (s.src_port, s.dst_port),
+        Transport::Udp(d) => (d.src_port, d.dst_port),
+        Transport::Fragment(f) => f.ports().unwrap_or((0, 0)),
+    };
+    (
+        SocketAddr::new(packet.src, src),
+        SocketAddr::new(packet.dst, dst),
+    )
+}
+
+/// Renders a packet for traces: protocol, TCP flags, and the payload
+/// as hex bytes.
+pub(crate) struct Summary<'a>(pub(crate) &'a Packet);
+
+impl Display for Summary<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let payload = match &self.0.payload {
+            Transport::Fragment(fragment) => {
+                write!(
+                    f,
+                    "IP fragment id={} offset={} more={}",
+                    fragment.id, fragment.offset, fragment.more
+                )?;
+                &fragment.payload
+            }
+            Transport::Udp(d) => {
+                write!(f, "UDP")?;
+                &d.payload
+            }
+            Transport::Tcp(s) => {
+                write!(f, "TCP")?;
+                let flags = [
+                    (s.flags.syn, "SYN"),
+                    (s.flags.ack, "ACK"),
+                    (s.flags.psh, "PSH"),
+                    (s.flags.fin, "FIN"),
+                    (s.flags.rst, "RST"),
+                ];
+                for (_, name) in flags.iter().filter(|(set, _)| *set) {
+                    write!(f, " {name}")?;
+                }
+                if s.payload.is_empty() {
+                    return Ok(());
+                }
+                &s.payload
+            }
+        };
+        write!(f, " [")?;
+        for (i, b) in payload.iter().enumerate() {
+            if i > 0 {
+                write!(f, ", ")?;
+            }
+            write!(f, "{b:#04X}")?;
+        }
+        write!(f, "]")
     }
 }
 

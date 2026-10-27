@@ -120,10 +120,10 @@ impl Builder {
         self
     }
 
-    /// The failure rate of messages on the network. For TCP
-    /// this will break connections as currently there are
-    /// no re-send capabilities. With UDP this is useful for
-    /// testing network flakiness.
+    /// The failure rate of messages on the network. A failure
+    /// partitions the link, dropping messages until it is repaired
+    /// (see [`Builder::repair_rate`]). TCP retransmits across short
+    /// outages; UDP messages are lost.
     pub fn fail_rate(&mut self, value: f64) -> &mut Self {
         self.link.message_loss_mut().fail_rate = value;
         self
@@ -143,13 +143,16 @@ impl Builder {
         self
     }
 
-    /// Capacity of a host's TCP buffer in the sim.
+    /// Size, in bytes, of each TCP socket's send and receive buffers.
+    /// A writer blocks once both its send buffer and the peer's
+    /// receive buffer are full. Defaults to 64 KiB.
     pub fn tcp_capacity(&mut self, value: usize) -> &mut Self {
-        self.config.tcp_capacity = value;
+        self.config.tcp_capacity = Some(value);
         self
     }
 
-    /// Capacity of host's UDP buffer in the sim.
+    /// Number of datagrams each UDP socket queues before dropping new
+    /// arrivals. Defaults to 64.
     pub fn udp_capacity(&mut self, value: usize) -> &mut Self {
         self.config.udp_capacity = value;
         self
@@ -205,11 +208,12 @@ impl Builder {
             None => SmallRng::from_os_rng(),
         };
 
+        let kernel = self.config.kernel(self.link.latency().max_message_latency);
         let world = World::new(
             self.link.clone(),
             Box::new(rng),
             self.ip_version.iter(),
-            self.config.tick,
+            kernel,
         );
 
         Sim::new(self.config.clone(), world)
