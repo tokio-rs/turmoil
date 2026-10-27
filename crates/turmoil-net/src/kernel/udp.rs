@@ -5,12 +5,9 @@
 //! sibling modules can't call private impl-block methods — free fns
 //! with plain `pub(super)` visibility avoid that dance.
 //!
-//! # TODO
-//! - **IP fragmentation.** Oversize datagrams return `EMSGSIZE`,
-//!   matching Linux under `IP_PMTUDISC_DO`. Default Linux
-//!   (`IP_PMTUDISC_WANT`) fragments at the IP layer and reassembles
-//!   at the peer, with any lost fragment dropping the whole datagram.
-//!   QUIC and other PMTU-sensitive workloads want that behavior.
+//! Datagrams larger than the selected interface's MTU are fragmented
+//! at the IP layer. A strict PMTU policy can disable fragmentation
+//! through `KernelConfig::udp_fragmentation(false)`.
 
 use std::io::{Error, ErrorKind, Result};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
@@ -139,7 +136,10 @@ pub(super) fn send_to(
         } else {
             local_ip
         };
-    if buf.len() as u32 > max_payload(k, dst_sa, scope) {
+    let datagram_limit = if dst_sa.is_ipv4() { 65507 } else { 65527 };
+    if buf.len() > datagram_limit
+        || (!k.udp_fragmentation && buf.len() > max_payload(k, dst_sa, scope) as usize)
+    {
         return Poll::Ready(Err(Error::from_raw_os_error(EMSGSIZE)));
     }
 
@@ -166,18 +166,36 @@ pub(super) fn send_to(
             payload: Bytes::copy_from_slice(buf),
         }),
     };
-    if broadcast
-        || (multicast && (multicast_loop || (dst_sa.is_ipv4() && scope == InterfaceId::Loopback)))
-    {
-        k.outbound
-            .push_back(super::Outbound::Local(pkt.clone(), scope));
-    }
-    // Local copies bypass network rules, just like unicast loopback.
-    // The fabric excludes this host when routing the remote copy.
-    if !(broadcast || multicast) || (scope == InterfaceId::Link && ttl > 0) {
-        k.outbound.push_back(super::Outbound::Network(pkt));
+    let local = broadcast
+        || (multicast && (multicast_loop || (dst_sa.is_ipv4() && scope == InterfaceId::Loopback)));
+    let remote = !(broadcast || multicast) || (scope == InterfaceId::Link && ttl > 0);
+    let mtu = k.interfaces.get(scope).mtu;
+    if pkt.size() > mtu {
+        let id = if dst_sa.is_ipv4() {
+            k.ip_id & 0xffff
+        } else {
+            k.ip_id
+        };
+        k.ip_id = k.ip_id.wrapping_add(1);
+        for fragment in super::fragment::split(pkt, mtu, id)? {
+            queue_packet(k, fragment, scope, local, remote);
+        }
+    } else {
+        queue_packet(k, pkt, scope, local, remote);
     }
     Poll::Ready(Ok(buf.len()))
+}
+
+fn queue_packet(k: &mut Kernel, packet: Packet, scope: InterfaceId, local: bool, remote: bool) {
+    if local {
+        k.outbound
+            .push_back(super::Outbound::Local(packet.clone(), scope));
+    }
+    // Local copies bypass rules; each remote fragment independently
+    // encounters the harness's routing, latency, and fault policy.
+    if remote {
+        k.outbound.push_back(super::Outbound::Network(packet));
+    }
 }
 
 pub(super) fn recv_from(
@@ -741,7 +759,8 @@ mod tests {
     fn loopback_cast_uses_loopback_mtu() {
         for dst in ["255.255.255.255:9000", "239.0.0.1:9000", "[ff08::1]:9000"] {
             let dst: SocketAddr = dst.parse().unwrap();
-            let mut k = Kernel::new();
+            let mut k =
+                Kernel::with_config(super::super::KernelConfig::default().udp_fragmentation(false));
             let local = if dst.is_ipv4() {
                 Ipv4Addr::LOCALHOST.into()
             } else {

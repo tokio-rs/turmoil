@@ -13,8 +13,8 @@ use turmoil_net::shim::tokio::net::TcpStream;
 ```
 
 The stack models TCP handshakes, retransmission, flow control, and connection
-teardown, plus UDP unicast, broadcast, and multicast. Tests control packet
-delivery, loss, and latency.
+teardown, plus UDP unicast, broadcast, multicast, and fragmentation. Tests
+control packet delivery, loss, and latency.
 
 ## Why
 
@@ -80,7 +80,7 @@ when a test needs specific addresses.
 ## Custom harnesses
 
 `Net` manages hosts and synchronous packet routing. The harness owns time,
-scheduling, and delayed delivery:
+scheduling, and delayed delivery. [`turmoil`](../turmoil) uses these APIs:
 
 - `Net::enter` installs the network while host code runs;
   `EnterGuard::exit` removes it while preserving state.
@@ -140,12 +140,20 @@ in that family, or `lo` in loopback-only fixtures. Source binding and group
 membership do not select the output interface. An IPv6 destination scope ID
 can select it explicitly.
 
+UDP datagrams larger than the interface MTU are fragmented. Each fragment
+is subject to faults independently. Reassembly accepts reordering and
+identical duplicates; conflicting overlaps discard the datagram. Defaults
+limit incomplete datagrams to 4 MiB and 1024 entries per host.
+`KernelConfig` sets these limits and the timeout in egress passes.
+Crashes discard incomplete datagrams.
+
 ## Limitations
 
 - The shim has no `socket2` or `from_std` adapter. Multicast output-interface,
   multicast-all, and pre-bind reuse options are not exposed.
 - There are no subnet prefixes, additional links, or configurable routing
   tables. Directed broadcast is not supported.
-- UDP datagrams larger than the selected interface MTU are rejected with
-  `EMSGSIZE`; fragmentation is not yet supported.
+- `KernelConfig::udp_fragmentation(false)` rejects datagrams exceeding the
+  MTU with `EMSGSIZE`. UDP payloads above 65,507 bytes for IPv4 or 65,527 for
+  IPv6 are always rejected.
 - Jumbograms, checksums, ICMP, and path-MTU discovery are not modeled.

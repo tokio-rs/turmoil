@@ -135,8 +135,10 @@ impl Fabric {
     /// membership. The sender already queued its local copy, so it is
     /// excluded.
     pub fn receivers(&self, pkt: &Packet) -> Vec<HostId> {
-        if matches!(pkt.payload, crate::kernel::Transport::Udp(_))
-            && (pkt.is_broadcast() || pkt.dst.is_multicast())
+        if matches!(
+            pkt.payload,
+            crate::kernel::Transport::Udp(_) | crate::kernel::Transport::Fragment(_)
+        ) && (pkt.is_broadcast() || pkt.dst.is_multicast())
         {
             let src = self.host_for_ip(pkt.src);
             return self
