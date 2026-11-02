@@ -1326,14 +1326,22 @@ impl FsState {
 
     /// Check if a file exists (persisted or pending creation).
     pub(crate) fn file_exists(&self, path: &Path) -> bool {
+        self.file_exists_before(path, self.pending.len())
+    }
+
+    /// Check if a file exists after applying the first `end` pending ops.
+    fn file_exists_before(&self, path: &Path, end: usize) -> bool {
         let mut exists = self.persisted_files.contains_key(path);
-        for op in &self.pending {
+        for (i, op) in self.pending[..end].iter().enumerate() {
             match op {
                 PendingOp::CreateFile { path: p, .. } if p == path => exists = true,
                 PendingOp::CreateHardLink { path: p, .. } if p == path => exists = true,
                 PendingOp::RemoveFile { path: p } if p == path => exists = false,
                 PendingOp::Rename { from, to: _ } if from == path => exists = false,
-                PendingOp::Rename { from: _, to } if to == path => exists = true,
+                // Only a file renamed onto this path leaves a file here
+                PendingOp::Rename { from, to } if to == path => {
+                    exists = self.file_exists_before(from, i);
+                }
                 _ => {}
             }
         }
@@ -1342,26 +1350,22 @@ impl FsState {
 
     /// Check if a directory exists (persisted or pending creation).
     pub(crate) fn dir_exists(&self, path: &Path) -> bool {
+        self.dir_exists_before(path, self.pending.len())
+    }
+
+    /// Check if a directory exists after applying the first `end` pending ops.
+    fn dir_exists_before(&self, path: &Path, end: usize) -> bool {
         let mut exists = self.persisted_dirs.contains_key(path);
-        for op in &self.pending {
+        for (i, op) in self.pending[..end].iter().enumerate() {
             match op {
                 PendingOp::CreateDir { path: p, .. } if p == path => exists = true,
                 PendingOp::RemoveDir { path: p } if p == path => exists = false,
-                // For renames, we need to check if the source was a directory
-                PendingOp::Rename { from, to: _ }
-                    if from == path
-                    // Source directory is being renamed away
-                    && self.persisted_dirs.contains_key(from) =>
-                {
-                    exists = false;
-                }
-                PendingOp::Rename { from, to }
-                    if to == path
-                    // Something is being renamed to this path - only mark as directory
-                    // if the source was a directory
-                    && self.persisted_dirs.contains_key(from) =>
-                {
-                    exists = true;
+                // Whatever was at the source path is renamed away
+                PendingOp::Rename { from, to: _ } if from == path => exists = false,
+                // Only a directory renamed onto this path leaves a directory here,
+                // whether it was persisted or created by an earlier pending op
+                PendingOp::Rename { from, to } if to == path => {
+                    exists = self.dir_exists_before(from, i);
                 }
                 _ => {}
             }
