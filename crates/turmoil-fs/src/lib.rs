@@ -954,6 +954,13 @@ pub struct FsState {
     pub page_cache: Option<PageCache>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EntryKind {
+    File,
+    Directory,
+    Symlink,
+}
+
 impl FsState {
     /// Create a new empty filesystem state with a fresh per-host RNG
     /// seeded from `seed`. Embedders typically derive `seed` by calling
@@ -1326,94 +1333,54 @@ impl FsState {
 
     /// Check if a file exists (persisted or pending creation).
     pub(crate) fn file_exists(&self, path: &Path) -> bool {
-        self.file_exists_before(path, self.pending.len())
-    }
-
-    /// Check if a file exists after applying the first `end` pending ops.
-    fn file_exists_before(&self, path: &Path, end: usize) -> bool {
-        let mut exists = self.persisted_files.contains_key(path);
-        for (i, op) in self.pending[..end].iter().enumerate() {
-            match op {
-                PendingOp::CreateFile { path: p, .. } if p == path => exists = true,
-                PendingOp::CreateHardLink { path: p, .. } if p == path => exists = true,
-                PendingOp::RemoveFile { path: p } if p == path => exists = false,
-                PendingOp::Rename { from, to: _ } if from == path => exists = false,
-                // Only a file renamed onto this path leaves a file here
-                PendingOp::Rename { from, to } if to == path => {
-                    exists = self.file_exists_before(from, i);
-                }
-                _ => {}
-            }
-        }
-        exists
+        self.entry_kind(path) == Some(EntryKind::File)
     }
 
     /// Check if a directory exists (persisted or pending creation).
     pub(crate) fn dir_exists(&self, path: &Path) -> bool {
-        self.dir_exists_before(path, self.pending.len())
-    }
-
-    /// Check if a directory exists after applying the first `end` pending ops.
-    fn dir_exists_before(&self, path: &Path, end: usize) -> bool {
-        let mut exists = self.persisted_dirs.contains_key(path);
-        for (i, op) in self.pending[..end].iter().enumerate() {
-            match op {
-                PendingOp::CreateDir { path: p, .. } if p == path => exists = true,
-                PendingOp::RemoveDir { path: p } if p == path => exists = false,
-                // Whatever was at the source path is renamed away
-                PendingOp::Rename { from, to: _ } if from == path => exists = false,
-                // Only a directory renamed onto this path leaves a directory here,
-                // whether it was persisted or created by an earlier pending op
-                PendingOp::Rename { from, to } if to == path => {
-                    exists = self.dir_exists_before(from, i);
-                }
-                _ => {}
-            }
-        }
-        exists
+        self.entry_kind(path) == Some(EntryKind::Directory)
     }
 
     /// Check if a symlink exists (persisted or pending creation).
     pub(crate) fn symlink_exists(&self, path: &Path) -> bool {
-        let mut exists = self.persisted_symlinks.contains_key(path);
-        for op in &self.pending {
+        self.entry_kind(path) == Some(EntryKind::Symlink)
+    }
+
+    /// Resolve the entry type by following its history backwards once.
+    fn entry_kind<'a>(&'a self, mut path: &'a Path) -> Option<EntryKind> {
+        for op in self.pending.iter().rev() {
             match op {
-                PendingOp::CreateSymlink { path: p, .. } if p == path => exists = true,
-                PendingOp::RemoveFile { path: p } if p == path => exists = false,
-                // For renames, we need to check if the source was a symlink
-                PendingOp::Rename { from, to: _ }
-                    if from == path
-                    // Source symlink is being renamed away - it no longer exists at 'from'
-                    // Check both persisted and if 'exists' was set by a prior pending create
-                    && (self.persisted_symlinks.contains_key(from) || exists) =>
+                PendingOp::CreateFile { path: p, .. }
+                | PendingOp::CreateHardLink { path: p, .. }
+                    if p == path =>
                 {
-                    exists = false;
+                    return Some(EntryKind::File);
                 }
-                PendingOp::Rename { from, to }
-                    if to == path
-                    // Something is being renamed to this path - only mark as symlink
-                    // if the source was a symlink (persisted or pending)
-                    && (self.persisted_symlinks.contains_key(from)
-                        || self.was_symlink_created_at(from)) =>
+                PendingOp::CreateDir { path: p, .. } if p == path => {
+                    return Some(EntryKind::Directory);
+                }
+                PendingOp::CreateSymlink { path: p, .. } if p == path => {
+                    return Some(EntryKind::Symlink);
+                }
+                PendingOp::RemoveFile { path: p } | PendingOp::RemoveDir { path: p }
+                    if p == path =>
                 {
-                    exists = true;
+                    return None
                 }
+                PendingOp::Rename { from, .. } if from == path => return None,
+                PendingOp::Rename { from, to } if to == path => path = from,
                 _ => {}
             }
         }
-        exists
-    }
-
-    /// Helper to check if a symlink was created at a path in pending ops.
-    fn was_symlink_created_at(&self, path: &Path) -> bool {
-        for op in &self.pending {
-            if let PendingOp::CreateSymlink { path: p, .. } = op {
-                if p == path {
-                    return true;
-                }
-            }
+        if self.persisted_files.contains_key(path) {
+            Some(EntryKind::File)
+        } else if self.persisted_dirs.contains_key(path) {
+            Some(EntryKind::Directory)
+        } else if self.persisted_symlinks.contains_key(path) {
+            Some(EntryKind::Symlink)
+        } else {
+            None
         }
-        false
     }
 
     /// Get current file length (persisted + pending).
