@@ -3,7 +3,7 @@
 use std::os::unix::fs::FileExt;
 use turmoil::fs::shim::std::fs::{
     create_dir, create_dir_all, metadata, read_dir, remove_dir, remove_dir_all, remove_file,
-    rename, write, OpenOptions,
+    rename, sync_dir, write, OpenOptions,
 };
 use turmoil::{Builder, Result};
 
@@ -148,6 +148,97 @@ fn rename_atomic_replace() -> Result {
             .read(true)
             .open("/data/file2.txt")
             .is_err());
+        Ok(())
+    });
+    sim.run()
+}
+
+#[test]
+fn rename_dir() -> Result {
+    let mut sim = Builder::new().build();
+    sim.client("test", async {
+        create_dir("/old")?;
+        sync_dir("/")?;
+        rename("/old", "/new")?;
+        assert!(metadata("/old").is_err());
+        let meta = metadata("/new")?;
+        assert!(meta.is_dir());
+        assert!(!meta.is_file());
+        Ok(())
+    });
+    sim.run()
+}
+
+#[test]
+fn rename_unsynced_dir() -> Result {
+    let mut sim = Builder::new().build();
+    sim.client("test", async {
+        create_dir("/old")?;
+        rename("/old", "/new")?;
+        assert!(metadata("/old").is_err());
+        let meta = metadata("/new")?;
+        assert!(meta.is_dir());
+        assert!(!meta.is_file());
+        Ok(())
+    });
+    sim.run()
+}
+
+#[test]
+fn repeated_renames_preserve_each_entry_kind() -> Result {
+    use turmoil::fs::shim::std::fs::{read_link, symlink, symlink_metadata};
+
+    for synced in [false, true] {
+        for kind in 0..3 {
+            let mut sim = Builder::new().build();
+            sim.client("test", async move {
+                match kind {
+                    0 => write("/a", b"data")?,
+                    1 => create_dir("/a")?,
+                    _ => symlink("/target", "/a")?,
+                }
+                if synced {
+                    sync_dir("/")?;
+                }
+                for n in 0..128 {
+                    let (from, to) = if n % 2 == 0 {
+                        ("/a", "/b")
+                    } else {
+                        ("/b", "/a")
+                    };
+                    rename(from, to)?;
+                    assert!(symlink_metadata(from).is_err());
+                    let meta = symlink_metadata(to)?;
+                    assert_eq!(meta.is_file(), kind == 0);
+                    assert_eq!(meta.is_dir(), kind == 1);
+                    assert_eq!(meta.is_symlink(), kind == 2);
+                    if kind == 2 {
+                        assert_eq!(read_link(to)?, std::path::Path::new("/target"));
+                    }
+                }
+                Ok(())
+            });
+            sim.run()?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn reused_source_does_not_change_renamed_entry_kind() -> Result {
+    use turmoil::fs::shim::std::fs::{symlink, symlink_metadata};
+
+    let mut sim = Builder::new().build();
+    sim.client("test", async {
+        create_dir("/a")?;
+        rename("/a", "/b")?;
+        write("/a", b"new file")?;
+        assert!(metadata("/a")?.is_file());
+        assert!(metadata("/b")?.is_dir());
+        rename("/b", "/c")?;
+        symlink("/target", "/b")?;
+        assert!(metadata("/c")?.is_dir());
+        assert!(symlink_metadata("/b")?.is_symlink());
         Ok(())
     });
     sim.run()
