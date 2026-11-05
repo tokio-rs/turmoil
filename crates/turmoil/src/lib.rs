@@ -250,7 +250,7 @@ pub(crate) fn for_pairs(a: &Vec<IpAddr>, b: &Vec<IpAddr>, mut f: impl FnMut(IpAd
 
 /// Returns whether the caller is in a simulation context.
 pub fn in_simulation() -> bool {
-    World::try_current(|_| ()).is_ok()
+    World::try_current(|_| ()).is_some()
 }
 
 /// Returns how long the currently executing host has been executing for in
@@ -270,9 +270,7 @@ pub fn sim_elapsed() -> Option<Duration> {
         world
             .try_current_host()
             .map(|host| host.timer.sim_elapsed())
-            .ok()
     })
-    .ok()
     .flatten()
 }
 
@@ -289,9 +287,7 @@ pub fn since_epoch() -> Option<Duration> {
         world
             .try_current_host()
             .map(|host| host.timer.since_epoch())
-            .ok()
     })
-    .ok()
     .flatten()
 }
 
