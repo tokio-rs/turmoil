@@ -1,6 +1,6 @@
 [package]
 name = "turmoil-io-uring"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "MIT"
 authors = ["Tokio Contributors <team@tokio.rs>"]
@@ -23,7 +23,7 @@ fs = ["dep:turmoil-fs"]
 indexmap = "2"
 rand = "0.9"
 tokio = { version = "1.25.0", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
-turmoil-fs = { version = "0.1.0", path = "../turmoil-fs", optional = true }
+turmoil-fs = { version = "0.1.1", path = "../turmoil-fs", optional = true }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(parity_io_uring)'] }
