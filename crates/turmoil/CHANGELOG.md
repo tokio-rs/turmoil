@@ -8,6 +8,13 @@
   `OwnedReadHalf::poll_peek(&mut half, cx, buf)`, or use
   `half.poll_peek(cx, buf)`. This requires a breaking release.
 
+### Added
+
+- Add `Builder::build_with_rng` to supply random numbers from a callback,
+  allowing callers to change the random draws during a simulation ([#303]).
+
+[#303]: https://github.com/tokio-rs/turmoil/pull/303
+
 ### Changed
 
 - The `unstable-fs` and `unstable-io_uring` features now re-export from
