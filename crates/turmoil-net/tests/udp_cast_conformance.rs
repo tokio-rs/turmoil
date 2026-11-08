@@ -1,7 +1,10 @@
 //! The same socket scenarios run against the shim and real Linux Tokio.
 //!
-//! Normal `cargo test` uses the simulator. See `linux/udp_cast.py` for
-//! running the real-socket build inside a private network namespace.
+//! Normal `cargo test` uses the simulator. See the README for running
+//! `linux::udp_cast` against real sockets in a private network namespace.
+
+#[cfg(all(target_os = "linux", parity_tokio))]
+mod linux;
 
 use std::future::Future;
 use std::io::ErrorKind;
@@ -36,7 +39,7 @@ fn run(test: impl Future<Output = ()> + 'static) {
         assert_eq!(
             std::env::var("TURMOIL_NET_PRIVATE_NETNS").as_deref(),
             Ok("1"),
-            "run using tests/linux/udp_cast.py"
+            "run the linux::udp_cast test to create a private network namespace"
         );
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -208,21 +211,50 @@ fn multicast_all_uses_host_membership_and_close() {
 
 #[test]
 #[cfg_attr(parity_tokio, ignore = "requires private Linux network namespace")]
-fn sender_loop_flag_and_zero_ttl_on_link() {
+fn ipv4_multicast_source_interface_loop_and_ttl() {
     run(async {
-        let receiver = UdpSocket::bind("0.0.0.0:0").await.unwrap();
-        receiver.join_multicast_v4(GROUP, LOCAL).unwrap();
-        receiver.set_multicast_loop_v4(false).unwrap();
-        let sender = UdpSocket::bind("0.0.0.0:0").await.unwrap();
-        let dst = SocketAddr::new(GROUP.into(), receiver.local_addr().unwrap().port());
-        for ttl in [0, 1] {
-            sender.set_multicast_ttl_v4(ttl).unwrap();
-            for enabled in [false, true] {
-                sender.set_multicast_loop_v4(enabled).unwrap();
-                sender.send_to(b"x", dst).await.unwrap();
-                assert_eq!(received(&receiver).await, enabled);
+        for source in [
+            Ipv4Addr::LOCALHOST,
+            Ipv4Addr::new(127, 0, 0, 2),
+            LOCAL,
+            ALIAS,
+            Ipv4Addr::UNSPECIFIED,
+        ] {
+            for interface in [Ipv4Addr::LOCALHOST, LOCAL] {
+                let receiver = UdpSocket::bind("0.0.0.0:0").await.unwrap();
+                receiver.join_multicast_v4(GROUP, interface).unwrap();
+                receiver.set_multicast_loop_v4(false).unwrap();
+                let sender = UdpSocket::bind((source, 0)).await.unwrap();
+                let dst = SocketAddr::new(GROUP.into(), receiver.local_addr().unwrap().port());
+                for ttl in [0, 1] {
+                    sender.set_multicast_ttl_v4(ttl).unwrap();
+                    for enabled in [false, true] {
+                        sender.set_multicast_loop_v4(enabled).unwrap();
+                        sender.send_to(b"x", dst).await.unwrap();
+                        let expected = source.is_loopback() == interface.is_loopback()
+                            && (source.is_loopback() || enabled);
+                        assert_eq!(
+                            received(&receiver).await,
+                            expected,
+                            "source={source}, interface={interface}, ttl={ttl}, loop={enabled}"
+                        );
+                    }
+                }
             }
         }
+    });
+}
+
+#[test]
+#[cfg_attr(parity_tokio, ignore = "requires private Linux network namespace")]
+fn ipv4_loopback_source_broadcast_is_delivered_locally() {
+    run(async {
+        let receiver = UdpSocket::bind("0.0.0.0:0").await.unwrap();
+        let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        sender.set_broadcast(true).unwrap();
+        let dst = (Ipv4Addr::BROADCAST, receiver.local_addr().unwrap().port());
+        sender.send_to(b"x", dst).await.unwrap();
+        assert!(received(&receiver).await);
     });
 }
 

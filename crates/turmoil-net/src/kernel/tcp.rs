@@ -38,7 +38,7 @@ use bytes::{Bytes, BytesMut};
 
 use crate::kernel::packet::{self, Packet, TcpFlags, TcpSegment, Transport};
 use crate::kernel::socket::{Addr, BindKey, Domain, Fd, Socket, Tcb, TcpState, Type};
-use crate::kernel::Kernel;
+use crate::kernel::{Kernel, Outbound};
 
 /// Drives `Kernel::poll_connect` for `SOCK_STREAM`. First poll builds a
 /// TCB in `SynSent`, enqueues the SYN, and parks. Later polls observe
@@ -822,7 +822,7 @@ fn count_children(k: &Kernel, listener_fd: Fd, local: SocketAddr) -> usize {
 }
 
 fn emit(k: &mut Kernel, src: SocketAddr, dst: SocketAddr, seg: TcpSegment) {
-    k.outbound.push_back(super::Outbound::Network(Packet {
+    k.outbound.push_back(Outbound::Network(Packet {
         src: src.ip(),
         dst: dst.ip(),
         ttl: 64,

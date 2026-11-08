@@ -106,12 +106,14 @@ UDP receiver selection uses indexed destination/port lookups and host
 membership counts maintained on join, leave, and close. It visits matching
 receivers without scanning unrelated sockets or allocating a target list.
 
-Multicast output uses the default route independently of source binding or
-membership. An IPv6 destination scope ID can select the output interface.
+Multicast output uses an explicitly selected output interface when set.
+Otherwise, IPv4 multicast and limited broadcast use the bound unicast source's
+interface, falling back to the default route for wildcard or cast binds.
+Memberships do not select the output interface. An IPv6 destination scope ID
+can select the output interface.
 On the shared link, the sending socket's multicast-loop flag controls local
 copies; TTL 0 suppresses remote delivery. IPv4 output through `lo` still
-arrives when the multicast-loop flag is disabled. Loopback source addresses
-do not turn a shared-link route into a loopback route.
+arrives when the multicast-loop flag is disabled.
 
 The kernel also supports multicast output-interface and multicast-all options,
 and UDP reuse options before bind. The Tokio shim has no socket2/from-std
@@ -128,8 +130,16 @@ recipients. Local copies bypass rules, as unicast loopback does.
 
 The socket scenarios in `tests/udp_cast_conformance.rs` run against both the
 simulator and real Tokio on Linux. To run the Linux side in a private network
-namespace, use `python3 crates/turmoil-net/tests/linux/udp_cast.py` from the
-workspace root (requires unprivileged user/network namespaces and iproute2).
+namespace, run this from the workspace root (requires unprivileged user/network
+namespaces, `unshare`, and iproute2):
+
+```sh
+RUSTFLAGS="--cfg tokio_unstable --cfg parity_tokio" cargo test -p turmoil-net \
+  --test udp_cast_conformance -- --ignored --exact linux::udp_cast --nocapture
+```
+
+The Rust runner configures the namespace and runs the scenarios serially,
+since multicast memberships are shared across sockets on a host.
 The manual UDP delivery scaling benchmark runs with
 `cargo test -p turmoil-net --release udp_delivery_scaling -- --ignored --nocapture`.
 It measures receiver selection and queueing, excluding socket setup and

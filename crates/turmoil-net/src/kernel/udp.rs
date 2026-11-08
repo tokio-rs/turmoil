@@ -21,7 +21,7 @@ use tokio::io::ReadBuf;
 
 use crate::kernel::packet::{self, Packet, Transport, UdpDatagram};
 use crate::kernel::socket::{Addr, BindKey, Domain, Fd, MulticastMembership, Socket, Type};
-use crate::kernel::{InterfaceId, Kernel, EMSGSIZE};
+use crate::kernel::{InterfaceId, Kernel, Outbound, EMSGSIZE};
 
 pub(super) fn recv(
     st: &mut Socket,
@@ -69,23 +69,31 @@ pub(super) fn send_to(
     let local_ip = bound
         .as_ref()
         .map_or_else(|| unspecified(dst_sa.ip()), |bind| bind.local_addr);
-    // Membership, bind address, and multicast output interface are separate
-    // socket state. In particular a loopback source does not select lo.
+    // Linux uses the bound IPv4 source's interface for multicast and limited
+    // broadcast when no output interface is selected. Memberships remain
+    // independent of source binding and output-interface selection.
+    let cast_route = || {
+        k.interfaces
+            .by_address(local_ip)
+            .filter(|_| dst_sa.is_ipv4())
+            .map_or_else(|| k.interfaces.multicast_route(dst_sa.ip()), |i| i.id)
+    };
     let scope = if multicast {
         let explicit = match dst_sa {
             SocketAddr::V4(_) => st.multicast_if_v4,
             SocketAddr::V6(sa) if sa.scope_id() != 0 => Some(
                 k.interfaces
                     .by_index(sa.scope_id())
-                    .ok_or_else(|| Error::from_raw_os_error(super::ENODEV))?,
+                    .ok_or_else(|| Error::from_raw_os_error(super::ENODEV))?
+                    .id,
             ),
             SocketAddr::V6(_) => st.multicast_if_v6,
         };
-        explicit.unwrap_or_else(|| k.interfaces.multicast_route(dst_sa.ip()))
+        explicit.unwrap_or_else(cast_route)
     } else if dst_sa.ip().is_loopback() {
         InterfaceId::Loopback
     } else if broadcast {
-        k.interfaces.multicast_route(dst_sa.ip())
+        cast_route()
     } else {
         InterfaceId::Link
     };
@@ -132,13 +140,12 @@ pub(super) fn send_to(
     if broadcast
         || (multicast && (multicast_loop || (dst_sa.is_ipv4() && scope == InterfaceId::Loopback)))
     {
-        k.outbound
-            .push_back(super::Outbound::Local(pkt.clone(), scope));
+        k.outbound.push_back(Outbound::Local(pkt.clone(), scope));
     }
     // Local copies bypass network rules, just like unicast loopback.
     // The fabric excludes this host when routing the remote copy.
     if !(broadcast || multicast) || (scope == InterfaceId::Link && ttl > 0) {
-        k.outbound.push_back(super::Outbound::Network(pkt));
+        k.outbound.push_back(Outbound::Network(pkt));
     }
     Poll::Ready(Ok(buf.len()))
 }
@@ -173,7 +180,8 @@ pub(super) fn peek_from(
 
 pub(super) fn deliver(k: &mut Kernel, pkt: &Packet, d: &UdpDatagram, scope: InterfaceId) {
     // Linux rejects loopback-source packets arriving on a non-loopback device
-    // under the default route_localnet policy. Source binding is not routing.
+    // under the default route_localnet policy, even if the sender explicitly
+    // selected the shared link for a loopback-bound socket.
     if (pkt.is_broadcast() || pkt.dst.is_multicast())
         && scope == InterfaceId::Link
         && pkt.src.is_loopback()

@@ -357,7 +357,7 @@ fn ipv4_loopback_membership_does_not_select_the_output_interface() {
 
             let lo = UdpSocket::bind("127.0.0.1:0").await.unwrap();
             lo.send_to(b"loopback", (V4_GROUP, 9000)).await.unwrap();
-            empty(&socket).await; // Binding a loopback source does not select lo.
+            assert!(recv(&socket, b"loopback").await.ip().is_loopback());
 
             // Joining the network link doesn't replace loopback membership.
             socket.join_multicast_v4(V4_GROUP, local).unwrap();
@@ -369,7 +369,7 @@ fn ipv4_loopback_membership_does_not_select_the_output_interface() {
             lo.send_to(b"still loopback", (V4_GROUP, 9000))
                 .await
                 .unwrap();
-            empty(&socket).await;
+            assert!(recv(&socket, b"still loopback").await.ip().is_loopback());
 
             socket
                 .leave_multicast_v4(V4_GROUP, Ipv4Addr::LOCALHOST)

@@ -57,24 +57,26 @@ impl Interfaces {
     }
 
     pub fn add_address(&mut self, addr: IpAddr) {
-        let id = if addr.is_loopback() { 0 } else { 1 };
-        if !self.0[id].addresses.contains(&addr) {
-            self.0[id].addresses.push(addr);
+        let id = if addr.is_loopback() {
+            InterfaceId::Loopback
+        } else {
+            InterfaceId::Link
+        };
+        let interface = &mut self.0[id.index() as usize - 1];
+        if !interface.addresses.contains(&addr) {
+            interface.addresses.push(addr);
         }
     }
 
-    pub fn by_address(&self, addr: IpAddr) -> Option<InterfaceId> {
+    pub fn by_address(&self, addr: IpAddr) -> Option<&Interface> {
         if addr.is_loopback() {
-            return Some(InterfaceId::Loopback);
+            return Some(self.get(InterfaceId::Loopback));
         }
-        self.0
-            .iter()
-            .find(|i| i.addresses.contains(&addr))
-            .map(|i| i.id)
+        self.0.iter().find(|i| i.addresses.contains(&addr))
     }
 
-    pub fn by_index(&self, index: u32) -> Option<InterfaceId> {
-        self.0.iter().find(|i| i.id.index() == index).map(|i| i.id)
+    pub fn by_index(&self, index: u32) -> Option<&Interface> {
+        self.0.iter().find(|i| i.id.index() == index)
     }
 
     pub fn source(&self, id: InterfaceId, dst: IpAddr) -> Option<IpAddr> {
@@ -87,7 +89,8 @@ impl Interfaces {
 
     /// The default multicast route is the shared link when it has an
     /// address in this family. Loopback-only fixtures route multicast to lo.
-    /// Socket binding does not select this route.
+    /// Used for memberships and sends without a selected output interface
+    /// or an IPv4 unicast source bound to a local interface.
     pub fn multicast_route(&self, dst: IpAddr) -> InterfaceId {
         if self.source(InterfaceId::Link, dst).is_some() {
             InterfaceId::Link

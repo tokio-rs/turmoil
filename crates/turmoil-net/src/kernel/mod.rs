@@ -138,7 +138,9 @@ const EADDRNOTAVAIL: i32 = 99;
 #[derive(Debug)]
 enum Outbound {
     Network(Packet),
-    /// A local broadcast/multicast copy, captured at send time.
+    /// A broadcast/multicast copy for this host, captured at send time.
+    /// The interface is the selected output interface, including `Link`:
+    /// a local copy of a link multicast must match memberships on the link.
     Local(Packet, InterfaceId),
 }
 
@@ -327,11 +329,11 @@ impl Kernel {
         if addr.is_unspecified() {
             Some(self.interfaces.multicast_route(group))
         } else {
-            self.interfaces.by_address(addr.into())
+            self.interfaces.by_address(addr.into()).map(|i| i.id)
         }
     }
 
-    /// `setsockopt(2)`. Most variants are still unimplemented.
+    /// `setsockopt(2)`. Applies the supported socket, IP, and TCP options.
     pub fn set_option(&mut self, fd: Fd, opt: SocketOption) -> std::io::Result<()> {
         match opt {
             SocketOption::IpAddMembership { group, iface }
@@ -361,7 +363,7 @@ impl Kernel {
                 } else if iface == 0 {
                     Some(self.interfaces.multicast_route(group.into()))
                 } else {
-                    self.interfaces.by_index(iface)
+                    self.interfaces.by_index(iface).map(|i| i.id)
                 }
                 .ok_or_else(|| {
                     Error::from_raw_os_error(if join { ENODEV } else { EADDRNOTAVAIL })
@@ -375,7 +377,8 @@ impl Kernel {
                     Some(
                         self.interfaces
                             .by_address(addr.into())
-                            .ok_or_else(|| Error::from_raw_os_error(ENODEV))?,
+                            .ok_or_else(|| Error::from_raw_os_error(ENODEV))?
+                            .id,
                     )
                 };
                 let st = self.lookup_mut(fd)?;
@@ -390,7 +393,8 @@ impl Kernel {
                     Some(
                         self.interfaces
                             .by_index(index)
-                            .ok_or_else(|| Error::from_raw_os_error(ENODEV))?,
+                            .ok_or_else(|| Error::from_raw_os_error(ENODEV))?
+                            .id,
                     )
                 };
                 self.lookup_mut(fd)?.multicast_if_v6 = iface;
@@ -416,7 +420,7 @@ impl Kernel {
         Ok(())
     }
 
-    /// `getsockopt(2)`. Most variants are still unimplemented.
+    /// `getsockopt(2)`. Reads the supported socket, IP, and TCP options.
     pub fn get_option(&self, fd: Fd, kind: SocketOptionKind) -> std::io::Result<SocketOption> {
         let st = self.lookup(fd)?;
         Ok(match kind {
