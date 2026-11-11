@@ -76,74 +76,19 @@ need a specific address.
 
 ## Interfaces and UDP broadcast/multicast
 
-Each host has two explicit interfaces: `lo` (index 1) and `eth0` (index 2)
-on the fabric's shared link. `Net::interfaces(host)` exposes their identities,
-addresses, and MTUs. Loopback addresses are implicit; addresses passed to
-`Net::add_host` are aliases on `eth0`, not separate interfaces. There are no
-subnet prefixes, additional links, or configurable routing tables yet.
+`UdpSocket` supports IPv4 broadcast (`set_broadcast`) and IPv4/IPv6 multicast
+(`join_multicast_*`, `leave_multicast_*`, `set_multicast_loop_*`). Bind to a
+wildcard or multicast-group address to receive multicast.
 
-`UdpSocket` supports IPv4 broadcast (`set_broadcast`) and IPv4/IPv6
-multicast (`join_multicast_*`, `leave_multicast_*`, and
-`set_multicast_loop_*`). Membership is keyed by group and interface:
-joining through another address on the same interface returns `AddrInUse`,
-and leaving through either alias removes that membership. Joining through
-an unknown interface returns Linux `ENODEV`.
+Each host has `lo` (socket index 1) and a shared-link `eth0` (index 2).
+`Net::interfaces(host)` exposes their addresses and MTUs; `Net::add_host`
+assigns non-loopback addresses to `eth0`. Memberships are per group and
+interface. An unspecified join interface selects `eth0` when it has an address
+in that family, otherwise `lo`.
 
-An unspecified join interface selects the shared link when it has an address
-in that family. Loopback-only fixtures have an implicit multicast route to
-`lo`. This selection is independent of the socket's bind address. IPv6 joins
-accept indices 1 and 2 as well as default index 0. IPv6 leave with index 0
-removes the most recently joined interface for that group, matching Linux.
-
-Bind addresses filter packet destinations. Wildcard binds and matching
-multicast-group binds can receive multicast; an interface's unicast address
-is not a multicast receive filter. Binding `255.255.255.255` filters for limited
-broadcasts and preserves that address in `local_addr()`. Connected
-sockets also filter by peer. Linux's default multicast-all behavior permits
-a matching socket to receive groups joined elsewhere on the same host and
-incoming interface. Closing the last member removes that host membership.
-UDP receiver selection uses indexed destination/port lookups and host
-membership counts maintained on join, leave, and close. It visits matching
-receivers without scanning unrelated sockets or allocating a target list.
-
-Multicast output uses an explicitly selected output interface when set.
-Otherwise, IPv4 multicast and limited broadcast use the bound unicast source's
-interface, falling back to the default route for wildcard or cast binds.
-Memberships do not select the output interface. An IPv6 destination scope ID
-can select the output interface.
-On the shared link, the sending socket's multicast-loop flag controls local
-copies; TTL 0 suppresses remote delivery. IPv4 output through `lo` still
-arrives when the multicast-loop flag is disabled.
-
-The kernel also supports multicast output-interface and multicast-all options,
-and UDP reuse options before bind. The Tokio shim has no socket2/from-std
-adapter yet, so it does not expose those additional socket configuration APIs.
-
-Only `255.255.255.255` is currently classified as broadcast. Directed broadcast
-requires subnet configuration; an arbitrary address ending in `.255` remains
-unicast. UDP still rejects payloads exceeding the selected interface's MTU:
-IP fragmentation/reassembly and selectable PMTU policy remain unimplemented.
-
-Rules see the original broadcast or multicast destination. Remote delivery
-fans out after rule evaluation, so a drop or delay affects all remote
-recipients. Local copies bypass rules, as unicast loopback does.
-
-The socket scenarios in `tests/udp_cast_conformance.rs` run against both the
-simulator and real Tokio on Linux. To run the Linux side in a private network
-namespace, run this from the workspace root (requires unprivileged user/network
-namespaces, `unshare`, and iproute2):
-
-```sh
-RUSTFLAGS="--cfg tokio_unstable --cfg parity_tokio" cargo test -p turmoil-net \
-  --test udp_cast_conformance -- --ignored --exact linux::udp_cast --nocapture
-```
-
-The Rust runner configures the namespace and runs the scenarios serially,
-since multicast memberships are shared across sockets on a host.
-The manual UDP delivery scaling benchmark runs with
-`cargo test -p turmoil-net --release udp_delivery_scaling -- --ignored --nocapture`.
-It measures receiver selection and queueing, excluding socket setup and
-simulation scheduling; timing results are not used as a CI pass/fail check.
+Rules apply once before remote fan-out; local copies bypass them. Only limited
+broadcast (`255.255.255.255`) is supported, and UDP payloads must fit the
+selected interface's MTU.
 
 ## Rules — fault injection
 

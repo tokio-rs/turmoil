@@ -7,13 +7,14 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u32)]
 pub enum InterfaceId {
-    Loopback = 1,
-    Link = 2,
+    Loopback = 0,
+    Link = 1,
 }
 
 impl InterfaceId {
+    /// The socket interface index; zero is reserved for the default interface.
     pub fn index(self) -> u32 {
-        self as u32
+        self as u32 + 1
     }
 }
 
@@ -53,7 +54,7 @@ impl Interfaces {
     }
 
     pub fn get(&self, id: InterfaceId) -> &Interface {
-        &self.0[id.index() as usize - 1]
+        &self.0[id as usize]
     }
 
     pub fn add_address(&mut self, addr: IpAddr) {
@@ -62,7 +63,7 @@ impl Interfaces {
         } else {
             InterfaceId::Link
         };
-        let interface = &mut self.0[id.index() as usize - 1];
+        let interface = &mut self.0[id as usize];
         if !interface.addresses.contains(&addr) {
             interface.addresses.push(addr);
         }
