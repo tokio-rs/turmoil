@@ -1020,6 +1020,9 @@ pub(super) fn poll_shutdown_write(
         TcpState::CloseWait => TcpState::LastAck,
         other => other,
     };
+    // Writes now fail immediately, even if the send buffer is still full.
+    // Wake readiness waiters so they can observe that transition.
+    st.wake_write();
     Poll::Ready(Ok(()))
 }
 

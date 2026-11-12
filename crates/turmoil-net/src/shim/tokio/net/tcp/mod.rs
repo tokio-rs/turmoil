@@ -10,5 +10,3 @@ pub use split_owned::{OwnedReadHalf, OwnedWriteHalf, ReuniteError};
 
 pub(crate) mod stream;
 pub(crate) use stream::TcpStream;
-
-mod wait;

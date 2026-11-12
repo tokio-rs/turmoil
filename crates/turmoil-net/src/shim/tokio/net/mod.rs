@@ -9,6 +9,8 @@ pub use tcp::listener::TcpListener;
 pub use tcp::stream::TcpStream;
 pub use udp::UdpSocket;
 
+mod wait;
+
 use std::io;
 use std::net::SocketAddr;
 

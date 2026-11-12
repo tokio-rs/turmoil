@@ -1,17 +1,15 @@
-//! Per-direction wait lists for a [`TcpStream`].
+//! Per-direction wait lists for simulated sockets.
 //!
-//! The kernel parks one waker per direction for each stream: a fan-out
-//! waker owned by the stream that wakes every task waiting on it.
+//! The kernel parks one waker per direction for each socket: a fan-out
+//! waker owned by the socket that wakes every task waiting on it.
 //! Async waits (`readable`, `ready`, `peek`, ...) each hold an entry
 //! that is removed when the future completes or is dropped, so a
 //! cancelled wait leaves no task waker behind. `poll_*` methods share a
 //! single slot per direction, as tokio's do: only the most recent
 //! caller is woken.
-//!
-//! [`TcpStream`]: super::TcpStream
 
 use std::sync::{Arc, Mutex};
-use std::task::{Wake, Waker};
+use std::task::{Context, Poll, Wake, Waker};
 
 use indexmap::IndexMap;
 
@@ -47,7 +45,7 @@ impl Wake for WaitList {
     }
 }
 
-/// One direction (read or write) of a stream.
+/// One direction (read or write) of a socket.
 #[derive(Debug)]
 pub(crate) struct Direction {
     list: Arc<WaitList>,
@@ -67,13 +65,23 @@ impl Direction {
         &self.waker
     }
 
-    /// Record `waker` in the shared `poll_*` slot, replacing the
-    /// previous caller.
-    pub(crate) fn set_poll(&self, waker: &Waker) {
-        let mut list = self.list.0.lock().unwrap();
-        if !list.poll.as_ref().is_some_and(|w| w.will_wake(waker)) {
-            list.poll = Some(waker.clone());
+    /// Poll using the shared `poll_*` slot. Retain only a pending caller.
+    pub(crate) fn poll<T>(
+        &self,
+        cx: &mut Context<'_>,
+        f: impl FnOnce(&mut Context<'_>) -> Poll<T>,
+    ) -> Poll<T> {
+        {
+            let mut list = self.list.0.lock().unwrap();
+            if !list.poll.as_ref().is_some_and(|w| w.will_wake(cx.waker())) {
+                list.poll = Some(cx.waker().clone());
+            }
         }
+        let result = f(&mut Context::from_waker(self.waker()));
+        if result.is_ready() {
+            self.list.0.lock().unwrap().poll = None;
+        }
+        result
     }
 
     /// Start an async wait. The entry lives until the returned guard

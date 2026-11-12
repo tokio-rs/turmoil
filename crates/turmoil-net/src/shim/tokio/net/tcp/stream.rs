@@ -11,7 +11,7 @@ use tokio::io::{AsyncRead, AsyncWrite, Interest, ReadBuf, Ready};
 use crate::kernel::{Addr, Domain, Fd, Readiness, SocketOption, SocketOptionKind, Type};
 use crate::shim::tokio::net::tcp::split::{split, ReadHalf, WriteHalf};
 use crate::shim::tokio::net::tcp::split_owned::{split_owned, OwnedReadHalf, OwnedWriteHalf};
-use crate::shim::tokio::net::tcp::wait::{Direction, Waiter};
+use crate::shim::tokio::net::wait::{Direction, Waiter};
 use crate::shim::tokio::net::ToSocketAddrs;
 use crate::sys;
 
@@ -100,17 +100,17 @@ impl TcpStream {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<usize>> {
         let fd = self.fd;
-        self.read.set_poll(cx.waker());
-        let mut fan_out = Context::from_waker(self.read.waker());
-        let unfilled = buf.initialize_unfilled();
-        match sys(|k| k.poll_peek(fd, &mut fan_out, unfilled)) {
-            Poll::Ready(Ok(n)) => {
-                buf.advance(n);
-                Poll::Ready(Ok(n))
+        self.read.poll(cx, |cx| {
+            let unfilled = buf.initialize_unfilled();
+            match sys(|k| k.poll_peek(fd, cx, unfilled)) {
+                Poll::Ready(Ok(n)) => {
+                    buf.advance(n);
+                    Poll::Ready(Ok(n))
+                }
+                Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+                Poll::Pending => Poll::Pending,
             }
-            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
-            Poll::Pending => Poll::Pending,
-        }
+        })
     }
 
     pub fn set_ttl(&self, ttl: u32) -> io::Result<()> {
@@ -166,15 +166,17 @@ impl TcpStream {
     /// Polls for read readiness. Only the waker from the most recent
     /// call is woken, as with tokio's `poll_*` methods.
     pub fn poll_read_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.read.set_poll(cx.waker());
-        self.poll_ready(Interest::READABLE).map_ok(|_| ())
+        self.read
+            .poll(cx, |_| self.poll_ready(Interest::READABLE))
+            .map_ok(|_| ())
     }
 
     /// Polls for write readiness. Only the waker from the most recent
     /// call is woken, as with tokio's `poll_*` methods.
     pub fn poll_write_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.write.set_poll(cx.waker());
-        self.poll_ready(Interest::WRITABLE).map_ok(|_| ())
+        self.write
+            .poll(cx, |_| self.poll_ready(Interest::WRITABLE))
+            .map_ok(|_| ())
     }
 
     fn poll_ready_waiters(
@@ -277,17 +279,17 @@ impl TcpStream {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let fd = self.fd;
-        self.read.set_poll(cx.waker());
-        let mut fan_out = Context::from_waker(self.read.waker());
-        let unfilled = buf.initialize_unfilled();
-        match sys(|k| k.poll_recv(fd, &mut fan_out, unfilled)) {
-            Poll::Ready(Ok(n)) => {
-                buf.advance(n);
-                Poll::Ready(Ok(()))
+        self.read.poll(cx, |cx| {
+            let unfilled = buf.initialize_unfilled();
+            match sys(|k| k.poll_recv(fd, cx, unfilled)) {
+                Poll::Ready(Ok(n)) => {
+                    buf.advance(n);
+                    Poll::Ready(Ok(()))
+                }
+                Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+                Poll::Pending => Poll::Pending,
             }
-            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
-            Poll::Pending => Poll::Pending,
-        }
+        })
     }
 
     pub(super) fn poll_write_priv(
@@ -296,9 +298,7 @@ impl TcpStream {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         let fd = self.fd;
-        self.write.set_poll(cx.waker());
-        let mut fan_out = Context::from_waker(self.write.waker());
-        sys(|k| k.poll_send(fd, &mut fan_out, buf))
+        self.write.poll(cx, |cx| sys(|k| k.poll_send(fd, cx, buf)))
     }
 
     pub(super) fn poll_shutdown_priv(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {

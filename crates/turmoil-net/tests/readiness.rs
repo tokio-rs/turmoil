@@ -452,3 +452,123 @@ fn fin_does_not_wake_blocked_writers() {
         assert_pending!(write.poll());
     });
 }
+
+#[test]
+fn shutdown_wakes_pending_write_readiness() {
+    for drop_write_half in [false, true] {
+        fixture::lo_with_config(tiny(), async move {
+            let (mut stream, _peer) = pair(9113).await.unwrap();
+            fill(&mut stream).await;
+            let (read, mut write) = stream.into_split();
+            let mut waiting = task::spawn(read.ready(Interest::WRITABLE));
+            assert_pending!(waiting.poll());
+
+            if drop_write_half {
+                drop(write);
+            } else {
+                write.shutdown().await.unwrap();
+            }
+
+            assert!(waiting.is_woken());
+            assert!(assert_ready_ok!(waiting.poll()).is_writable());
+        });
+    }
+}
+
+#[test]
+fn udp_cancelled_readiness_releases_task_waker() {
+    fixture::lo(async {
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut task = task::spawn(());
+        task.enter(|cx, _| {
+            let mut future = Box::pin(socket.readable());
+            assert_pending!(future.as_mut().poll(cx));
+        });
+        assert_eq!(task.waker_ref_count(), 1);
+    });
+}
+
+#[test]
+fn udp_poll_recv_ready_wakes_only_latest_poller() {
+    fixture::lo(async {
+        let receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut old = task::spawn(poll_fn(|cx| receiver.poll_recv_ready(cx)));
+        let mut latest = task::spawn(poll_fn(|cx| receiver.poll_recv_ready(cx)));
+        let mut asynchronous = task::spawn(receiver.readable());
+        assert_pending!(old.poll());
+        assert_pending!(latest.poll());
+        assert_pending!(asynchronous.poll());
+
+        sender
+            .send_to(b"x", receiver.local_addr().unwrap())
+            .await
+            .unwrap();
+        sleep(Duration::from_millis(10)).await;
+        assert!(latest.is_woken());
+        assert!(!old.is_woken());
+        assert!(asynchronous.is_woken());
+        assert_ready_ok!(latest.poll());
+        assert_ready_ok!(asynchronous.poll());
+    });
+}
+
+#[test]
+fn completed_tcp_polls_release_task_wakers() {
+    for method in [PollWait::Readable, PollWait::Writable, PollWait::Peek] {
+        fixture::lo(async move {
+            let (stream, mut peer) = pair(9114).await.unwrap();
+            peer.write_all(b"x").await.unwrap();
+            sleep(Duration::from_millis(10)).await;
+            let mut waiting = task::spawn(method.run(&stream));
+            assert_ready_ok!(waiting.poll());
+            assert_eq!(waiting.waker_ref_count(), 1);
+        });
+    }
+}
+
+#[test]
+fn completed_udp_poll_releases_task_waker() {
+    fixture::lo(async {
+        let receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        sender
+            .send_to(b"x", receiver.local_addr().unwrap())
+            .await
+            .unwrap();
+        sleep(Duration::from_millis(10)).await;
+        let mut waiting = task::spawn(poll_fn(|cx| receiver.poll_recv_ready(cx)));
+        assert_ready_ok!(waiting.poll());
+        assert_eq!(waiting.waker_ref_count(), 1);
+    });
+}
+
+#[test]
+fn udp_cancellation_preserves_other_waiters() {
+    fixture::lo(async {
+        let receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut task = task::spawn(());
+        let mut survivor = Box::pin(receiver.readable());
+        let mut other = task::spawn(receiver.readable());
+        task.enter(|cx, _| {
+            assert_pending!(survivor.as_mut().poll(cx));
+            // A second wait with the same waker must have its own registration.
+            let mut cancelled = Box::pin(receiver.readable());
+            assert_pending!(cancelled.as_mut().poll(cx));
+        });
+        assert_pending!(other.poll());
+
+        sender
+            .send_to(b"x", receiver.local_addr().unwrap())
+            .await
+            .unwrap();
+        sleep(Duration::from_millis(10)).await;
+        assert!(task.is_woken());
+        assert!(other.is_woken());
+        task.enter(|cx, _| assert_ready_ok!(survivor.as_mut().poll(cx)));
+        assert_ready_ok!(other.poll());
+        assert_eq!(task.waker_ref_count(), 1);
+        assert_eq!(other.waker_ref_count(), 1);
+    });
+}
