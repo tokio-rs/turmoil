@@ -240,8 +240,8 @@ impl Kernel {
         self.interfaces.add_address(addr);
     }
 
-    pub fn interfaces(&self) -> &[Interface] {
-        self.interfaces.all()
+    pub fn interfaces(&self) -> impl Iterator<Item = &Interface> {
+        self.interfaces.iter()
     }
 
     /// `true` if `addr` is one of this host's local addresses
