@@ -16,7 +16,7 @@ use tokio::{
 use turmoil::{
     lookup,
     net::{TcpListener, TcpStream},
-    Builder, IpVersion, Result,
+    Builder, IpVersion, Result, TcpRetransmit,
 };
 
 const PORT: u16 = 1738;
@@ -2456,6 +2456,138 @@ fn close_with_unread_data_sends_rst() -> Result {
 
         drop(s);
 
+        Ok(())
+    });
+
+    sim.run()
+}
+
+/// 10ms links and a fixed 200ms first RTO, so a segment lost at `t` is resent
+/// at `t` + 0.2s, 0.6s, 1.4s, 3s, ...
+fn retransmitting(retries: u32) -> Builder {
+    let mut builder = Builder::new();
+    builder
+        .min_message_latency(Duration::from_millis(10))
+        .max_message_latency(Duration::from_millis(10))
+        .tcp_retransmit(TcpRetransmit {
+            rto: Duration::from_millis(200)..=Duration::from_millis(200),
+            max_rto: Duration::from_secs(120),
+            retries,
+        });
+    builder
+}
+
+#[test]
+fn tcp_retransmit_resends_a_segment_a_partition_dropped() -> Result {
+    let mut sim = retransmitting(15).build();
+
+    sim.host("server", || async {
+        let listener = bind().await?;
+        let (mut sock, _) = listener.accept().await?;
+        sock.write_u8(1).await?;
+        turmoil::partition("server", "client");
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        turmoil::repair("server", "client");
+        future::pending().await
+    });
+
+    sim.client("client", async {
+        let mut sock = TcpStream::connect(("server", PORT)).await?;
+        let sent = turmoil::elapsed();
+        assert_eq!(sock.read_u8().await?, 1);
+        let waited = turmoil::elapsed() - sent;
+        assert!(
+            (Duration::from_millis(1400)..Duration::from_millis(1450)).contains(&waited),
+            "the resend at 1.4s is the first after the repair, arrived after {waited:?}"
+        );
+        Ok(())
+    });
+
+    sim.run()
+}
+
+#[test]
+fn tcp_retransmit_resends_a_syn_until_the_partition_heals() -> Result {
+    let mut sim = retransmitting(15).build();
+
+    sim.host("server", || async {
+        let listener = bind().await?;
+        loop {
+            let _ = listener.accept().await;
+        }
+    });
+
+    sim.client("client", async {
+        turmoil::partition("client", "server");
+        tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            turmoil::repair("client", "server");
+        });
+        TcpStream::connect(("server", PORT)).await?;
+        assert!(turmoil::elapsed() >= Duration::from_millis(1400));
+        Ok(())
+    });
+
+    sim.run()
+}
+
+#[test]
+fn tcp_retransmit_resets_a_connection_whose_resends_are_lost() -> Result {
+    let capacity = 4;
+    let mut sim = retransmitting(3).tcp_capacity(capacity).build();
+
+    sim.client("server", async move {
+        let listener = bind().await?;
+        let (mut sock, _) = listener.accept().await?;
+        turmoil::partition("server", "client");
+        let lost = turmoil::elapsed();
+        for byte in 0..capacity as u8 {
+            sock.write_u8(byte).await?;
+        }
+
+        assert_error_kind(sock.write_u8(0).await, io::ErrorKind::BrokenPipe);
+        let waited = turmoil::elapsed() - lost;
+        assert!(
+            (Duration::from_secs(3)..Duration::from_millis(3010)).contains(&waited),
+            "three lost resends at 0.2s, 0.6s and 1.4s, then a last RTO, reset after {waited:?}"
+        );
+        assert_error_kind(sock.read_u8().await, io::ErrorKind::ConnectionReset);
+        Ok(())
+    });
+
+    sim.host("client", || async {
+        let _sock = TcpStream::connect(("server", PORT)).await?;
+        future::pending().await
+    });
+
+    sim.run()
+}
+
+#[test]
+fn tcp_retransmit_delivers_a_stream_in_order_over_a_lossy_link() -> Result {
+    let mut sim = Builder::new()
+        .min_message_latency(Duration::from_millis(10))
+        .max_message_latency(Duration::from_millis(10))
+        .tcp_retransmit(TcpRetransmit::default())
+        .fail_rate(0.3)
+        .rng_seed(7)
+        .simulation_duration(Duration::from_secs(120))
+        .build();
+
+    sim.host("server", || async {
+        let listener = bind().await?;
+        let (mut sock, _) = listener.accept().await?;
+        for byte in 0..200u8 {
+            sock.write_u8(byte).await?;
+        }
+        future::pending().await
+    });
+
+    sim.client("client", async {
+        let mut sock = TcpStream::connect(("server", PORT)).await?;
+        for byte in 0..200u8 {
+            assert_eq!(sock.read_u8().await?, byte);
+        }
         Ok(())
     });
 
