@@ -33,6 +33,11 @@ pub struct Packet {
 }
 
 impl Packet {
+    /// Only the limited broadcast address is known without subnet masks.
+    pub(crate) fn is_broadcast(&self) -> bool {
+        is_broadcast(self.dst)
+    }
+
     /// Total size in bytes if this packet were actually serialized —
     /// IP header + transport header + payload. Used to enforce MTU.
     pub fn size(&self) -> u32 {
@@ -42,6 +47,10 @@ impl Packet {
         } as u32;
         ip_hdr + self.payload.size()
     }
+}
+
+pub(super) fn is_broadcast(ip: IpAddr) -> bool {
+    matches!(ip, IpAddr::V4(ip) if ip.is_broadcast())
 }
 
 /// Transport-layer payload of a [`Packet`].
