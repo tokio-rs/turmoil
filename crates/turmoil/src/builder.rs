@@ -1,6 +1,6 @@
 use std::{ops::RangeInclusive, time::SystemTime};
 
-use rand::{rngs::SmallRng, SeedableRng};
+use rand::{rand_core::impls, rngs::SmallRng, RngCore, SeedableRng};
 
 #[cfg(feature = "unstable-fs")]
 use crate::fs::FsConfig;
@@ -56,6 +56,8 @@ use crate::*;
 /// factors that affect the simulation, like message latency, and failure
 /// distributions. By default, this rng is randomly seeded. To make your tests
 /// deterministic, you can provide your own seed through [`Builder::rng_seed`].
+/// A caller that decides the draws while the simulation runs can provide them
+/// through [`Builder::build_with_rng`].
 pub struct Builder {
     config: Config,
     ip_version: IpVersion,
@@ -208,23 +210,65 @@ impl Builder {
 
     /// Build a simulation with the settings from the builder.
     pub fn build<'a>(&self) -> Sim<'a> {
-        if self.link.latency().max_message_latency < self.link.latency().min_message_latency {
-            panic!("Maximum message latency must be greater than minimum.");
-        }
-
         let rng = match self.rng_seed {
             Some(seed) => SmallRng::seed_from_u64(seed),
             None => SmallRng::from_os_rng(),
         };
 
+        self.build_on(Box::new(rng))
+    }
+
+    /// Build a simulation with the settings from the builder that takes its
+    /// random numbers from `next_u64`, in place of the generator that
+    /// [`Builder::rng_seed`] seeds.
+    ///
+    /// A seed fixes every draw before the simulation starts. A function lets
+    /// the caller change the draws while the simulation runs, for example to
+    /// continue a run from a chosen step with other latencies and failures.
+    /// A function that returns the same numbers gives the same simulation.
+    ///
+    /// ```
+    /// let mut state = 1u64;
+    /// let sim = turmoil::Builder::new().build_with_rng(move || {
+    ///     state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+    ///     state
+    /// });
+    /// ```
+    pub fn build_with_rng<'a>(&self, next_u64: impl FnMut() -> u64 + 'static) -> Sim<'a> {
+        self.build_on(Box::new(FnRng(next_u64)))
+    }
+
+    fn build_on<'a>(&self, rng: Box<dyn RngCore>) -> Sim<'a> {
+        if self.link.latency().max_message_latency < self.link.latency().min_message_latency {
+            panic!("Maximum message latency must be greater than minimum.");
+        }
+
         let world = World::new(
             self.link.clone(),
-            Box::new(rng),
+            rng,
             self.ip_version.iter(),
             self.config.tick,
         );
 
         Sim::new(self.config.clone(), world)
+    }
+}
+
+/// A generator that takes each draw from a function, which keeps `rand` out of
+/// the signature of [`Builder::build_with_rng`].
+struct FnRng<F>(F);
+
+impl<F: FnMut() -> u64> RngCore for FnRng<F> {
+    fn next_u32(&mut self) -> u32 {
+        (self.next_u64() >> 32) as u32
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        (self.0)()
+    }
+
+    fn fill_bytes(&mut self, destination: &mut [u8]) {
+        impls::fill_bytes_via_next(self, destination);
     }
 }
 

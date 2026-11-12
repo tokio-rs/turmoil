@@ -41,7 +41,9 @@ pub use crate::dns::{ToIpAddr, ToIpAddrs};
 use crate::fabric::Fabric;
 pub use crate::fabric::HostId;
 use crate::kernel::Kernel;
-pub use crate::kernel::{KernelConfig, Packet, TcpFlags, TcpSegment, Transport, UdpDatagram};
+pub use crate::kernel::{
+    Interface, InterfaceId, KernelConfig, Packet, TcpFlags, TcpSegment, Transport, UdpDatagram,
+};
 pub use crate::netstat::{Netstat, NetstatEntry, NetstatState, Proto};
 pub use crate::rule::{Latency, Rule, RuleGuard, RuleId, Verdict};
 
@@ -87,6 +89,11 @@ impl Net {
             self.current = Some(id);
         }
         id
+    }
+
+    /// Inspect a host's loopback and shared-link interfaces.
+    pub fn interfaces(&self, host: HostId) -> &[Interface] {
+        self.fabric.kernel(host).interfaces()
     }
 
     /// Resolve `name` to its registered IP, allocating if unseen.
@@ -183,8 +190,9 @@ impl EnterGuard {
         });
     }
 
-    /// Route a packet to the host owning its destination IP. Drops
-    /// silently if no host is registered for that IP.
+    /// Route unicast to the host owning its destination IP, or fan out
+    /// UDP broadcast/multicast to other hosts on the shared link.
+    /// Unknown unicast destinations are silently dropped.
     pub fn deliver(&self, pkt: Packet) {
         CURRENT.with(|c| {
             c.borrow_mut()

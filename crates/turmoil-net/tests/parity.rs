@@ -68,3 +68,22 @@ fn try_read_vectored() {
     }
     let _ = check;
 }
+
+#[test]
+fn udp_cast_options() {
+    fn check(socket: &UdpSocket, v4: std::net::Ipv4Addr, v6: std::net::Ipv6Addr) {
+        let _: std::io::Result<bool> = socket.broadcast();
+        let _: std::io::Result<()> = socket.set_broadcast(true);
+        let _: std::io::Result<bool> = socket.multicast_loop_v4();
+        let _: std::io::Result<()> = socket.set_multicast_loop_v4(false);
+        let _: std::io::Result<bool> = socket.multicast_loop_v6();
+        let _: std::io::Result<()> = socket.set_multicast_loop_v6(false);
+        let _: std::io::Result<u32> = socket.multicast_ttl_v4();
+        let _: std::io::Result<()> = socket.set_multicast_ttl_v4(1);
+        let _: std::io::Result<()> = socket.join_multicast_v4(v4, std::net::Ipv4Addr::UNSPECIFIED);
+        let _: std::io::Result<()> = socket.leave_multicast_v4(v4, std::net::Ipv4Addr::UNSPECIFIED);
+        let _: std::io::Result<()> = socket.join_multicast_v6(&v6, 0);
+        let _: std::io::Result<()> = socket.leave_multicast_v6(&v6, 0);
+    }
+    let _ = check;
+}

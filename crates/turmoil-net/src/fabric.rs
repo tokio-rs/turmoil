@@ -110,11 +110,27 @@ impl Fabric {
         }
     }
 
-    /// Route a packet to the host bound to its destination IP. Drops
-    /// silently if the destination isn't registered — matches real-
-    /// world "packet hit an unreachable address" behavior, and keeps
-    /// the harness free of routing concerns.
+    /// Route unicast to its destination host. UDP broadcast and
+    /// multicast fan out over the shared link; each kernel filters
+    /// by port and membership. The sender already queued its local
+    /// copy, so it is excluded here. Unknown unicast is dropped.
     pub fn deliver(&mut self, pkt: Packet) {
+        if matches!(pkt.payload, crate::kernel::Transport::Udp(_))
+            && (pkt.is_broadcast() || pkt.dst.is_multicast())
+        {
+            let src = self.host_for_ip(pkt.src);
+            for (&id, host) in &mut self.hosts {
+                if Some(id) != src
+                    && host
+                        .addrs
+                        .iter()
+                        .any(|ip| ip.is_ipv4() == pkt.dst.is_ipv4())
+                {
+                    host.kernel.deliver(pkt.clone());
+                }
+            }
+            return;
+        }
         if let Some(&dst) = self.ip_to_host.get(&pkt.dst) {
             self.hosts.get_mut(&dst).unwrap().kernel.deliver(pkt);
         }

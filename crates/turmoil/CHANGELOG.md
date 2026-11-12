@@ -14,6 +14,10 @@
   message loss or a partition drops are resent after an exponentially backed
   off retransmission timeout, and a connection whose resends keep getting lost
   resets.
+- Add `Builder::build_with_rng` to supply random numbers from a callback,
+  allowing callers to change the random draws during a simulation ([#303]).
+
+[#303]: https://github.com/tokio-rs/turmoil/pull/303
 
 ### Changed
 

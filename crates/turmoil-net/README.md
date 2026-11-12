@@ -74,6 +74,22 @@ Hostnames are resolved against an in-memory DNS — each new name gets an
 IP in `192.168.0.0/16` on first sight. Pass literal `IpAddr`s if you
 need a specific address.
 
+## Interfaces and UDP broadcast/multicast
+
+`UdpSocket` supports IPv4 broadcast (`set_broadcast`) and IPv4/IPv6 multicast
+(`join_multicast_*`, `leave_multicast_*`, `set_multicast_loop_*`). Bind to a
+wildcard or multicast-group address to receive multicast.
+
+Each host has `lo` (socket index 1) and a shared-link `eth0` (index 2).
+`Net::interfaces(host)` exposes their addresses and MTUs; `Net::add_host`
+assigns non-loopback addresses to `eth0`. Memberships are per group and
+interface. An unspecified join interface selects `eth0` when it has an address
+in that family, otherwise `lo`.
+
+Rules apply once before remote fan-out; local copies bypass them. Only limited
+broadcast (`255.255.255.255`) is supported, and UDP payloads must fit the
+selected interface's MTU.
+
 ## Rules — fault injection
 
 Every non-loopback packet leaving a host runs through an installed chain of `Rule`s. A rule returns a `Verdict`:
