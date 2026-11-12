@@ -7,15 +7,25 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u32)]
 pub enum InterfaceId {
-    Loopback = 0,
-    Link = 1,
+    Loopback = 1,
+    Link = 2,
 }
 
 impl InterfaceId {
     /// The socket interface index; zero is reserved for the default interface.
     pub fn index(self) -> u32 {
-        self as u32 + 1
+        self as u32
     }
+}
+
+/// A multicast output-interface choice, resolved to an interface when sending.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InterfaceSelection {
+    /// Use the route for the destination and bound source address.
+    /// Selected by IPv4's unspecified address or IPv6's interface index zero.
+    Default,
+    /// Use the selected interface regardless of the default route.
+    Specific(InterfaceId),
 }
 
 /// A host interface. Every host has `lo` and a shared-link interface `eth0`;
@@ -54,7 +64,7 @@ impl Interfaces {
     }
 
     pub fn get(&self, id: InterfaceId) -> &Interface {
-        &self.0[id as usize]
+        &self.0[id.index() as usize - 1]
     }
 
     pub fn add_address(&mut self, addr: IpAddr) {
@@ -63,7 +73,7 @@ impl Interfaces {
         } else {
             InterfaceId::Link
         };
-        let interface = &mut self.0[id as usize];
+        let interface = &mut self.0[id.index() as usize - 1];
         if !interface.addresses.contains(&addr) {
             interface.addresses.push(addr);
         }

@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::task::Waker;
 use std::time::Duration;
 
-use super::InterfaceId;
+use super::{InterfaceId, InterfaceSelection};
 use bytes::{Bytes, BytesMut};
 
 /// Linux default `ip_local_port_range`.
@@ -315,9 +315,9 @@ pub struct Socket {
     pub multicast_hops_v6: u8,
     pub multicast_loop_v4: bool,
     pub multicast_loop_v6: bool,
-    pub multicast_if_v4: Option<InterfaceId>,
+    pub multicast_if_v4: InterfaceSelection,
     pub multicast_source_v4: Option<Ipv4Addr>,
-    pub multicast_if_v6: Option<InterfaceId>,
+    pub multicast_if_v6: InterfaceSelection,
     pub multicast_all_v4: bool,
     pub multicast_all_v6: bool,
     /// Membership belongs to the socket, so close removes it. Retain
@@ -378,9 +378,9 @@ impl Socket {
             multicast_hops_v6: 1,
             multicast_loop_v4: true,
             multicast_loop_v6: true,
-            multicast_if_v4: None,
+            multicast_if_v4: InterfaceSelection::Default,
             multicast_source_v4: None,
-            multicast_if_v6: None,
+            multicast_if_v6: InterfaceSelection::Default,
             multicast_all_v4: true,
             multicast_all_v6: true,
             multicast_memberships: IndexSet::new(),
