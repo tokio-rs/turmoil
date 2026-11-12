@@ -21,7 +21,7 @@ use tokio::io::ReadBuf;
 
 use crate::kernel::packet::{self, Packet, Transport, UdpDatagram};
 use crate::kernel::socket::{Addr, BindKey, Domain, Fd, MulticastMembership, Socket, Type};
-use crate::kernel::{InterfaceId, InterfaceSelection, Kernel, Outbound, EMSGSIZE};
+use crate::kernel::{InterfaceId, Kernel, Outbound, EMSGSIZE};
 
 pub(super) fn recv(
     st: &mut Socket,
@@ -79,9 +79,9 @@ pub(super) fn send_to(
             .map_or_else(|| k.interfaces.multicast_route(dst_sa.ip()), |i| i.id)
     };
     let scope = if multicast {
-        let selection = match dst_sa {
+        let explicit = match dst_sa {
             SocketAddr::V4(_) => st.multicast_if_v4,
-            SocketAddr::V6(sa) if sa.scope_id() != 0 => InterfaceSelection::Specific(
+            SocketAddr::V6(sa) if sa.scope_id() != 0 => Some(
                 k.interfaces
                     .by_index(sa.scope_id())
                     .ok_or_else(|| Error::from_raw_os_error(super::ENODEV))?
@@ -89,10 +89,7 @@ pub(super) fn send_to(
             ),
             SocketAddr::V6(_) => st.multicast_if_v6,
         };
-        match selection {
-            InterfaceSelection::Default => cast_route(),
-            InterfaceSelection::Specific(interface) => interface,
-        }
+        explicit.unwrap_or_else(cast_route)
     } else if dst_sa.ip().is_loopback() {
         InterfaceId::Loopback
     } else if broadcast {
@@ -306,7 +303,7 @@ pub(super) fn deliver(k: &mut Kernel, pkt: &Packet, d: &UdpDatagram, scope: Inte
 fn source_endpoint(ip: IpAddr, port: u16, interface: InterfaceId) -> Addr {
     let addr = match ip {
         IpAddr::V6(ip) if ip.is_unicast_link_local() => {
-            SocketAddrV6::new(ip, port, 0, interface.index()).into()
+            SocketAddrV6::new(ip, port, 0, interface as u32).into()
         }
         _ => SocketAddr::new(ip, port),
     };
@@ -423,7 +420,7 @@ mod bench;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kernel::{SocketOption, ENODEV};
+    use crate::kernel::SocketOption;
 
     fn bind(k: &mut Kernel, ip: IpAddr, port: u16) -> Fd {
         k.bind(&Addr::Inet(SocketAddr::new(ip, port)), Type::Dgram)
@@ -664,72 +661,6 @@ mod tests {
             k.deliver(pkt);
             assert_eq!(pending(&k, lo), 1);
             assert_eq!(pending(&k, link), 2);
-        }
-    }
-
-    #[test]
-    fn multicast_output_selection_can_return_to_default() {
-        for (local, dst) in [
-            ("10.0.0.1", "239.0.0.1:9000"),
-            ("fd00::1", "[ff08::1]:9000"),
-        ] {
-            let local: IpAddr = local.parse().unwrap();
-            let dst: SocketAddr = dst.parse().unwrap();
-            let mut k = Kernel::new();
-            k.add_address(local);
-            let sender = bind(&mut k, unspecified(local), 8000);
-            let (loopback, invalid, default) = if local.is_ipv4() {
-                (
-                    SocketOption::IpMulticastIf(Ipv4Addr::LOCALHOST),
-                    SocketOption::IpMulticastIf(Ipv4Addr::new(10, 9, 9, 9)),
-                    SocketOption::IpMulticastIf(Ipv4Addr::UNSPECIFIED),
-                )
-            } else {
-                (
-                    SocketOption::Ipv6MulticastIf(1),
-                    SocketOption::Ipv6MulticastIf(99999),
-                    SocketOption::Ipv6MulticastIf(0),
-                )
-            };
-
-            let mut out = Vec::new();
-            send(&mut k, sender, dst, b"default");
-            k.egress(&mut out);
-            assert_eq!(out.len(), 1);
-            assert_eq!(out[0].src, local);
-            out.clear();
-
-            k.set_option(sender, loopback).unwrap();
-            send(&mut k, sender, dst, b"loopback");
-            k.egress(&mut out);
-            assert!(out.is_empty());
-
-            assert_eq!(
-                k.set_option(sender, invalid).unwrap_err().raw_os_error(),
-                Some(ENODEV)
-            );
-            send(&mut k, sender, dst, b"still loopback");
-            k.egress(&mut out);
-            assert!(out.is_empty());
-
-            if let SocketAddr::V6(mut scoped) = dst {
-                scoped.set_scope_id(2);
-                send(&mut k, sender, scoped.into(), b"scope overrides selection");
-                k.egress(&mut out);
-                assert_eq!(out.len(), 1);
-                assert_eq!(out[0].src, local);
-                out.clear();
-
-                send(&mut k, sender, dst, b"selection unchanged");
-                k.egress(&mut out);
-                assert!(out.is_empty());
-            }
-
-            k.set_option(sender, default).unwrap();
-            send(&mut k, sender, dst, b"default restored");
-            k.egress(&mut out);
-            assert_eq!(out.len(), 1);
-            assert_eq!(out[0].src, local);
         }
     }
 

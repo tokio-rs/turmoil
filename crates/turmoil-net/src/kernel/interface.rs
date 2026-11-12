@@ -4,28 +4,13 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 /// An interface identity local to a host. Addresses on an interface are
 /// aliases, not separate interfaces. Indices are stable within the simulation.
+/// Discriminants match socket interface indices; zero is reserved for default
+/// selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u32)]
 pub enum InterfaceId {
     Loopback = 1,
     Link = 2,
-}
-
-impl InterfaceId {
-    /// The socket interface index; zero is reserved for the default interface.
-    pub fn index(self) -> u32 {
-        self as u32
-    }
-}
-
-/// A multicast output-interface choice, resolved to an interface when sending.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum InterfaceSelection {
-    /// Use the route for the destination and bound source address.
-    /// Selected by IPv4's unspecified address or IPv6's interface index zero.
-    Default,
-    /// Use the selected interface regardless of the default route.
-    Specific(InterfaceId),
 }
 
 /// A host interface. Every host has `lo` and a shared-link interface `eth0`;
@@ -92,7 +77,7 @@ impl Interfaces {
     }
 
     pub fn by_index(&self, index: u32) -> Option<&Interface> {
-        self.iter().find(|i| i.id.index() == index)
+        self.iter().find(|i| i.id as u32 == index)
     }
 
     pub fn source(&self, id: InterfaceId, dst: IpAddr) -> Option<IpAddr> {

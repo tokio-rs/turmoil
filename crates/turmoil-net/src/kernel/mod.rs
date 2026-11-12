@@ -25,8 +25,8 @@ mod tcp;
 mod udp;
 mod uds;
 
+use interface::Interfaces;
 pub use interface::{Interface, InterfaceId};
-use interface::{InterfaceSelection, Interfaces};
 
 // for shims
 pub use socket::{Addr, Domain, Fd, SocketOption, SocketOptionKind, Type};
@@ -372,9 +372,9 @@ impl Kernel {
             }
             SocketOption::IpMulticastIf(addr) => {
                 let iface = if addr.is_unspecified() {
-                    InterfaceSelection::Default
+                    None
                 } else {
-                    InterfaceSelection::Specific(
+                    Some(
                         self.interfaces
                             .by_address(addr.into())
                             .ok_or_else(|| Error::from_raw_os_error(ENODEV))?
@@ -388,9 +388,9 @@ impl Kernel {
             }
             SocketOption::Ipv6MulticastIf(index) => {
                 let iface = if index == 0 {
-                    InterfaceSelection::Default
+                    None
                 } else {
-                    InterfaceSelection::Specific(
+                    Some(
                         self.interfaces
                             .by_index(index)
                             .ok_or_else(|| Error::from_raw_os_error(ENODEV))?

@@ -21,11 +21,11 @@ fn host_addresses_are_aliases_on_one_inspectable_interface() {
     let mut interfaces = net.interfaces(host);
     let loopback = interfaces.next().unwrap();
     assert_eq!(loopback.id, InterfaceId::Loopback);
-    assert_eq!(loopback.id.index(), 1);
+    assert_eq!(loopback.id as u32, 1);
     assert_eq!(loopback.mtu, 32000);
     let link = interfaces.next().unwrap();
     assert_eq!(link.id, InterfaceId::Link);
-    assert_eq!(link.id.index(), 2);
+    assert_eq!(link.id as u32, 2);
     assert_eq!(link.addresses, addresses);
     assert_eq!(link.mtu, 1400);
     assert!(interfaces.next().is_none());
