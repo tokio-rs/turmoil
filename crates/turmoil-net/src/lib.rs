@@ -91,8 +91,8 @@ impl Net {
         id
     }
 
-    /// Inspect a host's loopback and shared-link interfaces.
-    pub fn interfaces(&self, host: HostId) -> &[Interface] {
+    /// Iterate over a host's loopback interface, then its shared-link interface.
+    pub fn interfaces(&self, host: HostId) -> impl Iterator<Item = &Interface> {
         self.fabric.kernel(host).interfaces()
     }
 

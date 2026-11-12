@@ -39,41 +39,46 @@ pub struct Interface {
 }
 
 #[derive(Debug)]
-pub(super) struct Interfaces([Interface; 2]);
+pub(super) struct Interfaces {
+    loopback: Interface,
+    link: Interface,
+}
 
 impl Interfaces {
     pub fn new(mtu: u32, loopback_mtu: u32) -> Self {
-        Self([
-            Interface {
+        Self {
+            loopback: Interface {
                 id: InterfaceId::Loopback,
                 name: "lo",
                 addresses: vec![Ipv4Addr::LOCALHOST.into(), Ipv6Addr::LOCALHOST.into()],
                 mtu: loopback_mtu,
             },
-            Interface {
+            link: Interface {
                 id: InterfaceId::Link,
                 name: "eth0",
                 addresses: Vec::new(),
                 mtu,
             },
-        ])
+        }
     }
 
-    pub fn all(&self) -> &[Interface] {
-        &self.0
+    pub fn iter(&self) -> impl Iterator<Item = &Interface> {
+        [&self.loopback, &self.link].into_iter()
     }
 
     pub fn get(&self, id: InterfaceId) -> &Interface {
-        &self.0[id.index() as usize - 1]
+        match id {
+            InterfaceId::Loopback => &self.loopback,
+            InterfaceId::Link => &self.link,
+        }
     }
 
     pub fn add_address(&mut self, addr: IpAddr) {
-        let id = if addr.is_loopback() {
-            InterfaceId::Loopback
+        let interface = if addr.is_loopback() {
+            &mut self.loopback
         } else {
-            InterfaceId::Link
+            &mut self.link
         };
-        let interface = &mut self.0[id.index() as usize - 1];
         if !interface.addresses.contains(&addr) {
             interface.addresses.push(addr);
         }
@@ -83,11 +88,11 @@ impl Interfaces {
         if addr.is_loopback() {
             return Some(self.get(InterfaceId::Loopback));
         }
-        self.0.iter().find(|i| i.addresses.contains(&addr))
+        self.iter().find(|i| i.addresses.contains(&addr))
     }
 
     pub fn by_index(&self, index: u32) -> Option<&Interface> {
-        self.0.iter().find(|i| i.id.index() == index)
+        self.iter().find(|i| i.id.index() == index)
     }
 
     pub fn source(&self, id: InterfaceId, dst: IpAddr) -> Option<IpAddr> {
