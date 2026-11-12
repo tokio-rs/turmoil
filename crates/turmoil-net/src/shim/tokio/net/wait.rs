@@ -95,6 +95,14 @@ impl Direction {
     }
 }
 
+impl Drop for Direction {
+    fn drop(&mut self) {
+        // The kernel may retain our fan-out waker while TCP finishes
+        // closing. No caller can poll the dropped socket again.
+        self.list.0.lock().unwrap().poll = None;
+    }
+}
+
 /// An async wait registered on a [`Direction`].
 pub(crate) struct Waiter<'a> {
     dir: &'a Direction,

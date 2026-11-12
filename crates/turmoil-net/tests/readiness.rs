@@ -572,3 +572,21 @@ fn udp_cancellation_preserves_other_waiters() {
         assert_eq!(other.waker_ref_count(), 1);
     });
 }
+
+#[test]
+fn dropped_tcp_socket_releases_poll_wakers() {
+    fixture::lo_with_config(tiny(), async {
+        let (mut stream, _peer) = pair(9115).await.unwrap();
+        fill(&mut stream).await;
+        let mut reader = task::spawn(());
+        let mut writer = task::spawn(());
+        reader.enter(|cx, _| assert_pending!(stream.poll_read_ready(cx)));
+        writer.enter(|cx, _| assert_pending!(stream.poll_write_ready(cx)));
+
+        // The TCP connection lingers to deliver queued data and FIN, but
+        // the dropped socket can no longer have callers to wake.
+        drop(stream);
+        assert_eq!(reader.waker_ref_count(), 1);
+        assert_eq!(writer.waker_ref_count(), 1);
+    });
+}
