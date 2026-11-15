@@ -1515,6 +1515,33 @@ impl FsState {
         false
     }
 
+    /// Every entry currently visible below `dir`, parents before children.
+    fn dir_descendants(&self, dir: &Path) -> Vec<PathBuf> {
+        let mut candidates: std::collections::BTreeSet<&Path> = std::collections::BTreeSet::new();
+        candidates.extend(self.persisted_files.keys().map(|p| p.as_path()));
+        candidates.extend(self.persisted_dirs.keys().map(|p| p.as_path()));
+        candidates.extend(self.persisted_symlinks.keys().map(|p| p.as_path()));
+        for op in &self.pending {
+            match op {
+                PendingOp::CreateFile { path, .. }
+                | PendingOp::CreateDir { path, .. }
+                | PendingOp::CreateSymlink { path, .. }
+                | PendingOp::CreateHardLink { path, .. } => {
+                    candidates.insert(path);
+                }
+                PendingOp::Rename { to, .. } => {
+                    candidates.insert(to);
+                }
+                _ => {}
+            }
+        }
+        candidates
+            .into_iter()
+            .filter(|p| *p != dir && p.starts_with(dir) && self.entry_kind(p).is_some())
+            .map(Path::to_path_buf)
+            .collect()
+    }
+
     /// Check if parent directory exists for a file path.
     pub(crate) fn parent_exists(&self, path: &Path) -> bool {
         match path.parent() {
@@ -1567,9 +1594,22 @@ impl FsState {
             if self.file_exists(to) || self.symlink_exists(to) {
                 return Err("Not a directory");
             }
+            // A directory cannot be moved into its own subtree
+            if to != from && to.starts_with(from) {
+                return Err("Invalid argument");
+            }
             // If destination dir exists, it must be empty
             if self.dir_exists(to) && self.dir_has_children(to) {
                 return Err("Directory not empty");
+            }
+            // Entries are tracked by full path, so moving a directory has to
+            // move everything below it as well.
+            for child in self.dir_descendants(from) {
+                let rel = child.strip_prefix(from).expect("descendant of from");
+                self.pending.push(PendingOp::Rename {
+                    to: to.join(rel),
+                    from: child,
+                });
             }
             self.pending.push(PendingOp::Rename {
                 from: from.to_path_buf(),
@@ -1700,6 +1740,30 @@ impl FsState {
             return Err("No such file or directory");
         }
 
+        // Renaming a directory is recorded as one rename per entry below it.
+        // Those ride along with the rename of the directory itself so that a
+        // synced directory rename is never applied to only part of its subtree.
+        let dir_renames: Vec<(PathBuf, PathBuf)> = self
+            .pending
+            .iter()
+            .filter_map(|op| match op {
+                PendingOp::Rename { from, to }
+                    if from.parent() == Some(path) || to.parent() == Some(path) =>
+                {
+                    Some((from.clone(), to.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        let moved_with_dir = |from: &Path, to: &Path| {
+            dir_renames.iter().find(|(f, t)| {
+                from != f
+                    && from.starts_with(f)
+                    && to.starts_with(t)
+                    && from.strip_prefix(f) == to.strip_prefix(t)
+            })
+        };
+
         // Flush pending ops that affect this directory's entries
         let (to_flush, to_keep): (Vec<_>, Vec<_>) = self.pending.drain(..).partition(|op| {
             match op {
@@ -1715,7 +1779,9 @@ impl FsState {
                 PendingOp::RemoveDir { path: p } => p.parent() == Some(path),
                 // Renames affecting this directory
                 PendingOp::Rename { from, to } => {
-                    from.parent() == Some(path) || to.parent() == Some(path)
+                    from.parent() == Some(path)
+                        || to.parent() == Some(path)
+                        || moved_with_dir(from, to).is_some()
                 }
                 _ => false,
             }
@@ -1758,6 +1824,14 @@ impl FsState {
                     self.synced_entries.swap_remove(p);
                 }
                 PendingOp::Rename { from, to } => {
+                    if let Some((dir_from, dir_to)) = moved_with_dir(from, to) {
+                        if dir_from.parent() == Some(path) {
+                            self.synced_entries.swap_remove(from);
+                        }
+                        if dir_to.parent() == Some(path) {
+                            self.synced_entries.insert(to.clone());
+                        }
+                    }
                     if from.parent() == Some(path) {
                         dir_modified = true;
                         self.synced_entries.swap_remove(from);

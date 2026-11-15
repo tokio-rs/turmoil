@@ -253,3 +253,55 @@ fn remove_dir_all_nonexistent() -> Result {
     });
     sim.run()
 }
+
+#[test]
+fn rename_dir_moves_children() -> Result {
+    use turmoil::fs::shim::std::fs::read;
+
+    for synced in [false, true] {
+        let mut sim = Builder::new().build();
+        sim.client("test", async move {
+            create_dir_all("/old/sub")?;
+            write("/old/a.txt", b"a")?;
+            write("/old/sub/b.txt", b"b")?;
+            if synced {
+                sync_dir("/")?;
+                sync_dir("/old")?;
+                sync_dir("/old/sub")?;
+            }
+            rename("/old", "/new")?;
+
+            assert!(metadata("/old").is_err());
+            assert!(metadata("/old/a.txt").is_err());
+            assert!(metadata("/old/sub").is_err());
+            assert!(metadata("/old/sub/b.txt").is_err());
+
+            assert_eq!(read("/new/a.txt")?, b"a");
+            assert_eq!(read("/new/sub/b.txt")?, b"b");
+            let mut names: Vec<_> = read_dir("/new")?
+                .map(|e| e.map(|e| e.file_name()))
+                .collect::<std::io::Result<_>>()?;
+            names.sort();
+            assert_eq!(names, ["a.txt", "sub"]);
+
+            // The old name is free again and starts out empty.
+            create_dir("/old")?;
+            assert_eq!(read_dir("/old")?.count(), 0);
+            Ok(())
+        });
+        sim.run()?;
+    }
+    Ok(())
+}
+
+#[test]
+fn rename_dir_into_itself_fails() -> Result {
+    let mut sim = Builder::new().build();
+    sim.client("test", async {
+        create_dir_all("/a/b")?;
+        assert!(rename("/a", "/a/b/c").is_err());
+        assert!(metadata("/a/b").is_ok());
+        Ok(())
+    });
+    sim.run()
+}

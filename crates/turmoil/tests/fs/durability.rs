@@ -974,3 +974,54 @@ fn sync_data_new_file() -> Result {
     });
     sim.run()
 }
+
+#[test]
+fn synced_directory_rename_keeps_children() -> Result {
+    use turmoil::fs::shim::std::fs::{metadata, read, rename, write};
+
+    let mut sim = Builder::new().build();
+    let phase = Arc::new(AtomicBool::new(false));
+    let notify = Arc::new(Notify::new());
+    let phase_host = phase.clone();
+    let notify_host = notify.clone();
+
+    sim.host("server", move || {
+        let phase = phase_host.clone();
+        let notify = notify_host.clone();
+        async move {
+            if !phase.load(Ordering::SeqCst) {
+                create_dir("/old")?;
+                sync_dir("/")?;
+                write("/old/data", b"payload")?;
+                let file = OpenOptions::new().write(true).open("/old/data")?;
+                file.sync_all()?;
+                sync_dir("/old")?;
+                rename("/old", "/new")?;
+                sync_dir("/")?;
+            } else {
+                assert!(metadata("/old").is_err());
+                assert!(metadata("/old/data").is_err());
+                assert_eq!(read("/new/data")?, b"payload");
+            }
+            notify.notify_one();
+            std::future::pending::<()>().await;
+            Ok(())
+        }
+    });
+
+    let n = notify.clone();
+    sim.client("phase0", async move {
+        n.notified().await;
+        Ok(())
+    });
+    sim.run()?;
+    sim.crash("server");
+    phase.store(true, Ordering::SeqCst);
+    sim.bounce("server");
+    let n = notify.clone();
+    sim.client("phase1", async move {
+        n.notified().await;
+        Ok(())
+    });
+    sim.run()
+}
