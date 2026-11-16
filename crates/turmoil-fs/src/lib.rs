@@ -44,6 +44,7 @@ use indexmap::{IndexMap, IndexSet};
 use rand::{Rng, RngCore};
 use rand_distr::{Distribution, Exp};
 use std::cell::RefCell;
+use std::collections::BTreeSet;
 use std::ops::Range;
 use std::os::fd::RawFd;
 use std::path::{Path, PathBuf};
@@ -1517,29 +1518,29 @@ impl FsState {
 
     /// Every entry currently visible below `dir`, parents before children.
     fn dir_descendants(&self, dir: &Path) -> Vec<PathBuf> {
-        let mut candidates: std::collections::BTreeSet<&Path> = std::collections::BTreeSet::new();
-        candidates.extend(self.persisted_files.keys().map(|p| p.as_path()));
-        candidates.extend(self.persisted_dirs.keys().map(|p| p.as_path()));
-        candidates.extend(self.persisted_symlinks.keys().map(|p| p.as_path()));
-        for op in &self.pending {
-            match op {
+        let is_descendant =
+            |p: &Path| p != dir && p.starts_with(dir) && self.entry_kind(p).is_some();
+
+        // Filter first so only the descendants are collected. The set then
+        // drops a path that is both persisted and pending, and keeps parents
+        // ahead of their children.
+        let found: BTreeSet<&Path> = self
+            .persisted_files
+            .keys()
+            .chain(self.persisted_dirs.keys())
+            .chain(self.persisted_symlinks.keys())
+            .chain(self.pending.iter().filter_map(|op| match op {
                 PendingOp::CreateFile { path, .. }
                 | PendingOp::CreateDir { path, .. }
                 | PendingOp::CreateSymlink { path, .. }
-                | PendingOp::CreateHardLink { path, .. } => {
-                    candidates.insert(path);
-                }
-                PendingOp::Rename { to, .. } => {
-                    candidates.insert(to);
-                }
-                _ => {}
-            }
-        }
-        candidates
-            .into_iter()
-            .filter(|p| *p != dir && p.starts_with(dir) && self.entry_kind(p).is_some())
-            .map(Path::to_path_buf)
-            .collect()
+                | PendingOp::CreateHardLink { path, .. } => Some(path),
+                PendingOp::Rename { to, .. } => Some(to),
+                _ => None,
+            }))
+            .map(PathBuf::as_path)
+            .filter(|p| is_descendant(p))
+            .collect();
+        found.into_iter().map(Path::to_path_buf).collect()
     }
 
     /// Check if parent directory exists for a file path.
