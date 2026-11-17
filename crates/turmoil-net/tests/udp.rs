@@ -53,13 +53,65 @@ fn udp_send_unconnected_fails() {
 fn udp_oversized_datagram_rejected() {
     fixture::lo(async {
         let s = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        // Loopback MTU is 65536; 65536 - 20 (IP) - 8 (UDP) = 65508 payload cap.
+        // IPv4 total length is at most 65535, including IP and UDP headers.
         // Mirror Linux: EMSGSIZE (errno 90), which surfaces as raw os error
         // since the matching `ErrorKind::FileTooLarge` is unstable.
-        let too_big = vec![0u8; 65_509];
+        let too_big = vec![0u8; 65_508];
         let err = s.send_to(&too_big, "127.0.0.1:7000").await.unwrap_err();
         assert_eq!(err.raw_os_error(), Some(90));
     });
+}
+
+#[test]
+fn fragmented_udp_preserves_datagram_limits_and_truncation() {
+    for (addr, limit) in [("127.0.0.1:7000", 65507), ("[::1]:7000", 65527)] {
+        turmoil_net::fixture::lo_with_config(
+            turmoil_net::KernelConfig::default().loopback_mtu(1280),
+            async move {
+                let server = UdpSocket::bind(addr).await.unwrap();
+                let client_addr = if addr.starts_with('[') {
+                    "[::1]:0"
+                } else {
+                    "127.0.0.1:0"
+                };
+                let client = UdpSocket::bind(client_addr).await.unwrap();
+                let payload: Vec<_> = (0..limit).map(|i| i as u8).collect();
+                client.send_to(&payload, addr).await.unwrap();
+                let mut buf = vec![0; limit];
+                assert_eq!(server.recv_from(&mut buf).await.unwrap().0, limit);
+                assert_eq!(buf, payload);
+                let err = client.send_to(&vec![0; limit + 1], addr).await.unwrap_err();
+                assert_eq!(err.raw_os_error(), Some(90));
+
+                // Truncation consumes one complete datagram, never an IP
+                // fragment or the first part of a subsequent datagram.
+                client.send_to(&payload, addr).await.unwrap();
+                client.send_to(b"next", addr).await.unwrap();
+                let mut short = [0; 4];
+                assert_eq!(server.recv_from(&mut short).await.unwrap().0, 4);
+                assert_eq!(&short, &payload[..4]);
+                assert_eq!(server.recv_from(&mut short).await.unwrap().0, 4);
+                assert_eq!(&short, b"next");
+            },
+        );
+    }
+}
+
+#[test]
+fn strict_pmtu_policy_still_rejects_fragmentation() {
+    turmoil_net::fixture::lo_with_config(
+        turmoil_net::KernelConfig::default()
+            .loopback_mtu(1280)
+            .udp_fragmentation(false),
+        async {
+            let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let error = socket
+                .send_to(&[0; 4096], "127.0.0.1:7000")
+                .await
+                .unwrap_err();
+            assert_eq!(error.raw_os_error(), Some(90));
+        },
+    );
 }
 
 #[test]
