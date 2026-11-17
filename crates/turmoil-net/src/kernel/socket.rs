@@ -167,19 +167,10 @@ pub struct Fd(u64);
 
 /// TCP connection state.
 ///
-/// We intentionally skip `TimeWait` and go straight from
-/// `FinWait2`/`LastAck` to `Closed`. Its two jobs in real TCP — late-
-/// duplicate protection on 4-tuple reuse and re-ACKing a retransmitted
-/// FIN — only matter on an unreliable transport. The simulated fabric
-/// doesn't lose or duplicate packets, and we have no simulated clock
-/// to run a 2×MSL timer against.
-///
-/// Once the fabric grows drop/duplicate faults or a virtual clock,
-/// revisit this: `TimeWait` is additive (new state + timer) and won't
-/// break existing transitions. The other user-visible effect — that
-/// `bind()` to a recently-closed 4-tuple returns `EADDRINUSE` without
-/// `SO_REUSEADDR` — isn't modeled either, and can be bolted on via a
-/// "recently closed" bit on the bind table without a full state.
+/// Clean closes go straight to `Closed`. The kernel remembers the
+/// final sequence numbers separately so it can re-ACK a lost final
+/// ACK even after the application fd is gone. TIME_WAIT's port
+/// reservation and restrictions on tuple reuse are not modeled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TcpState {
     SynSent,
@@ -257,10 +248,9 @@ pub struct Tcb {
     /// doesn't send a RST (it can't — the fabric is dropping our
     /// traffic), it just fails locally.
     pub timed_out: bool,
-    /// Egress passes observed since `snd_una` last advanced. When it
-    /// crosses the retx threshold we rewind `snd_nxt = snd_una` and
-    /// re-emit (go-back-N). Count-based rather than time-based so the
-    /// mechanism is harness-agnostic.
+    /// Start of the FIN_WAIT2 timeout, only once the app drops its fd.
+    pub fin_wait2_since: Option<u64>,
+    /// Egress passes waiting for ACK progress or a zero-window update.
     pub egress_since_ack: u32,
     /// Retransmit attempts for the current unacked window. Reset on
     /// any ACK that advances `snd_una`. When it hits the max the
@@ -351,6 +341,10 @@ pub struct Socket {
     pub tcb: Option<Tcb>,
     /// Listener state — populated by `listen(2)`.
     pub listen: Option<ListenState>,
+    /// Listener owning a passive connection until accept hands it to
+    /// the application. Failed handshakes have no application fd to
+    /// drop, so the kernel must reap them itself.
+    pub parent_listener: Option<Fd>,
     /// Waker for a `connect` parked in `SynSent` waiting for SYN-ACK.
     /// Single-slot: connect is not callable on `&self`, so only one
     /// task ever parks here.
@@ -394,6 +388,7 @@ impl Socket {
             write_wakers: Vec::new(),
             tcb: None,
             listen: None,
+            parent_listener: None,
             connect_waker: None,
             fd_closed: false,
         }
@@ -469,14 +464,28 @@ pub struct SocketTable {
 
 impl SocketTable {
     pub fn new() -> Self {
+        Self::with_ports(DEFAULT_EPHEMERAL_PORTS)
+    }
+
+    pub fn with_ports(ephemeral: RangeInclusive<u16>) -> Self {
         Self {
             next_id: 1,
             sockets: IndexMap::new(),
             bindings: IndexMap::new(),
             multicast_members: IndexMap::new(),
             connections: IndexMap::new(),
-            ports: PortAllocator::new(DEFAULT_EPHEMERAL_PORTS),
+            ports: PortAllocator::new(ephemeral),
         }
+    }
+
+    /// Remove every socket. `next_id` keeps counting so stale fds
+    /// never alias sockets created afterwards.
+    pub fn clear(&mut self) {
+        self.sockets.clear();
+        self.bindings.clear();
+        self.multicast_members.clear();
+        self.connections.clear();
+        self.ports = PortAllocator::new(self.ports.range.clone());
     }
 
     pub fn insert(&mut self, socket: Socket) -> Fd {
@@ -601,15 +610,6 @@ impl SocketTable {
     /// Look up a connected socket by its 4-tuple.
     pub fn find_connection(&self, local: SocketAddr, remote: SocketAddr) -> Option<Fd> {
         self.connections.get(&(local, remote)).copied()
-    }
-
-    /// Iterate connections matching `local` — any remote. Used to
-    /// count in-flight children of a listener.
-    pub fn connections_on(&self, local: SocketAddr) -> impl Iterator<Item = (SocketAddr, Fd)> + '_ {
-        self.connections
-            .iter()
-            .filter(move |((l, _), _)| *l == local)
-            .map(|((_, r), fd)| (*r, *fd))
     }
 
     /// Iterate all bindings on `(domain, ty, port)` regardless of local
