@@ -955,6 +955,69 @@ pub struct FsState {
     pub page_cache: Option<PageCache>,
 }
 
+/// Rewrites `path` from below `from` to the same place below `to`.
+/// Returns None when `path` is not at or below `from`.
+fn swap_prefix(path: &Path, from: &Path, to: &Path) -> Option<PathBuf> {
+    let rest = path.strip_prefix(from).ok()?;
+    Some(if rest.as_os_str().is_empty() {
+        to.to_path_buf()
+    } else {
+        to.join(rest)
+    })
+}
+
+/// Re-keys every entry at or below `from` so it sits below `to` instead.
+fn rekey_map<V>(map: &mut IndexMap<PathBuf, V>, from: &Path, to: &Path) {
+    let moved: Vec<PathBuf> = map
+        .keys()
+        .filter(|k| k.starts_with(from))
+        .cloned()
+        .collect();
+    let values: Vec<(PathBuf, V)> = moved
+        .iter()
+        .filter_map(|k| map.swap_remove(k).map(|v| (swap_prefix(k, from, to), v)))
+        .filter_map(|(k, v)| k.map(|k| (k, v)))
+        .collect();
+    map.extend(values);
+}
+
+/// Undoes `renames` (most recent first) on a name issued after them.
+fn undo_renames(renames: &[PendingOp], path: &Path) -> PathBuf {
+    let mut current = path.to_path_buf();
+    for op in renames.iter().rev() {
+        if let PendingOp::Rename { from, to } = op {
+            if let Some(moved) = swap_prefix(&current, to, from) {
+                current = moved;
+            }
+        }
+    }
+    current
+}
+
+/// A copy of `op` with every path it names passed through `f`.
+fn map_paths(op: &PendingOp, f: impl Fn(&Path) -> PathBuf) -> PendingOp {
+    let mut op = op.clone();
+    match &mut op {
+        PendingOp::CreateFile { path, .. }
+        | PendingOp::CreateDir { path, .. }
+        | PendingOp::CreateSymlink { path, .. }
+        | PendingOp::Write { path, .. }
+        | PendingOp::SetLen { path, .. }
+        | PendingOp::SetPermissions { path, .. }
+        | PendingOp::RemoveFile { path }
+        | PendingOp::RemoveDir { path } => *path = f(path),
+        PendingOp::CreateHardLink { path, target, .. } => {
+            *path = f(path);
+            *target = f(target);
+        }
+        PendingOp::Rename { from, to } => {
+            *from = f(from);
+            *to = f(to);
+        }
+    }
+    op
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum EntryKind {
     File,
@@ -1035,14 +1098,14 @@ impl FsState {
             .sum();
 
         // Account for pending operations that change size
-        for op in &self.pending {
+        for (i, op) in self.pending.iter().enumerate() {
             match op {
                 PendingOp::Write {
                     path, offset, data, ..
                 } => {
                     let persisted_len = self
                         .persisted_files
-                        .get(path)
+                        .get(&self.back_path(i, path))
                         .map(|v| v.content.len() as u64)
                         .unwrap_or(0);
                     let write_end = offset + data.len() as u64;
@@ -1053,7 +1116,7 @@ impl FsState {
                 PendingOp::SetLen { path, len, .. } => {
                     let persisted_len = self
                         .persisted_files
-                        .get(path)
+                        .get(&self.back_path(i, path))
                         .map(|v| v.content.len() as u64)
                         .unwrap_or(0);
                     if *len > persisted_len {
@@ -1146,7 +1209,8 @@ impl FsState {
         let torn_writes: Vec<_> = self
             .pending
             .iter()
-            .filter_map(|op| {
+            .enumerate()
+            .filter_map(|(i, op)| {
                 if let PendingOp::Write {
                     path,
                     offset,
@@ -1154,6 +1218,9 @@ impl FsState {
                     time,
                 } = op
                 {
+                    // Writes are recorded under the name the file had at the
+                    // time, durable state is keyed by the name it has on disk.
+                    let path = &self.back_path(i, path);
                     // Only process writes to files that exist and have synced directory entries
                     // (otherwise the file would be orphaned anyway)
                     if !self.synced_entries.contains(path) {
@@ -1271,13 +1338,19 @@ impl FsState {
                 }
             }
             PendingOp::Rename { from, to } => {
-                if let Some(file_data) = self.persisted_files.swap_remove(from) {
-                    self.persisted_files.insert(to.clone(), file_data);
-                } else if let Some(dir_data) = self.persisted_dirs.swap_remove(from) {
-                    self.persisted_dirs.insert(to.clone(), dir_data);
-                } else if let Some(symlink_data) = self.persisted_symlinks.swap_remove(from) {
-                    self.persisted_symlinks.insert(to.clone(), symlink_data);
+                let exists = self.persisted_files.contains_key(from)
+                    || self.persisted_dirs.contains_key(from)
+                    || self.persisted_symlinks.contains_key(from);
+                if exists {
+                    // Whatever sat at the destination is replaced.
+                    self.persisted_files.swap_remove(to);
+                    self.persisted_dirs.swap_remove(to);
+                    self.persisted_symlinks.swap_remove(to);
                 }
+                // A directory takes everything below it along.
+                rekey_map(&mut self.persisted_files, from, to);
+                rekey_map(&mut self.persisted_dirs, from, to);
+                rekey_map(&mut self.persisted_symlinks, from, to);
             }
             PendingOp::RemoveFile { path } => {
                 // Remove from files or symlinks (unlink works on both)
@@ -1290,46 +1363,64 @@ impl FsState {
         }
     }
 
-    /// Resolve the effective persisted path after accounting for pending renames.
-    /// Returns the path where data is currently stored in persisted state.
-    fn resolve_persisted_path(&self, path: &Path) -> PathBuf {
+    /// Where `path` would have been found before the pending renames that
+    /// precede op `idx` took effect. Renames move everything below them, so
+    /// this is a prefix swap rather than an exact match.
+    fn back_path(&self, idx: usize, path: &Path) -> PathBuf {
         let mut current = path.to_path_buf();
-        // Walk backwards through renames to find the original persisted path
-        for op in self.pending.iter().rev() {
+        for op in self.pending[..idx].iter().rev() {
             if let PendingOp::Rename { from, to } = op {
-                if to == &current {
-                    current = from.clone();
+                if let Some(moved) = swap_prefix(&current, to, from) {
+                    current = moved;
                 }
             }
         }
         current
     }
 
+    /// The name `path` has after the pending renames from index `start` on.
+    fn forward_path(&self, start: usize, path: &Path) -> PathBuf {
+        let mut current = path.to_path_buf();
+        for op in self.pending.iter().skip(start) {
+            if let PendingOp::Rename { from, to } = op {
+                if let Some(moved) = swap_prefix(&current, from, to) {
+                    current = moved;
+                }
+            }
+        }
+        current
+    }
+
+    /// Resolve the effective persisted path after accounting for pending renames.
+    /// Returns the path where data is currently stored in persisted state.
+    fn resolve_persisted_path(&self, path: &Path) -> PathBuf {
+        self.back_path(self.pending.len(), path)
+    }
+
     /// Resolve hard link target if path is a pending hard link.
-    /// Returns the target path if this is a hard link, otherwise returns None.
+    /// Returns the target path, under its current name, if this is a hard
+    /// link, otherwise returns None.
     fn resolve_hardlink_target(&self, path: &Path) -> Option<PathBuf> {
-        for op in &self.pending {
+        for (i, op) in self.pending.iter().enumerate() {
             if let PendingOp::CreateHardLink {
                 path: p, target, ..
             } = op
             {
                 if p == path {
-                    return Some(target.clone());
+                    return Some(self.forward_path(i + 1, target));
                 }
             }
         }
         None
     }
 
-    /// Resolve the effective content path for a file (handles hard links and renames).
-    fn resolve_content_path(&self, path: &Path) -> PathBuf {
-        // First check if this is a hard link
-        if let Some(target) = self.resolve_hardlink_target(path) {
-            // Recursively resolve in case the target is also a link or renamed
-            return self.resolve_content_path(&target);
+    /// The current name of the file whose content `path` shows. This differs
+    /// from `path` for hard links.
+    fn content_view_path(&self, path: &Path) -> PathBuf {
+        match self.resolve_hardlink_target(path) {
+            Some(target) => self.content_view_path(&target),
+            None => path.to_path_buf(),
         }
-        // Otherwise resolve renames
-        self.resolve_persisted_path(path)
     }
 
     /// Check if a file exists (persisted or pending creation).
@@ -1348,53 +1439,86 @@ impl FsState {
     }
 
     /// Resolve the entry type by following its history backwards once.
-    fn entry_kind<'a>(&'a self, mut path: &'a Path) -> Option<EntryKind> {
+    fn entry_kind(&self, path: &Path) -> Option<EntryKind> {
+        let mut path = path.to_path_buf();
         for op in self.pending.iter().rev() {
             match op {
                 PendingOp::CreateFile { path: p, .. }
                 | PendingOp::CreateHardLink { path: p, .. }
-                    if p == path =>
+                    if *p == path =>
                 {
                     return Some(EntryKind::File);
                 }
-                PendingOp::CreateDir { path: p, .. } if p == path => {
+                PendingOp::CreateDir { path: p, .. } if *p == path => {
                     return Some(EntryKind::Directory);
                 }
-                PendingOp::CreateSymlink { path: p, .. } if p == path => {
+                PendingOp::CreateSymlink { path: p, .. } if *p == path => {
                     return Some(EntryKind::Symlink);
                 }
                 PendingOp::RemoveFile { path: p } | PendingOp::RemoveDir { path: p }
-                    if p == path =>
+                    if *p == path =>
                 {
                     return None
                 }
-                PendingOp::Rename { from, .. } if from == path => return None,
-                PendingOp::Rename { from, to } if to == path => path = from,
+                PendingOp::Rename { from, to } => {
+                    if let Some(moved) = swap_prefix(&path, to, from) {
+                        path = moved;
+                    } else if path.starts_with(from) {
+                        // The entry, or the directory holding it, moved away.
+                        return None;
+                    }
+                }
                 _ => {}
             }
         }
-        if self.persisted_files.contains_key(path) {
+        if self.persisted_files.contains_key(&path) {
             Some(EntryKind::File)
-        } else if self.persisted_dirs.contains_key(path) {
+        } else if self.persisted_dirs.contains_key(&path) {
             Some(EntryKind::Directory)
-        } else if self.persisted_symlinks.contains_key(path) {
+        } else if self.persisted_symlinks.contains_key(&path) {
             Some(EntryKind::Symlink)
         } else {
             None
         }
     }
 
+    /// Every entry that currently exists, under the name it has now.
+    fn visible_paths(&self) -> BTreeSet<PathBuf> {
+        let persisted = self
+            .persisted_files
+            .keys()
+            .chain(self.persisted_dirs.keys())
+            .chain(self.persisted_symlinks.keys())
+            .map(|p| self.forward_path(0, p));
+        let created = self
+            .pending
+            .iter()
+            .enumerate()
+            .filter_map(|(i, op)| match op {
+                PendingOp::CreateFile { path, .. }
+                | PendingOp::CreateDir { path, .. }
+                | PendingOp::CreateSymlink { path, .. }
+                | PendingOp::CreateHardLink { path, .. } => Some(self.forward_path(i + 1, path)),
+                _ => None,
+            });
+        persisted
+            .chain(created)
+            .filter(|p| self.entry_kind(p).is_some())
+            .collect()
+    }
+
     /// Get current file length (persisted + pending).
     pub fn file_len(&self, path: &Path) -> u64 {
         // Resolve to the content path (handles hard links and renames)
-        let content_path = self.resolve_content_path(path);
+        let view_path = self.content_view_path(path);
+        let content_path = self.resolve_persisted_path(&view_path);
         let mut len = self
             .persisted_files
             .get(&content_path)
             .map(|v| v.content.len() as u64)
             .unwrap_or(0);
 
-        for op in &self.pending {
+        for (i, op) in self.pending.iter().enumerate() {
             match op {
                 PendingOp::Write {
                     path: p,
@@ -1402,8 +1526,8 @@ impl FsState {
                     data,
                     ..
                 }
-                    // Check if this write applies to the content path
-                    if (p == &content_path || self.path_renamed_to(p, &content_path)) => {
+                    // Check if this write applies to the file
+                    if self.forward_path(i + 1, p) == view_path => {
                         let end = offset + data.len() as u64;
                         if end > len {
                             len = end;
@@ -1413,10 +1537,9 @@ impl FsState {
                     path: p,
                     len: new_len,
                     ..
+                } if self.forward_path(i + 1, p) == view_path => {
+                    len = *new_len;
                 }
-                    if (p == &content_path || self.path_renamed_to(p, &content_path)) => {
-                        len = *new_len;
-                    }
                 _ => {}
             }
         }
@@ -1474,73 +1597,9 @@ impl FsState {
 
     /// Check if directory has any children (files, subdirs, or symlinks).
     fn dir_has_children(&self, path: &Path) -> bool {
-        // Check persisted files that still exist
-        for file_path in self.persisted_files.keys() {
-            if file_path.parent() == Some(path) && self.file_exists(file_path) {
-                return true;
-            }
-        }
-        // Check persisted dirs that still exist
-        for dir_path in self.persisted_dirs.keys() {
-            if dir_path.parent() == Some(path) && self.dir_exists(dir_path) {
-                return true;
-            }
-        }
-        // Check persisted symlinks that still exist
-        for symlink_path in self.persisted_symlinks.keys() {
-            if symlink_path.parent() == Some(path) && self.symlink_exists(symlink_path) {
-                return true;
-            }
-        }
-        // Check pending creates (using exists checks to account for later removals)
-        for op in &self.pending {
-            match op {
-                PendingOp::CreateFile { path: p, .. }
-                    if p.parent() == Some(path) && self.file_exists(p) =>
-                {
-                    return true;
-                }
-                PendingOp::CreateDir { path: p, .. }
-                    if p.parent() == Some(path) && self.dir_exists(p) =>
-                {
-                    return true;
-                }
-                PendingOp::CreateSymlink { path: p, .. }
-                    if p.parent() == Some(path) && self.symlink_exists(p) =>
-                {
-                    return true;
-                }
-                _ => {}
-            }
-        }
-        false
-    }
-
-    /// Every entry currently visible below `dir`, parents before children.
-    fn dir_descendants(&self, dir: &Path) -> Vec<PathBuf> {
-        let is_descendant =
-            |p: &Path| p != dir && p.starts_with(dir) && self.entry_kind(p).is_some();
-
-        // Filter first so only the descendants are collected. The set then
-        // drops a path that is both persisted and pending, and keeps parents
-        // ahead of their children.
-        let found: BTreeSet<&Path> = self
-            .persisted_files
-            .keys()
-            .chain(self.persisted_dirs.keys())
-            .chain(self.persisted_symlinks.keys())
-            .chain(self.pending.iter().filter_map(|op| match op {
-                PendingOp::CreateFile { path, .. }
-                | PendingOp::CreateDir { path, .. }
-                | PendingOp::CreateSymlink { path, .. }
-                | PendingOp::CreateHardLink { path, .. } => Some(path),
-                PendingOp::Rename { to, .. } => Some(to),
-                _ => None,
-            }))
-            .map(PathBuf::as_path)
-            .filter(|p| is_descendant(p))
-            .collect();
-        found.into_iter().map(Path::to_path_buf).collect()
+        self.visible_paths()
+            .iter()
+            .any(|p| p.parent() == Some(path))
     }
 
     /// Check if parent directory exists for a file path.
@@ -1582,10 +1641,7 @@ impl FsState {
             if self.dir_exists(to) {
                 return Err("Is a directory");
             }
-            self.pending.push(PendingOp::Rename {
-                from: from.to_path_buf(),
-                to: to.to_path_buf(),
-            });
+            self.push_rename(from, to);
             return Ok(());
         }
 
@@ -1603,19 +1659,9 @@ impl FsState {
             if self.dir_exists(to) && self.dir_has_children(to) {
                 return Err("Directory not empty");
             }
-            // Entries are tracked by full path, so moving a directory has to
-            // move everything below it as well.
-            for child in self.dir_descendants(from) {
-                let rel = child.strip_prefix(from).expect("descendant of from");
-                self.pending.push(PendingOp::Rename {
-                    to: to.join(rel),
-                    from: child,
-                });
-            }
-            self.pending.push(PendingOp::Rename {
-                from: from.to_path_buf(),
-                to: to.to_path_buf(),
-            });
+            // One rename covers everything below the directory: lookups
+            // and flushes resolve it by path prefix.
+            self.push_rename(from, to);
             return Ok(());
         }
 
@@ -1625,14 +1671,25 @@ impl FsState {
             if self.dir_exists(to) {
                 return Err("Is a directory");
             }
-            self.pending.push(PendingOp::Rename {
-                from: from.to_path_buf(),
-                to: to.to_path_buf(),
-            });
+            self.push_rename(from, to);
             return Ok(());
         }
 
         Err("No such file or directory")
+    }
+
+    /// Queue a rename and point open handles at the new name, as a real
+    /// descriptor keeps following its inode.
+    fn push_rename(&mut self, from: &Path, to: &Path) {
+        for path in self.open_handles.values_mut() {
+            if let Some(moved) = swap_prefix(path, from, to) {
+                *path = moved;
+            }
+        }
+        self.pending.push(PendingOp::Rename {
+            from: from.to_path_buf(),
+            to: to.to_path_buf(),
+        });
     }
 
     /// Sync a file (makes file data and metadata durable).
@@ -1646,80 +1703,58 @@ impl FsState {
     /// sync_dir() on the parent directory. Without the directory sync,
     /// the file's data is durable but may be orphaned (inaccessible) after crash.
     pub fn sync_file(&mut self, path: &Path) -> Result<(), &'static str> {
-        if !self.file_exists(path) {
-            return Err("No such file or directory");
-        }
-
-        // Flush pending ops that affect this file's DATA only
-        // CreateFile is a directory entry op, handled by sync_dir
-        let (to_flush, to_keep): (Vec<_>, Vec<_>) =
-            self.pending.drain(..).partition(|op| match op {
-                PendingOp::Write { path: p, .. } => p == path,
-                PendingOp::SetLen { path: p, .. } => p == path,
-                _ => false,
-            });
-
-        // Ensure file exists in persisted_files for writes to be applied
-        // (CreateFile may still be pending in to_keep, but we need somewhere to write data)
-        if !self.persisted_files.contains_key(path) {
-            // Look for pending CreateFile in to_keep to get the creation timestamp
-            let (crtime, mode) = to_keep
-                .iter()
-                .find_map(|op| match op {
-                    PendingOp::CreateFile {
-                        path: p,
-                        time,
-                        mode,
-                    } if p == path => Some((*time, *mode)),
-                    _ => None,
-                })
-                .unwrap_or((Duration::ZERO, 0o644));
-            self.persisted_files
-                .insert(path.to_path_buf(), FileData::with_mode(crtime, mode));
-        }
-
-        self.pending = to_keep;
-        for op in &to_flush {
-            self.apply_op_to_persisted(op);
-        }
-        Ok(())
+        self.flush_file_data(path)
     }
 
     /// Sync file data only (not metadata like creation).
     /// This is equivalent to fdatasync() - flushes data and size, but not creation.
     /// The file entry won't be durable until the parent directory is synced.
     pub(crate) fn sync_file_data(&mut self, path: &Path) -> Result<(), &'static str> {
+        self.flush_file_data(path)
+    }
+
+    /// Flush the pending writes and truncates of one file. CreateFile is a
+    /// directory entry op, handled by sync_dir.
+    fn flush_file_data(&mut self, path: &Path) -> Result<(), &'static str> {
         if !self.file_exists(path) {
             return Err("No such file or directory");
         }
 
-        // Flush only data ops (Write, SetLen), NOT CreateFile
-        let (to_flush, to_keep): (Vec<_>, Vec<_>) =
-            self.pending.drain(..).partition(|op| match op {
-                PendingOp::Write { path: p, .. } => p == path,
-                PendingOp::SetLen { path: p, .. } => p == path,
-                _ => false,
-            });
-
-        // Ensure file exists in persisted_files for data ops to be applied
-        // (CreateFile may still be pending in to_keep)
-        if !self.persisted_files.contains_key(path) {
-            let (crtime, mode) = to_keep
-                .iter()
-                .find_map(|op| match op {
-                    PendingOp::CreateFile {
-                        path: p,
-                        time,
-                        mode,
-                    } if p == path => Some((*time, *mode)),
-                    _ => None,
-                })
-                .unwrap_or((Duration::ZERO, 0o644));
-            self.persisted_files
-                .insert(path.to_path_buf(), FileData::with_mode(crtime, mode));
+        // Ops carry the name the file had when they were issued, while
+        // persisted state is keyed by the name it has on disk.
+        let base = self.resolve_persisted_path(path);
+        let mut flush = vec![false; self.pending.len()];
+        let mut created = None;
+        for (i, op) in self.pending.iter().enumerate() {
+            match op {
+                PendingOp::Write { path: p, .. } | PendingOp::SetLen { path: p, .. } => {
+                    flush[i] = self.forward_path(i + 1, p) == path;
+                }
+                PendingOp::CreateFile {
+                    path: p,
+                    time,
+                    mode,
+                } if self.back_path(i, p) == base => created = Some((*time, *mode)),
+                _ => {}
+            }
         }
 
-        self.pending = to_keep;
+        // Ensure file exists in persisted_files for writes to be applied
+        // (CreateFile may still be pending, but we need somewhere to write data)
+        if !self.persisted_files.contains_key(&base) {
+            let (crtime, mode) = created.unwrap_or((Duration::ZERO, 0o644));
+            self.persisted_files
+                .insert(base.clone(), FileData::with_mode(crtime, mode));
+        }
+
+        let mut to_flush = Vec::new();
+        for (op, flush) in std::mem::take(&mut self.pending).into_iter().zip(flush) {
+            if flush {
+                to_flush.push(map_paths(&op, |_| base.clone()));
+            } else {
+                self.pending.push(op);
+            }
+        }
         for op in &to_flush {
             self.apply_op_to_persisted(op);
         }
@@ -1734,6 +1769,11 @@ impl FsState {
     /// - Renames into/out of this directory
     /// - The directory's own creation (if pending)
     ///
+    /// Entries are matched by the name they have now, so a directory that
+    /// was renamed still flushes the entries created under its old name.
+    /// Renaming a directory is one op: flushing it moves everything under it,
+    /// but only entries that were already durable stay durable.
+    ///
     /// Note: This does NOT sync the file data of files in the directory.
     /// Each file must be synced separately with sync_file().
     pub(crate) fn sync_dir(&mut self, path: &Path, time: Duration) -> Result<(), &'static str> {
@@ -1741,115 +1781,138 @@ impl FsState {
             return Err("No such file or directory");
         }
 
-        // Renaming a directory is recorded as one rename per entry below it.
-        // Those ride along with the rename of the directory itself so that a
-        // synced directory rename is never applied to only part of its subtree.
-        let dir_renames: Vec<(PathBuf, PathBuf)> = self
-            .pending
-            .iter()
-            .filter_map(|op| match op {
-                PendingOp::Rename { from, to }
-                    if from.parent() == Some(path) || to.parent() == Some(path) =>
-                {
-                    Some((from.clone(), to.clone()))
-                }
-                _ => None,
-            })
-            .collect();
-        let moved_with_dir = |from: &Path, to: &Path| {
-            dir_renames.iter().find(|(f, t)| {
-                from != f
-                    && from.starts_with(f)
-                    && to.starts_with(t)
-                    && from.strip_prefix(f) == to.strip_prefix(t)
-            })
-        };
-
-        // Flush pending ops that affect this directory's entries
-        let (to_flush, to_keep): (Vec<_>, Vec<_>) = self.pending.drain(..).partition(|op| {
+        let count = self.pending.len();
+        let mut selected = vec![false; count];
+        let mut own = vec![false; count];
+        let mut from_here = vec![false; count];
+        let mut to_here = vec![false; count];
+        for (i, op) in self.pending.iter().enumerate() {
+            let in_dir = |p: &Path| self.forward_path(i + 1, p).parent() == Some(path);
             match op {
-                // Directory's own creation
-                PendingOp::CreateDir { path: p, .. } if p == path => true,
-                // Files/dirs/symlinks/hardlinks created in this directory
-                PendingOp::CreateFile { path: p, .. } => p.parent() == Some(path),
-                PendingOp::CreateDir { path: p, .. } => p.parent() == Some(path),
-                PendingOp::CreateSymlink { path: p, .. } => p.parent() == Some(path),
-                PendingOp::CreateHardLink { path: p, .. } => p.parent() == Some(path),
-                // Files/dirs removed from this directory
-                PendingOp::RemoveFile { path: p } => p.parent() == Some(path),
-                PendingOp::RemoveDir { path: p } => p.parent() == Some(path),
-                // Renames affecting this directory
-                PendingOp::Rename { from, to } => {
-                    from.parent() == Some(path)
-                        || to.parent() == Some(path)
-                        || moved_with_dir(from, to).is_some()
+                PendingOp::CreateDir { path: p, .. } if self.forward_path(i + 1, p) == path => {
+                    own[i] = true;
+                    selected[i] = true;
                 }
-                _ => false,
+                PendingOp::CreateFile { path: p, .. }
+                | PendingOp::CreateDir { path: p, .. }
+                | PendingOp::CreateSymlink { path: p, .. }
+                | PendingOp::CreateHardLink { path: p, .. }
+                | PendingOp::RemoveFile { path: p }
+                | PendingOp::RemoveDir { path: p } => selected[i] = in_dir(p),
+                PendingOp::Rename { from, to } => {
+                    from_here[i] = from
+                        .parent()
+                        .is_some_and(|dir| self.forward_path(i + 1, dir) == path);
+                    to_here[i] = in_dir(to);
+                    selected[i] = from_here[i] || to_here[i];
+                }
+                _ => {}
             }
-        });
+        }
 
-        self.pending = to_keep;
+        // A rename that moves something an earlier rename put in place has
+        // to be flushed after it, or the two would disagree about the name.
+        loop {
+            let needed: Vec<usize> = self
+                .pending
+                .iter()
+                .enumerate()
+                .filter(|(k, _)| selected[*k])
+                .flat_map(|(k, op)| {
+                    let PendingOp::Rename { from, .. } = op else {
+                        return Vec::new();
+                    };
+                    self.pending[..k]
+                        .iter()
+                        .enumerate()
+                        .filter(|(j, earlier)| {
+                            !selected[*j]
+                                && matches!(earlier, PendingOp::Rename { to, .. } if from.starts_with(to))
+                        })
+                        .map(|(j, _)| j)
+                        .collect()
+                })
+                .collect();
+            if needed.is_empty() {
+                break;
+            }
+            for j in needed {
+                selected[j] = true;
+            }
+        }
 
-        // Track if we need to update this directory's mtime
+        let mut kept: Vec<PendingOp> = Vec::new();
         let mut dir_modified = false;
 
-        for op in &to_flush {
-            // Check if this op modifies our directory's contents and update synced_entries
-            match op {
-                PendingOp::CreateFile { path: p, .. } if p.parent() == Some(path) => {
-                    dir_modified = true;
-                    self.synced_entries.insert(p.clone());
-                }
-                PendingOp::CreateDir { path: p, .. } if p == path => {
+        for (i, op) in std::mem::take(&mut self.pending).into_iter().enumerate() {
+            if !selected[i] {
+                kept.push(op);
+                continue;
+            }
+
+            // Persisted state is keyed by names from before the renames
+            // that stay pending.
+            let flushed = map_paths(&op, |p| undo_renames(&kept, p));
+            match &flushed {
+                PendingOp::CreateDir { path: p, .. } if own[i] => {
                     // Directory's own creation - mark it as synced
                     self.synced_entries.insert(p.clone());
                 }
-                PendingOp::CreateDir { path: p, .. } if p.parent() == Some(path) => {
+                PendingOp::CreateFile { path: p, .. }
+                | PendingOp::CreateDir { path: p, .. }
+                | PendingOp::CreateSymlink { path: p, .. }
+                | PendingOp::CreateHardLink { path: p, .. } => {
                     dir_modified = true;
                     self.synced_entries.insert(p.clone());
                 }
-                PendingOp::CreateSymlink { path: p, .. } if p.parent() == Some(path) => {
-                    dir_modified = true;
-                    self.synced_entries.insert(p.clone());
-                }
-                PendingOp::CreateHardLink { path: p, .. } if p.parent() == Some(path) => {
-                    dir_modified = true;
-                    self.synced_entries.insert(p.clone());
-                }
-                PendingOp::RemoveFile { path: p } if p.parent() == Some(path) => {
-                    dir_modified = true;
-                    self.synced_entries.swap_remove(p);
-                }
-                PendingOp::RemoveDir { path: p } if p.parent() == Some(path) => {
+                PendingOp::RemoveFile { path: p } | PendingOp::RemoveDir { path: p } => {
                     dir_modified = true;
                     self.synced_entries.swap_remove(p);
                 }
                 PendingOp::Rename { from, to } => {
-                    if let Some((dir_from, dir_to)) = moved_with_dir(from, to) {
-                        if dir_from.parent() == Some(path) {
-                            self.synced_entries.swap_remove(from);
-                        }
-                        if dir_to.parent() == Some(path) {
-                            self.synced_entries.insert(to.clone());
-                        }
+                    dir_modified = true;
+                    // The entry leaves its old place whatever directory is
+                    // being synced, and everything below it goes with it.
+                    let below: Vec<PathBuf> = self
+                        .synced_entries
+                        .iter()
+                        .filter(|e| e.starts_with(from))
+                        .cloned()
+                        .collect();
+                    for entry in &below {
+                        self.synced_entries.swap_remove(entry);
                     }
-                    if from.parent() == Some(path) {
-                        dir_modified = true;
-                        self.synced_entries.swap_remove(from);
-                    }
-                    if to.parent() == Some(path) {
-                        dir_modified = true;
+                    if to_here[i] {
                         self.synced_entries.insert(to.clone());
+                        // Only entries that were durable under the old name
+                        // are durable under the new one.
+                        for entry in below.iter().filter(|e| *e != from) {
+                            if let Some(moved) = swap_prefix(entry, from, to) {
+                                self.synced_entries.insert(moved);
+                            }
+                        }
+                    }
+                    // Anything still pending was issued under the old name.
+                    let (old, new) = match &op {
+                        PendingOp::Rename { from, to } => (from, to),
+                        _ => unreachable!(),
+                    };
+                    for earlier in kept.iter_mut() {
+                        *earlier = map_paths(earlier, |p| {
+                            swap_prefix(p, old, new).unwrap_or_else(|| p.to_path_buf())
+                        });
                     }
                 }
                 _ => {}
             }
-            self.apply_op_to_persisted(op);
+            self.apply_op_to_persisted(&flushed);
         }
+        self.pending = kept;
 
         // Update directory mtime if contents changed
         if dir_modified {
-            if let Some(dir_data) = self.persisted_dirs.get_mut(path) {
+            let on_disk = self.resolve_persisted_path(path);
+            if let Some(dir_data) = self.persisted_dirs.get_mut(&on_disk) {
                 dir_data.mtime = time;
                 dir_data.ctime = time;
             }
@@ -1876,7 +1939,8 @@ impl FsState {
         buf[..to_read].fill(0);
 
         // Resolve to the content path (handles hard links and renames)
-        let content_path = self.resolve_content_path(path);
+        let view_path = self.content_view_path(path);
+        let content_path = self.resolve_persisted_path(&view_path);
 
         // Copy persisted data in range
         if let Some(file_data) = self.persisted_files.get(&content_path) {
@@ -1890,7 +1954,7 @@ impl FsState {
         }
 
         // Overlay pending writes (need to check the content path)
-        for op in &self.pending {
+        for (i, op) in self.pending.iter().enumerate() {
             if let PendingOp::Write {
                 path: p,
                 offset: write_off,
@@ -1898,9 +1962,8 @@ impl FsState {
                 ..
             } = op
             {
-                // Check if this write applies to the content path
-                let write_applies = p == &content_path || self.path_renamed_to(p, &content_path);
-                if write_applies {
+                // Check if this write applies to the file
+                if self.forward_path(i + 1, p) == view_path {
                     let write_end = write_off + data.len() as u64;
                     let read_end = offset + to_read as u64;
                     if *write_off < read_end && write_end > offset {
@@ -1917,19 +1980,6 @@ impl FsState {
         }
 
         to_read
-    }
-
-    /// Check if `from` was renamed to `to` via pending ops.
-    fn path_renamed_to(&self, from: &Path, to: &Path) -> bool {
-        let mut current = from.to_path_buf();
-        for op in &self.pending {
-            if let PendingOp::Rename { from: f, to: t } = op {
-                if f == &current {
-                    current = t.clone();
-                }
-            }
-        }
-        current == to
     }
 
     /// Write to a file (adds to pending queue).
@@ -2033,7 +2083,7 @@ impl FsState {
     /// Read symlink target.
     pub(crate) fn read_link(&self, path: &Path) -> Result<PathBuf, &'static str> {
         // Resolve path through renames (walk backwards to find original path)
-        let original_path = self.resolve_symlink_path(path);
+        let original_path = self.resolve_persisted_path(path);
 
         // Check pending ops first (most recent) for symlink creation at original path
         for op in self.pending.iter().rev() {
@@ -2055,21 +2105,6 @@ impl FsState {
             .get(&original_path)
             .map(|s| s.target.clone())
             .ok_or("No such file or directory")
-    }
-
-    /// Resolve a symlink path through pending renames.
-    /// If path was created via rename, returns the original source path.
-    fn resolve_symlink_path(&self, path: &Path) -> PathBuf {
-        let mut current = path.to_path_buf();
-        // Walk backwards through renames to find the original path
-        for op in self.pending.iter().rev() {
-            if let PendingOp::Rename { from, to } = op {
-                if to == &current {
-                    current = from.clone();
-                }
-            }
-        }
-        current
     }
 
     /// Set file/directory permissions.
@@ -2094,36 +2129,40 @@ impl FsState {
     #[allow(dead_code)]
     pub(crate) fn file_mode(&self, path: &Path) -> Option<u32> {
         // Check pending ops first
-        for op in self.pending.iter().rev() {
+        for (i, op) in self.pending.iter().enumerate().rev() {
             match op {
-                PendingOp::SetPermissions { path: p, mode, .. } if p == path => {
-                    return Some(*mode);
-                }
-                PendingOp::CreateFile { path: p, mode, .. } if p == path => {
+                PendingOp::SetPermissions { path: p, mode, .. }
+                | PendingOp::CreateFile { path: p, mode, .. }
+                    if self.forward_path(i + 1, p) == path =>
+                {
                     return Some(*mode);
                 }
                 _ => {}
             }
         }
-        self.persisted_files.get(path).map(|f| f.mode)
+        self.persisted_files
+            .get(&self.resolve_persisted_path(path))
+            .map(|f| f.mode)
     }
 
     /// Get directory permissions.
     #[allow(dead_code)]
     pub(crate) fn dir_mode(&self, path: &Path) -> Option<u32> {
         // Check pending ops first
-        for op in self.pending.iter().rev() {
+        for (i, op) in self.pending.iter().enumerate().rev() {
             match op {
-                PendingOp::SetPermissions { path: p, mode, .. } if p == path => {
-                    return Some(*mode);
-                }
-                PendingOp::CreateDir { path: p, mode, .. } if p == path => {
+                PendingOp::SetPermissions { path: p, mode, .. }
+                | PendingOp::CreateDir { path: p, mode, .. }
+                    if self.forward_path(i + 1, p) == path =>
+                {
                     return Some(*mode);
                 }
                 _ => {}
             }
         }
-        self.persisted_dirs.get(path).map(|d| d.mode)
+        self.persisted_dirs
+            .get(&self.resolve_persisted_path(path))
+            .map(|d| d.mode)
     }
 
     /// Get nlink count for a file, accounting for pending hard links.
@@ -2135,12 +2174,16 @@ impl FsState {
             return self.file_nlink(&target);
         }
 
-        let mut nlink = self.persisted_files.get(path).map(|f| f.nlink).unwrap_or(1);
+        let mut nlink = self
+            .persisted_files
+            .get(&self.resolve_persisted_path(path))
+            .map(|f| f.nlink)
+            .unwrap_or(1);
 
         // Count pending hard links that reference this file as target
-        for op in &self.pending {
+        for (i, op) in self.pending.iter().enumerate() {
             if let PendingOp::CreateHardLink { target, .. } = op {
-                if target == path {
+                if self.forward_path(i + 1, target) == path {
                     nlink += 1;
                 }
             }
@@ -2159,16 +2202,18 @@ impl FsState {
             .map(|f| (f.crtime, f.mtime, f.ctime));
 
         // Apply pending ops that affect timestamps
-        for op in &self.pending {
+        for (i, op) in self.pending.iter().enumerate() {
             match op {
-                PendingOp::CreateFile { path: p, time, .. } if p == path => {
+                PendingOp::CreateFile { path: p, time, .. }
+                    if self.forward_path(i + 1, p) == path =>
+                {
                     // New file creation sets all timestamps
                     timestamps = Some((*time, *time, *time));
                 }
                 PendingOp::Write { path: p, time, .. }
                 | PendingOp::SetLen { path: p, time, .. }
                     // Writes and truncates update mtime/ctime
-                    if (p == path || self.path_renamed_to(p, path)) && timestamps.is_some() => {
+                    if self.forward_path(i + 1, p) == path && timestamps.is_some() => {
                         let (crtime, _, _) = timestamps.unwrap();
                         timestamps = Some((crtime, *time, *time));
                     }
@@ -2191,45 +2236,44 @@ impl FsState {
         // Start with persisted timestamps
         let mut timestamps = self
             .persisted_dirs
-            .get(path)
+            .get(&self.resolve_persisted_path(path))
             .map(|d| (d.crtime, d.mtime, d.ctime));
 
         // Apply pending ops that affect timestamps
-        for op in &self.pending {
+        for (i, op) in self.pending.iter().enumerate() {
+            let in_dir = |p: &Path| self.forward_path(i + 1, p).parent() == Some(path);
             match op {
-                PendingOp::CreateDir { path: p, time, .. } if p == path => {
+                PendingOp::CreateDir { path: p, time, .. }
+                    if self.forward_path(i + 1, p) == path =>
+                {
                     // New dir creation sets all timestamps
                     timestamps = Some((*time, *time, *time));
                 }
-                PendingOp::CreateFile { path: p, time, .. } if p.parent() == Some(path) => {
-                    // File created in this directory updates mtime
+                PendingOp::CreateFile { path: p, time, .. }
+                | PendingOp::CreateDir { path: p, time, .. }
+                    if in_dir(p) =>
+                {
+                    // File or subdir created in this directory updates mtime
                     if let Some((crtime, _, _)) = timestamps {
                         timestamps = Some((crtime, *time, *time));
                     }
                 }
-                PendingOp::CreateDir { path: p, time, .. } if p.parent() == Some(path) => {
-                    // Subdir created in this directory updates mtime
-                    if let Some((crtime, _, _)) = timestamps {
-                        timestamps = Some((crtime, *time, *time));
-                    }
-                }
-                PendingOp::RemoveFile { path: p } if p.parent() == Some(path) => {
-                    // File removed from this directory updates mtime
+                PendingOp::RemoveFile { path: p } | PendingOp::RemoveDir { path: p }
+                    if in_dir(p) =>
+                {
+                    // Removal from this directory updates mtime
                     // Use current latest mtime as proxy (removal doesn't carry timestamp)
                     // In real fs, this would use current time
                     if let Some((crtime, mtime, _)) = timestamps {
                         timestamps = Some((crtime, mtime, mtime));
                     }
                 }
-                PendingOp::RemoveDir { path: p } if p.parent() == Some(path) => {
-                    // Subdir removed from this directory updates mtime
-                    if let Some((crtime, mtime, _)) = timestamps {
-                        timestamps = Some((crtime, mtime, mtime));
-                    }
-                }
                 PendingOp::Rename { from, to }
                     // Rename affects both source and destination parent directories
-                    if (from.parent() == Some(path) || to.parent() == Some(path)) => {
+                    if (from
+                        .parent()
+                        .is_some_and(|dir| self.forward_path(i + 1, dir) == path)
+                        || in_dir(to)) => {
                         if let Some((crtime, mtime, _)) = timestamps {
                             timestamps = Some((crtime, mtime, mtime));
                         }
@@ -2247,13 +2291,13 @@ impl FsState {
         // Start with persisted timestamps
         let mut timestamps = self
             .persisted_symlinks
-            .get(path)
+            .get(&self.resolve_persisted_path(path))
             .map(|s| (s.crtime, s.mtime, s.ctime));
 
         // Apply pending ops that affect timestamps
-        for op in &self.pending {
+        for (i, op) in self.pending.iter().enumerate() {
             if let PendingOp::CreateSymlink { path: p, time, .. } = op {
-                if p == path {
+                if self.forward_path(i + 1, p) == path {
                     timestamps = Some((*time, *time, *time));
                 }
             }
@@ -2265,61 +2309,10 @@ impl FsState {
     /// List entries in a directory.
     /// Returns paths of files, directories, and symlinks that are direct children of the given path.
     pub(crate) fn dir_entries(&self, path: &Path) -> Vec<PathBuf> {
-        use std::collections::HashSet;
-
-        let mut entries: HashSet<PathBuf> = HashSet::new();
-
-        // Add persisted files in this directory
-        for file_path in self.persisted_files.keys() {
-            if file_path.parent() == Some(path) && self.file_exists(file_path) {
-                entries.insert(file_path.clone());
-            }
-        }
-
-        // Add persisted directories in this directory
-        for dir_path in self.persisted_dirs.keys() {
-            if dir_path.parent() == Some(path) && self.dir_exists(dir_path) {
-                entries.insert(dir_path.clone());
-            }
-        }
-
-        // Add persisted symlinks in this directory
-        for symlink_path in self.persisted_symlinks.keys() {
-            if symlink_path.parent() == Some(path) && self.symlink_exists(symlink_path) {
-                entries.insert(symlink_path.clone());
-            }
-        }
-
-        // Add pending creations
-        for op in &self.pending {
-            match op {
-                PendingOp::CreateFile { path: p, .. }
-                    if p.parent() == Some(path) && self.file_exists(p) =>
-                {
-                    entries.insert(p.clone());
-                }
-                PendingOp::CreateDir { path: p, .. }
-                    if p.parent() == Some(path) && self.dir_exists(p) =>
-                {
-                    entries.insert(p.clone());
-                }
-                PendingOp::CreateSymlink { path: p, .. }
-                    if p.parent() == Some(path) && self.symlink_exists(p) =>
-                {
-                    entries.insert(p.clone());
-                }
-                PendingOp::Rename { to, .. }
-                    if to.parent() == Some(path)
-                    // Check if it still exists (wasn't removed later)
-                    && (self.file_exists(to) || self.dir_exists(to) || self.symlink_exists(to)) =>
-                {
-                    entries.insert(to.clone());
-                }
-                _ => {}
-            }
-        }
-
-        entries.into_iter().collect()
+        self.visible_paths()
+            .into_iter()
+            .filter(|p| p.parent() == Some(path))
+            .collect()
     }
 }
 
