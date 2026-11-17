@@ -12,7 +12,6 @@ keywords = ["Deterministic", "Simulation", "Testing"]
 categories = ["asynchronous", "network-programming", "simulation"]
 
 [dependencies]
-bytes = "1.4"
 indexmap = "2"
 rand = "0.9"
 rand_distr = "0.5"
@@ -25,10 +24,12 @@ tokio = { version = "1.25.0", features = [
 tracing = "0.1"
 turmoil-fs = { version = "0.1.0", path = "../turmoil-fs", optional = true }
 turmoil-io-uring = { version = "0.1.0", path = "../turmoil-io-uring", optional = true, features = ["fs"] }
+turmoil-net = { version = "0.1.0", path = "../turmoil-net" }
 uuid = { version = "1", features = ["v4"], optional = true }
 
 [dev-dependencies]
 regex = "1"
+turmoil-net = { path = "../turmoil-net" }
 test-case = "3"
 tokio-test = "0.4.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -57,9 +58,8 @@ unexpected_cfgs = { level = "warn", check-cfg = [
 
 [package.metadata.cargo_check_external_types]
 allowed_external_types = [
-  "bytes::*",
-  "tokio::*",
   "turmoil_fs",
   "turmoil_fs::*",
   "turmoil_io_uring",
+  "turmoil_net::*",
 ]

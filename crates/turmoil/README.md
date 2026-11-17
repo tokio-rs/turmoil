@@ -1,25 +1,26 @@
 # turmoil
 
-The full-stack entry point for the turmoil family. Bundles a runtime, a
-simulated network, and a simulated filesystem behind a single `Builder` — start
-here if you want a complete simulation harness. Reach for `turmoil-net` or
-`turmoil-fs` directly if you're assembling your own runtime.
+Deterministic simulation testing for distributed systems in Rust.
 
-> **Status.** The network layer is being lifted out into
-> [`turmoil-net`](../turmoil-net) and the filesystem layer into [`turmoil-fs`](../turmoil-fs).
-> Expect the shape of this crate's API to change as the lift lands.
+Each simulated host has its own Tokio runtime. Turmoil steps hosts in turn
+and controls simulated time, network latency, packet loss, partitions, and
+crashes. Each host uses [`turmoil-net`](../turmoil-net) for TCP and UDP.
+The `unstable-fs` feature adds
+a simulated filesystem through [`turmoil-fs`](../turmoil-fs).
 
 ```toml
 [dev-dependencies]
 turmoil = "0.7"
 ```
 
+Use `Builder` to configure a simulation, `Sim::host` to register services,
+and `Sim::client` to run test code. Import sockets from `turmoil::net`.
+See the [crate documentation](https://docs.rs/turmoil) and
+[examples](../../examples) for usage.
+
 ## Barriers (unstable)
 
 *Requires the `unstable-barriers` feature.*
 
-Barriers let tests observe and control specific points in the code under
-test. A `trigger(event)` call in production code (conditionally compiled)
-blocks until the test resolves it, giving you deterministic scheduling of
-arbitrary events without threading them through the network. See the
-`barriers` module for details.
+Barriers let tests suspend and resume code at a `trigger(event)` call.
+See the `barriers` module for details.

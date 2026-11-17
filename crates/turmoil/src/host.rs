@@ -1,49 +1,31 @@
-use crate::envelope::{hex, Datagram, Protocol, Segment, Syn};
 #[cfg(feature = "unstable-fs")]
 use crate::fs::{Fs, FsConfig};
 #[cfg(feature = "unstable-io_uring")]
 use crate::io_uring::host::IoUringHostState;
-use crate::net::tcp::stream::BidiFlowControl;
-use crate::net::{SocketPair, TcpListener, UdpSocket};
-use crate::{Envelope, TRACING_TARGET};
 
-use bytes::Bytes;
-use indexmap::IndexMap;
-use std::collections::VecDeque;
-use std::fmt::Display;
-use std::io;
-use std::net::{IpAddr, SocketAddr};
-use std::ops::RangeInclusive;
-use std::sync::Arc;
+use std::net::IpAddr;
 #[cfg(feature = "unstable-io_uring")]
-use std::sync::Mutex;
-use std::task::{Context, Waker};
-use tokio::sync::{mpsc, Notify};
+use std::sync::{Arc, Mutex};
 use tokio::time::{Duration, Instant};
-
-const DEFAULT_BROADCAST: bool = false;
-const DEFAULT_MULTICAST_LOOP: bool = true;
+use turmoil_net::HostId;
 
 /// A host in the simulated network.
 ///
-/// Hosts have [`Udp`] and [`Tcp`] software available for networking.
-///
-/// Both modes may be used simultaneously.
+/// Networking lives in the host's `turmoil_net` stack, identified by
+/// `net`.
 pub(crate) struct Host {
-    /// Host name.
-    pub(crate) nodename: String,
-
     /// Host ip address.
     pub(crate) addr: IpAddr,
 
     /// Tracks elapsed time for host and overall simulation.
     pub(crate) timer: HostTimer,
 
-    /// L4 User Datagram Protocol (UDP).
-    pub(crate) udp: Udp,
+    /// The host's network stack.
+    pub(crate) net: HostId,
 
-    /// L4 Transmission Control Protocol (TCP).
-    pub(crate) tcp: Tcp,
+    /// Crashed hosts are powered off: inbound packets are lost until
+    /// the host is bounced.
+    pub(crate) crashed: bool,
 
     /// Simulated filesystem.
     #[cfg(feature = "unstable-fs")]
@@ -52,21 +34,14 @@ pub(crate) struct Host {
     /// Per-host io_uring registry: active rings + ring-fd allocator.
     #[cfg(feature = "unstable-io_uring")]
     pub(crate) io_uring: Arc<Mutex<IoUringHostState>>,
-
-    next_ephemeral_port: u16,
-    ephemeral_ports: RangeInclusive<u16>,
 }
 
 impl Host {
     #[cfg(feature = "unstable-fs")]
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
-        nodename: impl Into<String>,
         addr: IpAddr,
+        net: HostId,
         timer: HostTimer,
-        ephemeral_ports: RangeInclusive<u16>,
-        tcp_capacity: usize,
-        udp_capacity: usize,
         fs_config: FsConfig,
         fs_seed: u64,
     ) -> Host {
@@ -78,80 +53,23 @@ impl Host {
             .seed(fs_seed)
             .on_corruption(crate::fs_corruption_hook);
         Host {
-            nodename: nodename.into(),
             addr,
-            udp: Udp::new(udp_capacity),
-            tcp: Tcp::new(tcp_capacity),
+            net,
+            crashed: false,
             fs: builder.build(),
             #[cfg(feature = "unstable-io_uring")]
             io_uring: Arc::new(Mutex::new(IoUringHostState::new())),
             timer,
-            next_ephemeral_port: *ephemeral_ports.start(),
-            ephemeral_ports,
         }
     }
 
     #[cfg(not(feature = "unstable-fs"))]
-    pub(crate) fn new(
-        nodename: impl Into<String>,
-        addr: IpAddr,
-        timer: HostTimer,
-        ephemeral_ports: RangeInclusive<u16>,
-        tcp_capacity: usize,
-        udp_capacity: usize,
-    ) -> Host {
+    pub(crate) fn new(addr: IpAddr, net: HostId, timer: HostTimer) -> Host {
         Host {
-            nodename: nodename.into(),
             addr,
-            udp: Udp::new(udp_capacity),
-            tcp: Tcp::new(tcp_capacity),
+            net,
+            crashed: false,
             timer,
-            next_ephemeral_port: *ephemeral_ports.start(),
-            ephemeral_ports,
-        }
-    }
-
-    pub(crate) fn assign_ephemeral_port(&mut self) -> u16 {
-        for _ in self.ephemeral_ports.clone() {
-            let ret = self.next_ephemeral_port;
-
-            if self.next_ephemeral_port == *self.ephemeral_ports.end() {
-                // re-load
-                self.next_ephemeral_port = *self.ephemeral_ports.start();
-            } else {
-                // advance
-                self.next_ephemeral_port += 1;
-            }
-
-            // Check for existing binds and connections to avoid port conflicts
-            if self.udp.is_port_assigned(ret) || self.tcp.is_port_assigned(ret) {
-                continue;
-            }
-
-            return ret;
-        }
-
-        panic!("Host: '{}' ports exhausted", self.nodename)
-    }
-
-    /// Receive the `envelope` from the network.
-    ///
-    /// Returns an Err if a message needs to be sent in response to a failed
-    /// delivery, e.g. TCP RST.
-    // FIXME: This funkiness is necessary due to how message sending works. The
-    // key problem is that the Host doesn't actually send messages, rather the
-    // World is borrowed, and it sends.
-    pub(crate) fn receive_from_network(&mut self, envelope: Envelope) -> Result<(), Protocol> {
-        let Envelope { src, dst, message } = envelope;
-
-        tracing::trace!(target: TRACING_TARGET, ?src, ?dst, protocol = %message, "Delivered");
-
-        match message {
-            Protocol::Tcp(segment) => self.tcp.receive_from_network(src, dst, segment),
-            Protocol::Udp(datagram) => {
-                self.udp.receive_from_network(src, dst, datagram);
-                Ok(())
-            }
         }
     }
 }
@@ -216,484 +134,5 @@ impl HostTimer {
     /// forward the configured tick duration.
     pub(crate) fn since_epoch(&self) -> Duration {
         self.since_epoch + self.sim_elapsed()
-    }
-}
-
-/// Simulated UDP host software.
-pub(crate) struct Udp {
-    /// Bound udp sockets
-    binds: IndexMap<u16, UdpBind>,
-
-    /// UdpSocket channel capacity
-    capacity: usize,
-}
-
-struct UdpBind {
-    bind_addr: SocketAddr,
-    target_addr: Option<SocketAddr>,
-    broadcast: bool,
-    multicast_loop: bool,
-    queue: mpsc::Sender<(Datagram, SocketAddr)>,
-}
-
-impl Udp {
-    fn new(capacity: usize) -> Self {
-        Self {
-            binds: IndexMap::new(),
-            capacity,
-        }
-    }
-
-    pub(crate) fn is_port_assigned(&self, port: u16) -> bool {
-        self.binds.keys().any(|p| *p == port)
-    }
-
-    pub(crate) fn is_broadcast_enabled(&self, port: u16) -> bool {
-        self.binds
-            .get(&port)
-            .map(|bind| bind.broadcast)
-            .unwrap_or(DEFAULT_BROADCAST)
-    }
-
-    pub(crate) fn is_multicast_loop_enabled(&self, port: u16) -> bool {
-        self.binds
-            .get(&port)
-            .map(|bind| bind.multicast_loop)
-            .unwrap_or(DEFAULT_MULTICAST_LOOP)
-    }
-
-    pub(crate) fn set_broadcast(&mut self, port: u16, on: bool) {
-        self.binds
-            .entry(port)
-            .and_modify(|bind| bind.broadcast = on);
-    }
-
-    pub(crate) fn set_multicast_loop(&mut self, port: u16, on: bool) {
-        self.binds
-            .entry(port)
-            .and_modify(|bind| bind.multicast_loop = on);
-    }
-
-    pub(crate) fn bind(&mut self, addr: SocketAddr) -> io::Result<UdpSocket> {
-        let (tx, rx) = mpsc::channel(self.capacity);
-        let bind = UdpBind {
-            bind_addr: addr,
-            target_addr: None,
-            broadcast: DEFAULT_BROADCAST,
-            multicast_loop: DEFAULT_MULTICAST_LOOP,
-            queue: tx,
-        };
-
-        match self.binds.entry(addr.port()) {
-            indexmap::map::Entry::Occupied(_) => {
-                return Err(io::Error::new(io::ErrorKind::AddrInUse, addr.to_string()));
-            }
-            indexmap::map::Entry::Vacant(entry) => entry.insert(bind),
-        };
-
-        tracing::info!(target: TRACING_TARGET, ?addr, protocol = %"UDP", "Bind");
-
-        Ok(UdpSocket::new(addr, rx))
-    }
-    pub(crate) fn connect(&mut self, src: SocketAddr, dst: SocketAddr) {
-        let Some(bind) = self.binds.get_mut(&src.port()) else {
-            panic!("Connect failed (no matching bind) for {src}");
-        };
-
-        bind.target_addr = Some(dst);
-    }
-
-    fn receive_from_network(&mut self, src: SocketAddr, dst: SocketAddr, datagram: Datagram) {
-        if let Some(bind) = self.binds.get_mut(&dst.port()) {
-            if let Some(target) = bind.target_addr {
-                if !matches(target, src) {
-                    tracing::trace!(target: TRACING_TARGET, ?src, ?dst, protocol = %Protocol::Udp(datagram), "Dropped (Connect Addr not matching)");
-                    return;
-                }
-            }
-
-            if !matches(bind.bind_addr, dst) {
-                tracing::trace!(target: TRACING_TARGET, ?src, ?dst, protocol = %Protocol::Udp(datagram), "Dropped (Addr not bound)");
-                return;
-            }
-            if let Err(err) = bind.queue.try_send((datagram, src)) {
-                // drop any packets that exceed the capacity
-                match err {
-                    mpsc::error::TrySendError::Full((datagram, _)) => {
-                        tracing::trace!(target: TRACING_TARGET, ?src, ?dst, protocol = %Protocol::Udp(datagram), "Dropped (Full buffer)");
-                    }
-                    mpsc::error::TrySendError::Closed((datagram, _)) => {
-                        tracing::trace!(target: TRACING_TARGET, ?src, ?dst, protocol = %Protocol::Udp(datagram), "Dropped (Receiver closed)");
-                    }
-                }
-            }
-        }
-    }
-
-    pub(crate) fn unbind(&mut self, addr: SocketAddr) {
-        let exists = self.binds.swap_remove(&addr.port());
-
-        assert!(exists.is_some(), "unknown bind {addr}");
-
-        tracing::info!(target: TRACING_TARGET, ?addr, protocol = %"UDP", "Unbind");
-    }
-}
-
-pub(crate) struct Tcp {
-    /// Bound server sockets
-    binds: IndexMap<u16, ServerSocket>,
-
-    /// TcpListener channel capacity
-    server_socket_capacity: usize,
-
-    /// Active stream sockets
-    sockets: IndexMap<SocketPair, StreamSocket>,
-
-    /// TcpStream channel capacity
-    socket_capacity: usize,
-}
-
-struct ServerSocket {
-    bind_addr: SocketAddr,
-
-    /// Notify the TcpListener when SYNs are delivered
-    notify: Arc<Notify>,
-
-    /// Pending connections for the TcpListener to accept
-    deque: VecDeque<(Syn, SocketAddr)>,
-}
-
-struct StreamSocket {
-    buf: IndexMap<u64, SequencedSegment>,
-    next_send_seq: u64,
-    recv_seq: u64,
-    /// None once FIN is in order, so EOF does not consume channel capacity.
-    sender: Option<mpsc::Sender<Bytes>>,
-    flow_control: BidiFlowControl,
-    reset_waker: Option<Waker>,
-    /// A simple reference counter for tracking read/write half drops. Once 0, the
-    /// socket may be removed from the host.
-    ref_ct: usize,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum StreamState {
-    Open,
-    ReadClosed,
-    Reset,
-}
-
-/// A received [`Segment`] stripped of its sequence number. The host reorders
-/// these by seq; the stream sees them in order.
-#[derive(Debug)]
-pub(crate) enum SequencedSegment {
-    Data(Bytes),
-    Fin,
-}
-
-impl Display for SequencedSegment {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            SequencedSegment::Data(data) => hex("TCP", data, f),
-            SequencedSegment::Fin => write!(f, "TCP FIN"),
-        }
-    }
-}
-
-impl StreamSocket {
-    fn new(capacity: usize) -> (Self, mpsc::Receiver<Bytes>, BidiFlowControl) {
-        let (tx, rx) = mpsc::channel(capacity);
-        let flow_control = BidiFlowControl::new(capacity);
-        let sock = Self {
-            buf: IndexMap::new(),
-            next_send_seq: 1,
-            recv_seq: 0,
-            sender: Some(tx),
-            flow_control: flow_control.clone(),
-            reset_waker: None,
-            ref_ct: 2,
-        };
-
-        (sock, rx, flow_control)
-    }
-
-    fn assign_seq(&mut self) -> u64 {
-        let seq = self.next_send_seq;
-        self.next_send_seq += 1;
-        seq
-    }
-
-    fn state(&self) -> StreamState {
-        match self.sender {
-            Some(_) => StreamState::Open,
-            None => StreamState::ReadClosed,
-        }
-    }
-
-    // Buffer and re-order received segments by `seq` as the network may deliver
-    // them out of order.
-    fn buffer(&mut self, seq: u64, segment: SequencedSegment) -> Result<(), Protocol> {
-        use mpsc::error::TrySendError::*;
-
-        let exists = self.buf.insert(seq, segment);
-
-        assert!(exists.is_none(), "duplicate segment {seq}");
-
-        while let Some(segment) = self.buf.swap_remove(&(self.recv_seq + 1)) {
-            let Some(sender) = &self.sender else {
-                return Err(Protocol::Tcp(Segment::Rst));
-            };
-
-            match segment {
-                SequencedSegment::Data(bytes) => match sender.try_send(bytes) {
-                    Ok(()) => {}
-                    Err(Closed(_)) => return Err(Protocol::Tcp(Segment::Rst)),
-                    Err(Full(bytes)) => {
-                        self.buf
-                            .insert(self.recv_seq + 1, SequencedSegment::Data(bytes));
-                        break;
-                    }
-                },
-                SequencedSegment::Fin => {
-                    if sender.is_closed() {
-                        return Err(Protocol::Tcp(Segment::Rst));
-                    }
-                    self.sender = None;
-                }
-            }
-
-            self.recv_seq += 1;
-        }
-
-        Ok(())
-    }
-}
-
-impl Tcp {
-    fn new(capacity: usize) -> Self {
-        Self {
-            binds: IndexMap::new(),
-            sockets: IndexMap::new(),
-            server_socket_capacity: capacity,
-            socket_capacity: capacity,
-        }
-    }
-
-    fn is_port_assigned(&self, port: u16) -> bool {
-        self.binds.keys().any(|p| *p == port) || self.sockets.keys().any(|a| a.local.port() == port)
-    }
-
-    pub(crate) fn bind(&mut self, addr: SocketAddr) -> io::Result<TcpListener> {
-        let notify = Arc::new(Notify::new());
-        let sock = ServerSocket {
-            bind_addr: addr,
-            notify: notify.clone(),
-            deque: VecDeque::new(),
-        };
-
-        match self.binds.entry(addr.port()) {
-            indexmap::map::Entry::Occupied(_) => {
-                return Err(io::Error::new(io::ErrorKind::AddrInUse, addr.to_string()));
-            }
-            indexmap::map::Entry::Vacant(entry) => entry.insert(sock),
-        };
-
-        tracing::info!(target: TRACING_TARGET, ?addr, protocol = %"TCP", "Bind");
-
-        Ok(TcpListener::new(addr, notify))
-    }
-
-    pub(crate) fn new_stream(
-        &mut self,
-        pair: SocketPair,
-    ) -> (mpsc::Receiver<Bytes>, BidiFlowControl) {
-        let (sock, rx, bidi) = StreamSocket::new(self.socket_capacity);
-
-        let exists = self.sockets.insert(pair, sock);
-
-        assert!(exists.is_none(), "{pair:?} is already connected");
-
-        (rx, bidi)
-    }
-
-    pub(crate) fn flow_control(&self, pair: SocketPair) -> BidiFlowControl {
-        self.sockets
-            .get(&pair)
-            .expect("missing stream socket")
-            .flow_control
-            .clone()
-    }
-
-    pub(crate) fn stream_count(&self) -> usize {
-        self.sockets.len()
-    }
-
-    pub(crate) fn accept(&mut self, addr: SocketAddr) -> Option<(Syn, SocketAddr)> {
-        self.binds[&addr.port()].deque.pop_front()
-    }
-
-    // Ideally, we could "write through" the tcp software, but this is necessary
-    // due to borrowing the world to access the mut host and for sending.
-    pub(crate) fn assign_send_seq(&mut self, pair: SocketPair) -> Option<u64> {
-        let sock = self.sockets.get_mut(&pair)?;
-        Some(sock.assign_seq())
-    }
-
-    fn receive_from_network(
-        &mut self,
-        src: SocketAddr,
-        dst: SocketAddr,
-        segment: Segment,
-    ) -> Result<(), Protocol> {
-        match segment {
-            Segment::Syn(syn) => {
-                // If bound, queue the syn; else we drop the syn triggering
-                // connection refused on the client.
-                if let Some(b) = self.binds.get_mut(&dst.port()) {
-                    if b.deque.len() == self.server_socket_capacity {
-                        panic!("{dst} server socket buffer full");
-                    }
-
-                    if matches(b.bind_addr, dst) {
-                        b.deque.push_back((syn, src));
-                        b.notify.notify_one();
-                    }
-                }
-            }
-            Segment::Data(seq, data) => match self.sockets.get_mut(&SocketPair::new(dst, src)) {
-                Some(sock) => sock.buffer(seq, SequencedSegment::Data(data))?,
-                None => return Err(Protocol::Tcp(Segment::Rst)),
-            },
-            Segment::Fin(seq) => match self.sockets.get_mut(&SocketPair::new(dst, src)) {
-                Some(sock) => sock.buffer(seq, SequencedSegment::Fin)?,
-                None => return Err(Protocol::Tcp(Segment::Rst)),
-            },
-            Segment::Rst => {
-                self.reset_stream(SocketPair::new(dst, src));
-            }
-        };
-
-        Ok(())
-    }
-
-    /// Returns true if the given stream has any Data segments waiting in the
-    /// out-of-order reorder buffer that have not yet been delivered to the
-    /// receive mpsc channel.
-    pub(crate) fn has_buffered_data(&self, pair: SocketPair) -> bool {
-        self.sockets
-            .get(&pair)
-            .map(|s| {
-                s.buf
-                    .values()
-                    .any(|seg| matches!(seg, SequencedSegment::Data(_)))
-            })
-            .unwrap_or(false)
-    }
-
-    pub(crate) fn stream_state(&self, pair: SocketPair) -> StreamState {
-        self.sockets
-            .get(&pair)
-            .map_or(StreamState::Reset, StreamSocket::state)
-    }
-
-    pub(crate) fn poll_stream_state(
-        &mut self,
-        pair: SocketPair,
-        cx: &mut Context<'_>,
-    ) -> StreamState {
-        let Some(sock) = self.sockets.get_mut(&pair) else {
-            return StreamState::Reset;
-        };
-        sock.reset_waker = Some(cx.waker().clone());
-        sock.state()
-    }
-
-    /// Remove the stream socket without decrementing the half-close refcount.
-    /// Used when sending RST: the connection is torn down immediately.
-    pub(crate) fn reset_stream(&mut self, pair: SocketPair) {
-        if let Some(sock) = self.sockets.swap_remove(&pair) {
-            if let Some(waker) = sock.reset_waker {
-                waker.wake();
-            }
-        }
-    }
-
-    pub(crate) fn close_stream_half(&mut self, pair: SocketPair) {
-        // Receiving a RST removes the socket, so it's possible that has occurred
-        // when halves of the stream drop.
-        if let Some(sock) = self.sockets.get_mut(&pair) {
-            sock.ref_ct -= 1;
-
-            if sock.ref_ct == 0 {
-                self.sockets.swap_remove(&pair).unwrap();
-            }
-        }
-    }
-
-    pub(crate) fn unbind(&mut self, addr: SocketAddr) {
-        let exists = self.binds.swap_remove(&addr.port());
-
-        assert!(exists.is_some(), "unknown bind {addr}");
-
-        tracing::info!(target: TRACING_TARGET, ?addr, protocol = %"TCP", "Unbind");
-    }
-}
-
-/// Returns whether the given bind addr can accept a packet routed to the given dst
-pub fn matches(bind: SocketAddr, dst: SocketAddr) -> bool {
-    if bind.ip().is_unspecified() && bind.port() == dst.port() {
-        return true;
-    }
-
-    bind == dst
-}
-
-/// Returns true if loopback is supported between two addresses, or
-/// if the IPs are the same (in which case turmoil treats it like loopback)
-pub(crate) fn is_same(src: SocketAddr, dst: SocketAddr) -> bool {
-    dst.ip().is_loopback() || src.ip() == dst.ip()
-}
-
-#[cfg(test)]
-mod test {
-    use std::time::Duration;
-
-    #[cfg(feature = "unstable-fs")]
-    use crate::fs::FsConfig;
-    use crate::{host::HostTimer, Host, Result};
-
-    #[test]
-    fn recycle_ports() -> Result {
-        #[cfg(feature = "unstable-fs")]
-        let mut host = Host::new(
-            "host",
-            std::net::Ipv4Addr::UNSPECIFIED.into(),
-            HostTimer::new(Duration::ZERO, Duration::ZERO),
-            49152..=49162,
-            1,
-            1,
-            FsConfig::default(),
-            0,
-        );
-        #[cfg(not(feature = "unstable-fs"))]
-        let mut host = Host::new(
-            "host",
-            std::net::Ipv4Addr::UNSPECIFIED.into(),
-            HostTimer::new(Duration::ZERO, Duration::ZERO),
-            49152..=49162,
-            1,
-            1,
-        );
-
-        host.udp.bind((host.addr, 49161).into())?;
-        host.udp.bind((host.addr, 49162).into())?;
-
-        for _ in 49152..49161 {
-            host.assign_ephemeral_port();
-        }
-
-        assert_eq!(49152, host.assign_ephemeral_port());
-
-        Ok(())
     }
 }
