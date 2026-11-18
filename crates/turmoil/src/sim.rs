@@ -416,9 +416,23 @@ impl<'a> Sim<'a> {
     ///
     /// Returns whether or not all clients have completed.
     pub fn step(&mut self) -> Result<bool> {
+        self.step_by(self.config.tick)
+    }
+
+    /// Step the simulation by `tick` instead of the configured
+    /// `tick_duration`.
+    ///
+    /// Each host's clock moves by `tick`, firing its timers in order as it
+    /// goes, and the network moves by `tick` too. Messages are delivered only
+    /// between steps, so one sent during a long step arrives when the next
+    /// step begins, later than the configured tick would have delivered it.
+    /// This suits moving a quiet simulation forward, such as skipping a day in
+    /// which nothing is in flight: [`Sim::links`] shows what is.
+    ///
+    /// Returns whether or not all clients have completed.
+    pub fn step_by(&mut self, tick: Duration) -> Result<bool> {
         tracing::trace!(target: TRACING_TARGET, "step {}", self.steps);
 
-        let tick = self.config.tick;
         let mut is_finished = true;
 
         // Tick the networking, processing messages. This is done before
@@ -697,6 +711,29 @@ mod test {
 
         // Client "c3" takes one sleep duration plus one tick to complete
         assert_eq!(duration + tick, sim.elapsed() - start);
+
+        Ok(())
+    }
+
+    #[test]
+    fn step_by_moves_a_quiet_simulation_in_one_step() -> Result {
+        let day = Duration::from_secs(24 * 60 * 60);
+        let mut sim = Builder::new().simulation_duration(day * 2).build();
+        let start_epoch = sim.since_epoch();
+
+        sim.client("client", async move {
+            tokio::time::sleep(day).await;
+            assert_eq!(day, elapsed());
+            assert_eq!(start_epoch + day, since_epoch().unwrap());
+
+            Ok(())
+        });
+
+        // The first step starts the client, which goes to sleep.
+        assert!(!sim.step()?);
+        // One step wakes it, a day later.
+        assert!(sim.step_by(day)?);
+        assert_eq!(Duration::from_millis(1) + day, sim.elapsed());
 
         Ok(())
     }
