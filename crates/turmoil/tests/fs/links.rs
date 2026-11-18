@@ -54,6 +54,24 @@ fn hard_link_basic() -> Result {
     sim.run()
 }
 
+/// Renaming a file onto its own pending hard link must not send the link
+/// lookup in a circle.
+#[test]
+fn rename_file_onto_its_pending_hard_link() -> Result {
+    use std::os::unix::fs::MetadataExt;
+    use turmoil::fs::shim::std::fs::rename;
+    let mut sim = Builder::new().build();
+    sim.client("test", async {
+        write("/b", b"x")?;
+        hard_link("/b", "/a")?;
+        rename("/b", "/a")?;
+        assert_eq!(read("/a")?, b"x");
+        assert_eq!(metadata("/a")?.nlink(), 2);
+        Ok(())
+    });
+    sim.run()
+}
+
 /// Regression test: renaming a file should not make it appear as a directory or symlink
 #[test]
 fn rename_file_not_dir_or_symlink() -> Result {

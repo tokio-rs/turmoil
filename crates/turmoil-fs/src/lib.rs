@@ -1417,10 +1417,18 @@ impl FsState {
     /// The current name of the file whose content `path` shows. This differs
     /// from `path` for hard links.
     fn content_view_path(&self, path: &Path) -> PathBuf {
-        match self.resolve_hardlink_target(path) {
-            Some(target) => self.content_view_path(&target),
-            None => path.to_path_buf(),
+        let mut path = path.to_path_buf();
+        // A rename onto a pending hard link of the same file can make the
+        // target resolve back to the link, so stop at a name seen before.
+        let mut seen = vec![path.clone()];
+        while let Some(target) = self.resolve_hardlink_target(&path) {
+            if seen.contains(&target) {
+                break;
+            }
+            seen.push(target.clone());
+            path = target;
         }
+        path
     }
 
     /// Check if a file exists (persisted or pending creation).
@@ -2170,7 +2178,8 @@ impl FsState {
     /// For hard links, returns the shared nlink count (target's nlink).
     pub(crate) fn file_nlink(&self, path: &Path) -> u64 {
         // If this file is a pending hard link, get its target's nlink
-        if let Some(target) = self.resolve_hardlink_target(path) {
+        let target = self.content_view_path(path);
+        if target != path {
             return self.file_nlink(&target);
         }
 
