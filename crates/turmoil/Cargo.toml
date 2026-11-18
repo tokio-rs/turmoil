@@ -1,6 +1,6 @@
 [package]
 name = "turmoil"
-version = "0.7.2"
+version = "0.8.0"
 edition = "2021"
 license = "MIT"
 authors = ["Tokio Contributors <team@tokio.rs>"]
@@ -23,8 +23,8 @@ tokio = { version = "1.25.0", features = [
     "rt", "rt-multi-thread", "signal", "sync", "time", "test-util",
 ] }
 tracing = "0.1"
-turmoil-fs = { version = "0.1.0", path = "../turmoil-fs", optional = true }
-turmoil-io-uring = { version = "0.1.0", path = "../turmoil-io-uring", optional = true, features = ["fs"] }
+turmoil-fs = { version = "0.1.1", path = "../turmoil-fs", optional = true }
+turmoil-io-uring = { version = "0.1.1", path = "../turmoil-io-uring", optional = true, features = ["fs"] }
 uuid = { version = "1", features = ["v4"], optional = true }
 
 [dev-dependencies]

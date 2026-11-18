@@ -1,3 +1,18 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+## [0.1.1](https://github.com/tokio-rs/turmoil/compare/turmoil-fs-v0.1.0...turmoil-fs-v0.1.1) - 2026-11-18
+
+### Fixed
+
+- *(fs)* move directory contents when renaming a directory ([#305](https://github.com/tokio-rs/turmoil/pull/305))
+- *(fs)* report renamed directories as directories ([#302](https://github.com/tokio-rs/turmoil/pull/302))
 # 0.1.0
 
 Initial release. The simulated filesystem was lifted out of `turmoil`'s
