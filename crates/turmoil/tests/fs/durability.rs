@@ -974,3 +974,267 @@ fn sync_data_new_file() -> Result {
     });
     sim.run()
 }
+
+#[test]
+fn synced_directory_rename_keeps_children() -> Result {
+    use turmoil::fs::shim::std::fs::{metadata, read, rename, write};
+
+    let mut sim = Builder::new().build();
+    let phase = Arc::new(AtomicBool::new(false));
+    let notify = Arc::new(Notify::new());
+    let phase_host = phase.clone();
+    let notify_host = notify.clone();
+
+    sim.host("server", move || {
+        let phase = phase_host.clone();
+        let notify = notify_host.clone();
+        async move {
+            if !phase.load(Ordering::SeqCst) {
+                create_dir("/old")?;
+                sync_dir("/")?;
+                write("/old/data", b"payload")?;
+                let file = OpenOptions::new().write(true).open("/old/data")?;
+                file.sync_all()?;
+                sync_dir("/old")?;
+                rename("/old", "/new")?;
+                sync_dir("/")?;
+            } else {
+                assert!(metadata("/old").is_err());
+                assert!(metadata("/old/data").is_err());
+                assert_eq!(read("/new/data")?, b"payload");
+            }
+            notify.notify_one();
+            std::future::pending::<()>().await;
+            Ok(())
+        }
+    });
+
+    let n = notify.clone();
+    sim.client("phase0", async move {
+        n.notified().await;
+        Ok(())
+    });
+    sim.run()?;
+    sim.crash("server");
+    phase.store(true, Ordering::SeqCst);
+    sim.bounce("server");
+    let n = notify.clone();
+    sim.client("phase1", async move {
+        n.notified().await;
+        Ok(())
+    });
+    sim.run()
+}
+
+/// Runs `before` on a host, crashes it, then runs `after` on the restarted
+/// host so it can inspect what survived.
+fn crash_then_check(
+    before: fn() -> std::io::Result<()>,
+    after: fn() -> std::io::Result<()>,
+) -> Result {
+    let mut sim = Builder::new().build();
+    let phase = Arc::new(AtomicBool::new(false));
+    let notify = Arc::new(Notify::new());
+    let phase_host = phase.clone();
+    let notify_host = notify.clone();
+
+    sim.host("server", move || {
+        let phase = phase_host.clone();
+        let notify = notify_host.clone();
+        async move {
+            if !phase.load(Ordering::SeqCst) {
+                before()?;
+            } else {
+                after()?;
+            }
+            notify.notify_one();
+            std::future::pending::<()>().await;
+            Ok(())
+        }
+    });
+
+    let n = notify.clone();
+    sim.client("phase0", async move {
+        n.notified().await;
+        Ok(())
+    });
+    sim.run()?;
+    sim.crash("server");
+    phase.store(true, Ordering::SeqCst);
+    sim.bounce("server");
+    let n = notify.clone();
+    sim.client("phase1", async move {
+        n.notified().await;
+        Ok(())
+    });
+    sim.run()
+}
+
+fn write_synced(path: &str, data: &[u8]) -> std::io::Result<()> {
+    let file = OpenOptions::new().write(true).create(true).open(path)?;
+    file.write_all_at(data, 0)?;
+    file.sync_all()
+}
+
+#[test]
+fn unsynced_directory_rename_rolls_back() -> Result {
+    use turmoil::fs::shim::std::fs::{metadata, read, rename};
+
+    crash_then_check(
+        || {
+            create_dir("/old")?;
+            sync_dir("/")?;
+            write_synced("/old/a.txt", b"a")?;
+            sync_dir("/old")?;
+            rename("/old", "/new")?;
+            Ok(())
+        },
+        || {
+            assert!(metadata("/new").is_err());
+            assert!(metadata("/new/a.txt").is_err());
+            assert_eq!(read("/old/a.txt")?, b"a");
+            Ok(())
+        },
+    )
+}
+
+#[test]
+fn syncing_renamed_directory_does_not_flush_its_rename() -> Result {
+    use turmoil::fs::shim::std::fs::{metadata, read, rename};
+
+    // Syncing the directory under its new name, or one of its
+    // subdirectories, only makes the directory's contents durable. The
+    // entry for the new name lives in the parent and is still pending.
+    for sync_target in ["/new", "/new/sub"] {
+        let before = if sync_target == "/new" {
+            (|| {
+                create_dir_all("/old/sub")?;
+                sync_dir("/")?;
+                write_synced("/old/sub/a.txt", b"a")?;
+                sync_dir("/old")?;
+                sync_dir("/old/sub")?;
+                rename("/old", "/new")?;
+                sync_dir("/new")?;
+                Ok(())
+            }) as fn() -> std::io::Result<()>
+        } else {
+            || {
+                create_dir_all("/old/sub")?;
+                sync_dir("/")?;
+                write_synced("/old/sub/a.txt", b"a")?;
+                sync_dir("/old")?;
+                sync_dir("/old/sub")?;
+                rename("/old", "/new")?;
+                sync_dir("/new/sub")?;
+                Ok(())
+            }
+        };
+        crash_then_check(before, || {
+            assert!(metadata("/new").is_err());
+            assert_eq!(read("/old/sub/a.txt")?, b"a");
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
+#[test]
+fn directory_rename_does_not_make_unsynced_child_entry_durable() -> Result {
+    use turmoil::fs::shim::std::fs::{metadata, rename};
+
+    crash_then_check(
+        || {
+            create_dir("/old")?;
+            sync_dir("/")?;
+            // The file's data is synced, but its entry in /old never is.
+            write_synced("/old/a.txt", b"a")?;
+            rename("/old", "/new")?;
+            sync_dir("/")?;
+            Ok(())
+        },
+        || {
+            assert!(metadata("/new").is_ok());
+            assert!(metadata("/new/a.txt").is_err());
+            assert!(metadata("/old").is_err());
+            Ok(())
+        },
+    )
+}
+
+#[test]
+fn directory_rename_keeps_synced_child_entry_and_drops_unsynced_one() -> Result {
+    use turmoil::fs::shim::std::fs::{metadata, read, rename};
+
+    crash_then_check(
+        || {
+            create_dir("/old")?;
+            sync_dir("/")?;
+            write_synced("/old/kept.txt", b"kept")?;
+            sync_dir("/old")?;
+            write_synced("/old/lost.txt", b"lost")?;
+            rename("/old", "/new")?;
+            sync_dir("/")?;
+            Ok(())
+        },
+        || {
+            assert_eq!(read("/new/kept.txt")?, b"kept");
+            assert!(metadata("/new/lost.txt").is_err());
+            Ok(())
+        },
+    )
+}
+
+#[test]
+fn syncing_destination_parent_does_not_flush_unrelated_rename() -> Result {
+    use turmoil::fs::shim::std::fs::{metadata, rename};
+
+    crash_then_check(
+        || {
+            create_dir_all("/a/s")?;
+            create_dir("/b")?;
+            sync_dir("/")?;
+            sync_dir("/a")?;
+            rename("/a/s", "/b/s")?;
+            // A different directory now sits at the old name, and a file in
+            // it is moved into the renamed one. Neither is synced.
+            create_dir("/a/s")?;
+            write_synced("/a/s/y", b"y")?;
+            rename("/a/s/y", "/b/s/y")?;
+            sync_dir("/b")?;
+            Ok(())
+        },
+        || {
+            assert!(metadata("/b/s").is_ok());
+            assert!(metadata("/b/s/y").is_err());
+            Ok(())
+        },
+    )
+}
+
+#[test]
+fn write_after_synced_directory_rename_survives_crash() -> Result {
+    use turmoil::fs::shim::std::fs::{metadata, read, rename};
+
+    crash_then_check(
+        || {
+            create_dir("/old")?;
+            sync_dir("/")?;
+            sync_dir("/old")?;
+            // Create, write and sync everything below /old, then rename.
+            write_synced("/old/a.txt", b"a")?;
+            sync_dir("/old")?;
+            rename("/old", "/new")?;
+            sync_dir("/")?;
+            // Changes made under the new name still land on the same file.
+            let file = OpenOptions::new().write(true).open("/new/a.txt")?;
+            file.write_all_at(b"b", 0)?;
+            file.sync_all()?;
+            Ok(())
+        },
+        || {
+            assert!(metadata("/old").is_err());
+            assert_eq!(read("/new/a.txt")?, b"b");
+            Ok(())
+        },
+    )
+}
