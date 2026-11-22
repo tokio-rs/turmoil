@@ -131,34 +131,7 @@ pub fn create_dir<P: AsRef<Path>>(path: P) -> Result<()> {
 
 /// Creates a directory and all of its parent components if they are missing.
 pub fn create_dir_all<P: AsRef<Path>>(path: P) -> Result<()> {
-    let path = path.as_ref().to_path_buf();
-    FsContext::current(|ctx| {
-        // Collect all ancestors that need to be created
-        let mut to_create = Vec::new();
-        let mut current = Some(path.as_path());
-
-        while let Some(p) = current {
-            if p.as_os_str().is_empty() {
-                break;
-            }
-            let pb = p.to_path_buf();
-            if ctx.fs.dir_exists(&pb) {
-                break;
-            }
-            to_create.push(pb);
-            current = p.parent();
-        }
-
-        // Create from root down
-        for dir in to_create.into_iter().rev() {
-            // Skip if it already exists (as file or dir)
-            if ctx.fs.dir_exists(&dir) || ctx.fs.file_exists(&dir) {
-                continue;
-            }
-            ctx.fs.mkdir(&dir, ctx.now).map_err(Error::other)?;
-        }
-        Ok(())
-    })
+    create_dir_all_with_mode(path, 0o755)
 }
 
 /// Removes an empty directory.
@@ -1584,8 +1557,16 @@ fn create_dir_all_with_mode<P: AsRef<Path>>(path: P, mode: u32) -> Result<()> {
 
         // Create from root down
         for dir in to_create.into_iter().rev() {
-            if ctx.fs.dir_exists(&dir) || ctx.fs.file_exists(&dir) {
+            if ctx.fs.dir_exists(&dir) {
                 continue;
+            }
+            // A file in the way is an error, as with `std::fs::create_dir_all`.
+            if ctx.fs.file_exists(&dir) {
+                return Err(if dir == path {
+                    Error::new(ErrorKind::AlreadyExists, "File exists")
+                } else {
+                    Error::new(ErrorKind::NotADirectory, "Not a directory")
+                });
             }
             ctx.fs
                 .mkdir_with_mode(&dir, ctx.now, mode)
