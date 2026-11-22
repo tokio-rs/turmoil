@@ -3,7 +3,7 @@
 use std::os::unix::fs::FileExt;
 use turmoil::fs::shim::std::fs::{
     create_dir, create_dir_all, metadata, read_dir, remove_dir, remove_dir_all, remove_file,
-    rename, sync_dir, write, OpenOptions,
+    rename, sync_dir, write, File, OpenOptions,
 };
 use turmoil::{Builder, Result};
 
@@ -448,6 +448,37 @@ fn rename_dir_twice_then_sync_parent() -> Result {
         assert!(metadata("/mid").is_err());
         assert_eq!(read("/new/a.txt")?, b"a");
         assert_eq!(read("/new/b.txt")?, b"b");
+        Ok(())
+    });
+    sim.run()
+}
+
+#[test]
+fn open_directory_for_writing_fails() -> Result {
+    let mut sim = Builder::new().build();
+    sim.client("test", async {
+        create_dir("/dir")?;
+
+        let err = File::create("/dir").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::IsADirectory);
+        assert!(OpenOptions::new().write(true).open("/dir").is_err());
+        assert!(OpenOptions::new().append(true).open("/dir").is_err());
+        assert!(OpenOptions::new()
+            .read(true)
+            .create(true)
+            .open("/dir")
+            .is_err());
+        let err = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open("/dir")
+            .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+
+        // The failed opens must not leave a file behind the directory.
+        assert!(metadata("/dir")?.is_dir());
+        assert!(remove_file("/dir").is_err());
+        remove_dir("/dir")?;
         Ok(())
     });
     sim.run()

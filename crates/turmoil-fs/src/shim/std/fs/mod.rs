@@ -1278,6 +1278,16 @@ impl OpenOptions {
                 path.clone()
             };
 
+            // A directory cannot be created over or opened for writing.
+            if ctx.fs.dir_exists(&resolved_path) {
+                if self.create_new {
+                    return Err(Error::new(ErrorKind::AlreadyExists, "file already exists"));
+                }
+                if self.create || self.write || self.append || self.truncate {
+                    return Err(Error::new(ErrorKind::IsADirectory, "Is a directory"));
+                }
+            }
+
             let file_exists = ctx.fs.file_exists(&resolved_path);
 
             // Handle create_new: fail if file exists
