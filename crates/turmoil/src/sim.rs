@@ -419,15 +419,11 @@ impl<'a> Sim<'a> {
         self.step_by(self.config.tick)
     }
 
-    /// Step the simulation by `tick` instead of the configured
-    /// `tick_duration`.
+    /// Step the simulation by `tick`, advancing host clocks and firing timers.
     ///
-    /// Each host's clock moves by `tick`, firing its timers in order as it
-    /// goes, and the network moves by `tick` too. Messages are delivered only
-    /// between steps, so one sent during a long step arrives when the next
-    /// step begins, later than the configured tick would have delivered it.
-    /// This suits moving a quiet simulation forward, such as skipping a day in
-    /// which nothing is in flight: [`Sim::links`] shows what is.
+    /// Hosts receive network messages before running each step. A large
+    /// step can deliver queued messages early or delay new messages by a
+    /// full step. Use [`Sim::step`] when network timing matters.
     ///
     /// Returns whether or not all clients have completed.
     pub fn step_by(&mut self, tick: Duration) -> Result<bool> {
