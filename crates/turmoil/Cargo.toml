@@ -28,6 +28,7 @@ turmoil-io-uring = { version = "0.1.0", path = "../turmoil-io-uring", optional =
 uuid = { version = "1", features = ["v4"], optional = true }
 
 [dev-dependencies]
+libc = "0.2"
 regex = "1"
 test-case = "3"
 tokio-test = "0.4.2"
@@ -48,11 +49,16 @@ unstable-barriers = ["dep:uuid"]
 # `io-uring` dev-dependency so the conformance tests can submit SQEs
 # to a real `IoUring`. Requires `target_os = "linux"`.
 real-uring-conformance = []
+# Dev-only: opts into running the filesystem conformance suite, which
+# compares the fs shim with `std::fs` on the real filesystem. Requires
+# `target_os = "linux"`.
+real-fs-conformance = ["unstable-fs"]
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [
     'cfg(tokio_unstable)',
     'cfg(parity_io_uring)',
+    'cfg(parity_fs)',
 ] }
 
 [package.metadata.cargo_check_external_types]

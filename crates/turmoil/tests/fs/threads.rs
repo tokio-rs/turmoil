@@ -5,9 +5,26 @@
 //! simulation context.
 
 use std::os::unix::fs::FileExt;
-use turmoil::fs::shim::std::fs::{create_dir, read, write, OpenOptions};
-use turmoil::fs::Fs;
+use std::time::Duration;
+use turmoil::fs::shim::std::fs::{create_dir, read, remove_file, write, File, OpenOptions};
+use turmoil::fs::{Fs, FsContext};
 use turmoil::{Builder, Result};
+
+#[test]
+fn optional_context_follows_the_enter_guard() {
+    let now = Duration::from_secs(5);
+    let fs = Fs::default();
+    fs.set_now(now);
+    let mut observed = Vec::new();
+    let mut sample = || FsContext::current_if_set(|ctx| observed.push(ctx.now));
+    sample();
+    {
+        let _guard = fs.enter();
+        sample();
+    }
+    sample();
+    assert_eq!(observed, [now]);
+}
 
 #[test]
 fn worker_thread_basic_io() -> Result {
@@ -173,6 +190,31 @@ fn worker_thread_with_sync() -> Result {
         worker.join().unwrap()?;
 
         assert_eq!(read("/data/durable.txt")?, b"durable data");
+        Ok(())
+    });
+    sim.run()
+}
+
+/// A file closes wherever it is dropped. The worker's closure drops the file
+/// after its guard, and the removed file must still give its space back.
+#[test]
+fn worker_thread_file_closes_after_the_guard() -> Result {
+    let mut builder = Builder::new();
+    builder.fs().capacity(100);
+    let mut sim = builder.build();
+    sim.client("test", async {
+        let file = File::create("/old")?;
+        file.write_all_at(&[0; 80], 0)?;
+
+        let fs = Fs::current();
+        let worker = std::thread::spawn(move || {
+            let _guard = fs.enter();
+            file.sync_all()
+        });
+        worker.join().unwrap()?;
+
+        remove_file("/old")?;
+        write("/new", [0; 80])?;
         Ok(())
     });
     sim.run()

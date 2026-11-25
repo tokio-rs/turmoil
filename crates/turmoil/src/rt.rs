@@ -198,12 +198,13 @@ impl<'a> Rt<'a> {
         };
     }
 
-    pub(crate) fn bounce(&mut self) {
+    pub(crate) fn bounce(&mut self, release: impl FnOnce()) {
         if !self.is_host() {
             panic!("can only bounce host's software");
         }
 
         self.cancel_tasks();
+        release();
 
         if let Kind::Host { software } = &self.kind {
             let handle = with(&self.tokio, &self.local, || {

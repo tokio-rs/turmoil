@@ -6,10 +6,13 @@
 //! own task-specific modules.
 
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::{FileExt, OpenOptionsExt};
+use std::os::unix::fs::FileExt;
+use test_case::test_case;
 use turmoil::fs::shim::std::fs::{create_dir_all, OpenOptions};
 use turmoil::io_uring::{cqueue, opcode, squeue, types, AsyncFd, IoUring};
 use turmoil::{Builder, Result};
+
+use super::durability::restart;
 
 const TEST_DIR: &str = "/uring";
 
@@ -277,7 +280,7 @@ fn o_direct_misaligned_read_yields_einval() -> Result {
             .read(true)
             .write(true)
             .create(true)
-            .custom_flags(0x4000) // O_DIRECT (turmoil's documented value)
+            .direct_io(true)
             .open(format!("{TEST_DIR}/odirect"))?;
         let fd = types::Fd(file.as_raw_fd());
         let mut ring = IoUring::new(4).expect("new ring");
@@ -420,10 +423,13 @@ fn io_error_probability_surfaces_eio() -> Result {
             .user_data(1);
         unsafe {
             ring.submission().push(&read).expect("push read");
+            ring.submission().push(&opcode::Fsync::new(fd).build())?;
         }
         ring.submit().expect("submit");
-        let cqe = drain_one(&mut ring).await;
-        assert_eq!(cqe.result(), -5, "expected -EIO on forced io_error");
+        for _ in 0..2 {
+            let cqe = drain_one(&mut ring).await;
+            assert_eq!(cqe.result(), -5, "expected -EIO on forced io_error");
+        }
         drop(file);
         Ok(())
     });
@@ -547,8 +553,8 @@ fn crash_drops_unsynced_writes_submitted_via_ring() -> Result {
                 }
                 ring.submit().expect("submit w");
                 // Drain so the write side effect actually lands in the
-                // pending op queue (without fsync, it's still
-                // unsynced and will be lost on crash).
+                // file (without fsync, it's still unsynced and will be
+                // lost on crash).
                 let _ = drain_one(&mut ring).await;
                 // Deliberately NO fsync.
                 std::mem::forget(file); // keep fd alive across crash test
@@ -1168,6 +1174,104 @@ fn rings_are_isolated_per_host() {
     sim.run().expect("sim");
 }
 
+#[tokio::test]
+async fn ring_handles_reject_another_hosts_registry() -> Result {
+    use std::io::ErrorKind;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+    use turmoil::fs::Fs;
+    use turmoil::io_uring::host::{enter, EnterCtx, IoUringHostState};
+
+    let registry = || Arc::new(Mutex::new(IoUringHostState::new()));
+    let (a, b) = (registry(), registry());
+    let ctx = || EnterCtx {
+        now: Duration::ZERO,
+    };
+    let _fs_a = Fs::default().enter();
+    let entered_a = enter(&a, ctx());
+    let ring = IoUring::new(4)?;
+    let entry = opcode::AsyncCancel::new(99).build();
+    let ready = AsyncFd::new(RingFdHandle(ring.as_raw_fd()))?;
+    // One producer and one consumer, both obtained while A is entered.
+    let mut sq = unsafe { ring.submission_shared() };
+    let mut cq = unsafe { ring.completion_shared() };
+    let submitter = ring.submitter();
+    unsafe { sq.push(&entry)? };
+    submitter.submit()?;
+    cq.sync();
+    assert_eq!(cq.len(), 1);
+
+    let _fs_b = Fs::default().enter();
+    let _entered_b = enter(&b, ctx());
+    let mut local = IoUring::new(4)?;
+    assert_eq!(local.as_raw_fd(), ring.as_raw_fd());
+    unsafe { local.submission().push(&entry.clone().user_data(42))? };
+    local.submit()?;
+    assert!(cq.next().is_none());
+    cq.sync();
+    assert!(cq.is_empty());
+    assert!(unsafe { sq.push(&entry) }.is_err());
+    assert_eq!(submitter.submit().unwrap_err().kind(), ErrorKind::NotFound);
+    assert!(matches!(ready.readable().await, Err(e) if e.kind() == ErrorKind::NotFound));
+    drop(ring);
+    assert_eq!(local.submit()?, 0);
+    let mut cq = local.completion();
+    cq.sync();
+    assert_eq!(cq.next().unwrap().user_data(), 42);
+    drop(_entered_b);
+    drop(entered_a);
+    Ok(())
+}
+
+#[test]
+fn ring_handle_can_outlive_the_host() -> std::io::Result<()> {
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+    use turmoil::io_uring::host::{enter, EnterCtx, IoUringHostState};
+
+    let host = Arc::new(Mutex::new(IoUringHostState::new()));
+    let owner = Arc::downgrade(&host);
+    let ring = {
+        let _guard = enter(
+            &host,
+            EnterCtx {
+                now: Duration::ZERO,
+            },
+        );
+        IoUring::new(4)?
+    };
+    drop(host);
+    assert!(owner.upgrade().is_none());
+    drop(ring);
+    Ok(())
+}
+
+#[test]
+fn zero_length_transfers_accept_null_buffers_after_fd_validation() -> Result {
+    use std::ptr;
+
+    let mut sim = Builder::new().build();
+    sim.client("test", async {
+        let file = open_rw("/file")?;
+        let mut ring = IoUring::new(4)?;
+        for (raw, expected) in [(file.as_raw_fd(), 0), (-1, -9)] {
+            let fd = types::Fd(raw);
+            let read = opcode::Read::new(fd, ptr::null_mut(), 0).build();
+            let write = opcode::Write::new(fd, ptr::null(), 0).build();
+            unsafe {
+                ring.submission().push(&read)?;
+                ring.submission().push(&write)?;
+            }
+            ring.submit()?;
+            for _ in 0..2 {
+                assert_eq!(drain_one(&mut ring).await.result(), expected);
+            }
+        }
+        Ok(())
+    });
+    sim.run()
+}
+
 #[test]
 fn completion_queue_yields_nothing_without_sync() -> Result {
     // Real Linux: `next()` reads against the userspace head pointer,
@@ -1266,6 +1370,236 @@ fn async_fd_readable_wakes_when_ring_dropped() -> Result {
         Ok(())
     });
     sim.run()
+}
+
+#[test]
+fn rejected_ring_transfers_leave_the_file_and_cache_untouched() -> Result {
+    use std::time::Duration;
+    use turmoil::fs::shim::std::fs::{write, File};
+    use turmoil::fs::shim::tokio::fs as tokio_fs;
+
+    let mut builder = Builder::new();
+    let latency = Duration::from_millis(10);
+    let timing = builder.fs().io_latency();
+    timing.min_latency(latency).max_latency(latency);
+    builder.fs().page_cache();
+    let mut sim = builder.build();
+    sim.client("c", async move {
+        write("/file", b"data")?;
+        let file = File::open("/file")?;
+        let writer = OpenOptions::new().write(true).open("/file")?;
+        let mut ring = IoUring::new(4)?;
+
+        let payload = b"XXXX";
+        let mut buf = [0; 4];
+        let ro = types::Fd(file.as_raw_fd());
+        let wo = types::Fd(writer.as_raw_fd());
+        let w = opcode::Write::new(ro, payload.as_ptr(), 4).build();
+        let r = opcode::Read::new(wo, buf.as_mut_ptr(), 4).build();
+        unsafe {
+            ring.submission().push(&w)?;
+            ring.submission().push(&r)?;
+        }
+        ring.submit()?;
+        for _ in 0..2 {
+            assert_eq!(drain_one(&mut ring).await.result(), -9);
+        }
+        assert_eq!(buf, [0; 4]);
+        let reader = tokio_fs::File::from_std(file);
+        let start = tokio::time::Instant::now();
+        reader.read_at(&mut buf, 0).await?;
+        assert!(start.elapsed() >= latency);
+        assert_eq!(&buf, b"data");
+        Ok(())
+    });
+    sim.run()
+}
+
+/// A ring write through a descriptor that appends lands at the end of the
+/// file, wherever it is aimed, and that is the page it leaves in the cache.
+#[test]
+fn ring_write_on_an_append_fd_caches_the_page_it_lands_on() -> Result {
+    use std::time::Duration;
+    use turmoil::fs::shim::std::fs::{write, File};
+    use turmoil::fs::shim::tokio::fs as tokio_fs;
+
+    let mut builder = Builder::new();
+    let latency = Duration::from_millis(10);
+    let timing = builder.fs().io_latency();
+    timing.min_latency(latency).max_latency(latency);
+    builder.fs().page_cache();
+    let mut sim = builder.build();
+    sim.client("c", async move {
+        const END: u64 = 3 * 4096;
+        write("/log", vec![0; END as usize])?;
+        let log = OpenOptions::new().append(true).open("/log")?;
+        let mut ring = IoUring::new(4)?;
+        let w = opcode::Write::new(types::Fd(log.as_raw_fd()), b"tail".as_ptr(), 4);
+        unsafe { ring.submission().push(&w.build())? };
+        ring.submit()?;
+        assert_eq!(drain_one(&mut ring).await.result(), 4);
+
+        let reader = tokio_fs::File::from_std(File::open("/log")?);
+        let mut buf = [0; 4];
+        let start = tokio::time::Instant::now();
+        reader.read_at(&mut buf, END).await?;
+        let (hit, start) = (start.elapsed(), tokio::time::Instant::now());
+        reader.read_at(&mut buf, 0).await?;
+        assert!(hit < latency && start.elapsed() >= latency, "{hit:?}");
+        Ok(())
+    });
+    sim.run()
+}
+
+/// A corrupted read is reported to the hook whichever way it was made.
+#[test]
+fn ring_read_reports_corruption() -> std::io::Result<()> {
+    use std::path::Path;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+    use turmoil::fs::shim::std::fs::{metadata, write, File};
+    use turmoil::fs::{FsConfig, FsCorruption, FsState};
+    use turmoil::io_uring::host::{enter, EnterCtx, IoUringHostState};
+
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let seen = events.clone();
+    let mut config = FsConfig::default();
+    config.corruption_probability(1.0);
+    let fs = Arc::new(Mutex::new(FsState::new(config, 0)));
+    let rings = Arc::new(Mutex::new(IoUringHostState::new()));
+    let now = Duration::ZERO;
+    let _fs = turmoil::fs::enter(&fs);
+    let _rings = enter(&rings, EnterCtx { now });
+    let other = IoUring::new(4)?;
+    let other_fd = other.as_raw_fd();
+    let (owner, registry) = (Arc::downgrade(&fs), Arc::downgrade(&rings));
+    let record = move |event: &FsCorruption| {
+        // Fail promptly if re-entering either subsystem would deadlock.
+        assert!(owner.upgrade().unwrap().try_lock().is_ok());
+        assert!(registry.upgrade().unwrap().try_lock().is_ok());
+        let _watch = AsyncFd::new(RingFdHandle(other_fd)).unwrap();
+        assert_eq!(metadata(&event.path).unwrap().len(), 4);
+        seen.lock().unwrap().push(event.clone());
+    };
+    fs.lock().unwrap().on_corruption = Some(Arc::new(record));
+
+    write("/file", b"data")?;
+    let file = File::open("/file")?;
+    let mut ring = IoUring::new(4)?;
+    let mut buf = [0u8; 4];
+    let fd = types::Fd(file.as_raw_fd());
+    let r = opcode::Read::new(fd, buf.as_mut_ptr(), buf.len() as u32).build();
+    unsafe {
+        ring.submission().push(&r).expect("push r");
+    }
+    ring.submit()?;
+    let mut completions = ring.completion();
+    completions.sync();
+    assert_eq!(completions.next().map(|cqe| cqe.result()), Some(4));
+    assert_ne!(&buf, b"data");
+
+    let events = events.lock().unwrap();
+    let [event] = events.as_slice() else {
+        panic!("expected one corruption, got {events:?}");
+    };
+    assert_eq!(event.path, Path::new("/file"));
+    assert!(event.offset < 4 && event.len == 1);
+    Ok(())
+}
+
+/// Software that submits to its ring while it is torn down fails on its
+/// own, without taking the simulation down with it.
+#[test]
+fn bounce_survives_a_destructor_that_submits() -> Result {
+    use turmoil::fs::shim::std::fs::File;
+
+    struct Engine {
+        ring: IoUring,
+        _file: File,
+    }
+
+    impl Drop for Engine {
+        fn drop(&mut self) {
+            let _ = self.ring.submit();
+        }
+    }
+
+    restart(
+        Builder::new().build(),
+        false,
+        || {
+            let (ring, _file) = (IoUring::new(4)?, open_rw("/data")?);
+            Ok(Engine { ring, _file })
+        },
+        || Ok(()),
+    )
+}
+
+/// A ring goes away with the software that made it, even one it leaked.
+#[test_case(false; "dropped")]
+#[test_case(true; "leaked")]
+fn bounce_closes_rings(leak: bool) -> Result {
+    use std::sync::atomic::{AtomicI32, Ordering};
+
+    static RING: AtomicI32 = AtomicI32::new(0);
+
+    restart(
+        Builder::new().build(),
+        false,
+        move || {
+            let ring = IoUring::new(4)?;
+            RING.store(ring.as_raw_fd(), Ordering::SeqCst);
+            if leak {
+                std::mem::forget(ring);
+                return Ok(None);
+            }
+            Ok(Some(ring))
+        },
+        || {
+            let stale = RingFdHandle(RING.load(Ordering::SeqCst));
+            assert!(AsyncFd::new(stale).is_err(), "ring outlived the bounce");
+            Ok(())
+        },
+    )
+}
+
+/// A ring syncs a directory through a descriptor on it, and refuses to
+/// read it.
+#[test]
+fn ring_fsync_on_a_directory_makes_its_entries_durable() -> Result {
+    use turmoil::fs::shim::std::fs::{read, sync_dir, write, File};
+
+    restart(
+        Builder::new().build(),
+        true,
+        || {
+            create_dir_all(TEST_DIR)?;
+            sync_dir("/")?;
+            write(format!("{TEST_DIR}/named"), b"")?;
+            let dir = File::open(TEST_DIR)?;
+            let fd = types::Fd(dir.as_raw_fd());
+            let mut ring = IoUring::new(4)?;
+
+            let mut buf = [0u8; 4];
+            let read = opcode::Read::new(fd, buf.as_mut_ptr(), buf.len() as u32);
+            let fsync = opcode::Fsync::new(fd);
+            for entry in [read.build().user_data(1), fsync.build().user_data(2)] {
+                unsafe { ring.submission().push(&entry).expect("push") };
+            }
+            ring.submit()?;
+            let mut completed = ring.completion();
+            completed.sync();
+            let result = |cqe: cqueue::Entry| (cqe.user_data(), cqe.result());
+            let mut results: Vec<_> = completed.map(result).collect();
+            results.sort_unstable();
+            assert_eq!(results, [(1, -21), (2, 0)], "expected -EISDIR and success");
+            Ok(())
+        },
+        || {
+            assert_eq!(read(format!("{TEST_DIR}/named"))?, b"");
+            Ok(())
+        },
+    )
 }
 
 /// Local newtype: AsyncFd::new is generic over `T: AsRawFd`, and we

@@ -1,12 +1,14 @@
 //! Metadata and timestamp tests.
 
-use std::os::unix::fs::{FileExt, OpenOptionsExt};
+use std::io::{self, ErrorKind};
+use std::os::unix::fs::{DirBuilderExt, FileExt, MetadataExt, OpenOptionsExt};
 use std::time::{Duration, UNIX_EPOCH};
 use tokio::time::sleep;
 use turmoil::fs::shim::std::fs::{
-    create_dir, create_dir_all, exists, metadata, remove_file, symlink, symlink_metadata, write,
-    OpenOptions,
+    create_dir, create_dir_all, exists, metadata, remove_file, set_permissions, symlink_metadata,
+    write, DirBuilder, File, FileTimes, OpenOptions, Permissions,
 };
+use turmoil::fs::shim::std::os::unix::fs::symlink;
 use turmoil::{Builder, Result};
 
 #[test]
@@ -200,30 +202,155 @@ fn permissions_from_metadata() -> Result {
     sim.run()
 }
 
+/// A mode given for a new file or directory goes through the umask that
+/// processes start with, 022, as on Linux. Opening what exists changes
+/// nothing. Of the bits above the permissions, a new directory takes only
+/// the sticky one.
+#[test]
+fn creation_modes_go_through_the_umask() -> Result {
+    let mut sim = Builder::new().build();
+    sim.client("test", async {
+        let mode = |path: &str| metadata(path).map(|meta| meta.permissions().mode() & 0o7777);
+        let create = |mode: u32, path: &str| {
+            let mut options = OpenOptions::new();
+            options.write(true).create(true).mode(mode);
+            options.open(path).map(drop)
+        };
+        let build = |mode: u32, path: &str| {
+            let mut builder = DirBuilder::new();
+            builder.mode(mode).recursive(true).create(path)
+        };
+        create(0o777, "/open")?;
+        create(0o604, "/odd")?;
+        create(0o777, "/odd")?;
+        create(0o7777, "/every")?;
+        build(0o777, "/wide")?;
+        build(0o700, "/deep/er")?;
+        build(0o7777, "/whole")?;
+        let files = [mode("/open")?, mode("/odd")?, mode("/every")?];
+        assert_eq!(files, [0o755, 0o604, 0o7755]);
+        let dirs = [mode("/wide")?, mode("/deep")?, mode("/deep/er")?];
+        assert_eq!((dirs, mode("/whole")?), ([0o755, 0o700, 0o700], 0o1755));
+
+        // What kind of file is made is not for the mode to say.
+        create(0o040600, "/file")?;
+        build(0o100700, "/dir")?;
+        let whole = |path: &str| metadata(path).map(|meta| meta.mode());
+        assert_eq!([whole("/file")?, whole("/dir")?], [0o100600, 0o040700]);
+        Ok(())
+    });
+    sim.run()
+}
+
+/// The mode that metadata reports holds the kind of the file as well, and
+/// setting a mode changes only what a chmod can. A file is read-only when
+/// nobody may write it, and clearing that lets everybody.
+#[test]
+fn permissions_are_those_of_std() -> Result {
+    let mut sim = Builder::new().build();
+    sim.client("test", async {
+        create_dir("/dir")?;
+        write("/dir/file", b"x")?;
+        symlink("/dir/file", "/link")?;
+        let whole = |path: &str| symlink_metadata(path).map(|meta| meta.permissions().mode());
+        let modes = [whole("/dir/file")?, whole("/dir")?, whole("/link")?];
+        assert_eq!(modes, [0o100644, 0o040755, 0o120777]);
+
+        set_permissions("/dir/file", Permissions::from_mode(0o040464))?;
+        let mut perm = metadata("/dir/file")?.permissions();
+        assert_eq!((perm.mode(), perm.readonly()), (0o100464, false));
+        perm.set_readonly(true);
+        assert_eq!((perm.mode(), perm.readonly()), (0o100444, true));
+        perm.set_readonly(false);
+        assert_eq!(perm.mode(), 0o100666);
+        Ok(())
+    });
+    sim.run()
+}
+
+/// A handle sets the permissions and the times of its file. A time left
+/// out stays as it is, and setting none changes nothing. A time before the
+/// epoch, which the simulation cannot hold, becomes the epoch.
+#[test]
+fn handle_sets_permissions_and_times() -> Result {
+    let mut sim = Builder::new().build();
+    sim.client("test", async {
+        let file = File::create("/file")?;
+        let at = |secs: u64| UNIX_EPOCH + Duration::from_secs(secs);
+        let times = || {
+            let meta = file.metadata()?;
+            io::Result::Ok((meta.accessed()?, meta.modified()?))
+        };
+        let changed = || {
+            let meta = file.metadata()?;
+            io::Result::Ok((meta.ctime(), meta.ctime_nsec()))
+        };
+
+        file.set_permissions(Permissions::from_mode(0o600))?;
+        assert_eq!(file.metadata()?.permissions().mode(), 0o100600);
+
+        let accessed = FileTimes::new().set_accessed(at(100));
+        file.set_times(accessed.set_modified(at(200)))?;
+        assert_eq!(times()?, (at(100), at(200)));
+        file.set_modified(at(300))?;
+        assert_eq!(times()?, (at(100), at(300)));
+
+        let before = changed()?;
+        sleep(Duration::from_secs(1)).await;
+        file.set_times(FileTimes::new())?;
+        assert_eq!((times()?, changed()?), ((at(100), at(300)), before));
+        file.set_modified(UNIX_EPOCH - Duration::from_secs(1))?;
+        assert_eq!(times()?, (at(100), UNIX_EPOCH));
+        assert!(changed()? > before);
+        Ok(())
+    });
+    sim.run()
+}
+
 #[test]
 fn exists_function() -> Result {
     let mut sim = Builder::new().build();
     sim.client("test", async {
         // Non-existent paths
-        assert!(!exists("/nonexistent"));
-        assert!(!exists("/data/file.txt"));
+        assert!(!exists("/nonexistent")?);
+        assert!(!exists("/data/file.txt")?);
 
         // Create directory
         create_dir("/data")?;
-        assert!(exists("/data"));
+        assert!(exists("/data")?);
 
         // Create file
         write("/data/file.txt", b"hello")?;
-        assert!(exists("/data/file.txt"));
+        assert!(exists("/data/file.txt")?);
 
         // Create symlink to existing target
         symlink("/data/file.txt", "/link")?;
-        assert!(exists("/link"));
+        assert!(exists("/link")?);
 
         // Symlink to non-existent target should return false
         symlink("/nonexistent", "/broken_link")?;
-        assert!(!exists("/broken_link"));
+        assert!(!exists("/broken_link")?);
 
+        Ok(())
+    });
+    sim.run()
+}
+
+/// `exists` tells a path that is not there from one that cannot be looked
+/// up, as `std::fs::exists` does.
+#[test]
+fn exists_reports_what_is_in_the_way() -> Result {
+    let mut sim = Builder::new().build();
+    sim.client("test", async {
+        write("/file", b"x")?;
+        symlink("/loop", "/loop")?;
+        assert!(!exists("/missing/below")?);
+        let blocked = exists("/file/below").unwrap_err();
+        assert_eq!(blocked.kind(), ErrorKind::NotADirectory);
+        assert_eq!(
+            exists("/loop").unwrap_err().raw_os_error(),
+            Some(libc::ELOOP)
+        );
         Ok(())
     });
     sim.run()

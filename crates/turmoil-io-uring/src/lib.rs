@@ -77,12 +77,13 @@ pub use tokio::io::Interest;
 
 #[cfg(feature = "fs")]
 mod runtime {
-    use crate::host::IoUringContext;
-    use crate::{cqueue, sim, squeue};
+    use crate::host::RingId;
+    use crate::{cqueue, squeue};
     use std::io;
     use std::os::fd::{AsRawFd, RawFd};
 
     /// Simulated `io_uring` instance.
+    /// Queue operations require the host that created the ring to be entered.
     ///
     /// Mirrors [`io_uring::IoUring`](https://docs.rs/io-uring/0.7/io_uring/struct.IoUring.html).
     /// The two type parameters exist for source-level compatibility with the
@@ -94,9 +95,7 @@ mod runtime {
         S: squeue::EntryMarker,
         C: cqueue::EntryMarker,
     {
-        /// Sim-allocated id used to look up [`sim::RingState`] on the
-        /// host's `IoUringHostState` and to back [`AsRawFd`].
-        ring_fd: RawFd,
+        id: RingId,
         params: Parameters,
         _markers: std::marker::PhantomData<(S, C)>,
     }
@@ -184,13 +183,8 @@ mod runtime {
                 ));
             }
             let depth = entries.next_power_of_two().max(1);
-            let ring_fd = IoUringContext::current(|ctx| {
-                let fd = ctx.io_uring.alloc_ring_fd();
-                ctx.io_uring.rings.insert(fd, sim::RingState::new(depth));
-                fd
-            });
             Ok(IoUring {
-                ring_fd,
+                id: RingId::register(depth)?,
                 params: Parameters {
                     sq_entries: depth,
                     cq_entries: depth * 2,
@@ -206,7 +200,7 @@ mod runtime {
 
         /// Submission-side handle requiring exclusive access to the ring.
         pub fn submission(&mut self) -> squeue::SubmissionQueue<'_> {
-            squeue::SubmissionQueue::new(self.ring_fd)
+            squeue::SubmissionQueue::new(&self.id)
         }
 
         /// Submission-side handle that allows shared access. Caller asserts
@@ -218,12 +212,12 @@ mod runtime {
         /// at any time. The simulation does not currently enforce this;
         /// it trusts the caller, same as the real `io-uring` crate.
         pub unsafe fn submission_shared(&self) -> squeue::SubmissionQueue<'_> {
-            squeue::SubmissionQueue::new(self.ring_fd)
+            squeue::SubmissionQueue::new(&self.id)
         }
 
         /// Completion-side handle requiring exclusive access to the ring.
         pub fn completion(&mut self) -> cqueue::CompletionQueue<'_> {
-            cqueue::CompletionQueue::new(self.ring_fd)
+            cqueue::CompletionQueue::new(&self.id)
         }
 
         /// Completion-side handle that allows shared access. Caller asserts
@@ -233,12 +227,12 @@ mod runtime {
         ///
         /// Same single-consumer contract as the real crate.
         pub unsafe fn completion_shared(&self) -> cqueue::CompletionQueue<'_> {
-            cqueue::CompletionQueue::new(self.ring_fd)
+            cqueue::CompletionQueue::new(&self.id)
         }
 
         /// [`Submitter`] handle for this ring.
         pub fn submitter(&self) -> super::Submitter<'_> {
-            super::Submitter::new(self.ring_fd)
+            super::Submitter::new(&self.id)
         }
 
         /// Convenience: equivalent to `self.submitter().submit()`.
@@ -258,15 +252,7 @@ mod runtime {
         C: cqueue::EntryMarker,
     {
         fn drop(&mut self) {
-            IoUringContext::current_if_set(|ctx| {
-                // Wake any AsyncFd::readable() callers before removing
-                // the ring so they observe NotFound on the next snapshot
-                // instead of sleeping until their cached deadline.
-                if let Some(ring) = ctx.io_uring.rings.get(&self.ring_fd) {
-                    ring.cq_notify.notify_waiters();
-                }
-                ctx.io_uring.rings.swap_remove(&self.ring_fd);
-            });
+            self.id.close();
         }
     }
 
@@ -278,7 +264,7 @@ mod runtime {
         C: cqueue::EntryMarker,
     {
         fn as_raw_fd(&self) -> RawFd {
-            self.ring_fd
+            self.id.fd
         }
     }
 }

@@ -192,9 +192,13 @@ impl<'a> Sim<'a> {
     }
 
     /// Bounces the resolved hosts. The software is restarted.
+    ///
+    /// For filesystem simulation (requires `unstable-fs` feature), this is
+    /// a process restart rather than a crash: the files the old software had
+    /// open are closed, and unsynced writes stay where they are.
     pub fn bounce(&mut self, addrs: impl ToIpAddrs) {
         self.run_with_hosts(addrs, |addr, rt| {
-            rt.bounce();
+            rt.bounce(|| World::current(|world| world.current_host().release()));
 
             tracing::trace!(target: TRACING_TARGET, addr = ?addr, "Bounce");
         });

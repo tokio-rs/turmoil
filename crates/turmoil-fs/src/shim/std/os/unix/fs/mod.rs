@@ -4,13 +4,24 @@
 //! for the shimmed [`File`] and [`OpenOptions`] types.
 //!
 //! Users import these traits from `std::os::unix::fs` as normal - they work
-//! with our shimmed types because we implement the real traits.
+//! with our shimmed types because we implement the real traits. What that
+//! module has besides traits is here: [`symlink`].
 //!
 //! [`File`]: crate::shim::std::fs::File
 //! [`OpenOptions`]: crate::shim::std::fs::OpenOptions
 
-use crate::shim::std::fs::{File, OpenOptions};
+use crate::shim::std::fs::{c_path, File, OpenOptions};
+use crate::FsContext;
 use std::io::Result;
+use std::path::Path;
+
+/// Creates a new symbolic link on the filesystem.
+///
+/// The `link` path will be a symbolic link pointing to the `original` path.
+pub fn symlink<P: AsRef<Path>, Q: AsRef<Path>>(original: P, link: Q) -> Result<()> {
+    let (original, link) = (c_path(&original)?, c_path(&link)?);
+    FsContext::current(|ctx| ctx.fs.tree.symlink(original, link, ctx.now))
+}
 
 #[cfg(unix)]
 impl std::os::unix::fs::FileExt for File {

@@ -1,12 +1,12 @@
 //! Submitter handle mirroring [`io_uring::Submitter`](https://docs.rs/io-uring/0.7/io_uring/struct.Submitter.html).
 
-use super::host::{with_fs_and_io_uring, IoUringHostState};
-use super::sim::PendingApply;
-use super::squeue::{Entry, OpKind};
+use super::host::RingId;
+use super::sim::{PendingApply, RingState, EINVAL};
+use super::squeue::OpKind;
 use super::types::SubmitArgs;
 use std::io;
-use std::os::fd::RawFd;
 use std::time::Duration;
+use turmoil_fs::FsState;
 
 /// Handle for the submit side of the ring.
 ///
@@ -16,16 +16,12 @@ use std::time::Duration;
 /// [`crate::cqueue::CompletionQueue`] iterator as simulated
 /// time advances past each timestamp.
 pub struct Submitter<'a> {
-    ring_fd: RawFd,
-    _lifetime: std::marker::PhantomData<&'a ()>,
+    ring: &'a RingId,
 }
 
 impl<'a> Submitter<'a> {
-    pub(crate) fn new(ring_fd: RawFd) -> Self {
-        Self {
-            ring_fd,
-            _lifetime: std::marker::PhantomData,
-        }
+    pub(crate) fn new(ring: &'a RingId) -> Self {
+        Self { ring }
     }
 
     /// Push every queued SQE into the in-flight set.
@@ -34,7 +30,7 @@ impl<'a> Submitter<'a> {
     /// which may submit fewer than queued). The simulation always
     /// accepts the entire SQ.
     pub fn submit(&self) -> io::Result<usize> {
-        with_fs_and_io_uring(|fs, iou, rng, now| schedule_pending(fs, iou, rng, now, self.ring_fd))
+        self.ring.with_fs(schedule_pending)
     }
 
     /// `submit()`, then in the real kernel block the calling thread
@@ -70,139 +66,34 @@ impl<'a> Submitter<'a> {
                 ));
             }
         }
-        with_fs_and_io_uring(|fs, iou, rng, now| schedule_pending(fs, iou, rng, now, self.ring_fd))
+        self.submit()
     }
 }
 
 /// Walk the ring's SQ; for each entry, sample latency and either
 /// schedule a future CQE or post an immediate `EINVAL` CQE for
 /// unsupported ops.
-fn schedule_pending(
-    fs: &mut turmoil_fs::FsState,
-    iou: &mut IoUringHostState,
-    rng: &mut dyn rand::RngCore,
-    now: Duration,
-    ring_fd: RawFd,
-) -> io::Result<usize> {
-    // Drain SQ first (single mutable borrow on the ring), then process
-    // each entry by re-borrowing the ring on demand. Latency sampling
-    // touches `&mut Fs`, so we cannot keep `&mut RingState` live
-    // across it.
-    let entries: Vec<Entry> = match iou.rings.get_mut(&ring_fd) {
-        Some(ring) => ring.sq.drain(..).collect(),
-        None => {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                "io_uring ring is no longer registered",
-            ));
-        }
-    };
-
-    let mut accepted = 0usize;
-    for entry in entries {
-        accepted += 1;
+fn schedule_pending(fs: &mut FsState, ring: &mut RingState, now: Duration) -> usize {
+    let accepted = ring.sq.len();
+    while let Some(entry) = ring.sq.pop_front() {
         if entry.flags.has_unsupported() {
-            let ring = iou.rings.get_mut(&ring_fd).expect("ring vanished");
-            ring.post_immediate_error(entry.user_data, libc_einval(), now);
+            ring.post_immediate_error(entry.user_data, -EINVAL, now);
             continue;
         }
         match entry.op {
-            OpKind::Read {
-                fd,
-                ptr,
-                len,
-                offset,
-            } => {
-                // Mirror shim::tokio::fs::apply_read_latency: O_DIRECT
-                // bypasses the cache; otherwise probe `access()` and
-                // bump the LRU via `insert()`. We sample latency with
-                // the resulting cache_hit so reads of recently-touched
-                // offsets are near-instant.
-                //
-                // Divergence: on real Linux, two reads at the same
-                // offset submitted in one batch both miss the cache
-                // until the first completes. Here, the second sees a
-                // hit because we insert at submit time. This matches
-                // how the existing tokio shim models the cache —
-                // the simulation is internally consistent with
-                // itself even where it differs from the kernel.
-                let direct_io = fs.direct_io_fds.contains(&fd);
-                let cache_hit = if direct_io {
-                    false
-                } else if let Some(path) = fs.open_handles.get(&fd).cloned() {
-                    if let Some(cache) = &mut fs.page_cache {
-                        let hit = cache.access(&path, offset, rng);
-                        cache.insert(&path, offset);
-                        hit
-                    } else {
-                        false
-                    }
-                } else {
-                    // Bad fd; let exec_read surface -EBADF later. No
-                    // sensible cache state to consult.
-                    false
-                };
-                let latency = fs.calculate_latency(cache_hit);
-                let ring = iou.rings.get_mut(&ring_fd).expect("ring vanished");
-                ring.schedule(
-                    entry.user_data,
-                    now + latency,
-                    PendingApply::Read {
-                        fd,
-                        ptr,
-                        len,
-                        offset,
-                    },
-                );
-            }
-            OpKind::Write {
-                fd,
-                ptr,
-                len,
-                offset,
-            } => {
-                // Mirror shim::tokio::fs::apply_write_latency: writes
-                // populate the cache (write-through) unless O_DIRECT.
-                // Latency itself never sees a cache hit on writes —
-                // they always wait for disk.
-                let direct_io = fs.direct_io_fds.contains(&fd);
-                if !direct_io {
-                    if let Some(path) = fs.open_handles.get(&fd).cloned() {
-                        if let Some(cache) = &mut fs.page_cache {
-                            cache.insert(&path, offset);
-                        }
-                    }
-                }
-                let latency = fs.calculate_latency(false);
-                let ring = iou.rings.get_mut(&ring_fd).expect("ring vanished");
-                ring.schedule(
-                    entry.user_data,
-                    now + latency,
-                    PendingApply::Write {
-                        fd,
-                        ptr,
-                        len,
-                        offset,
-                    },
-                );
+            OpKind::Transfer(io) => {
+                let io = io.issue(fs);
+                let when = now + io.latency(fs);
+                ring.schedule(entry.user_data, when, PendingApply::Transfer(io));
             }
             OpKind::Fsync { fd } => {
                 let latency = fs.calculate_latency(false);
-                let ring = iou.rings.get_mut(&ring_fd).expect("ring vanished");
                 ring.schedule(entry.user_data, now + latency, PendingApply::Fsync { fd });
             }
             OpKind::AsyncCancel { target_user_data } => {
-                let ring = iou.rings.get_mut(&ring_fd).expect("ring vanished");
                 ring.cancel(entry.user_data, target_user_data, now);
             }
         }
     }
-    Ok(accepted)
-}
-
-/// `EINVAL` as a negative `errno`, the form CQE results take for
-/// errors. Linux's value; we use the constant directly to avoid
-/// pulling in libc on non-Linux targets.
-fn libc_einval() -> i32 {
-    -22
+    accepted
 }

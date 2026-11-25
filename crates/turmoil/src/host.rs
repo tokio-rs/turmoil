@@ -91,6 +91,15 @@ impl Host {
         }
     }
 
+    /// Releases what the host's software still held when it stopped, as
+    /// the OS does for a process that exits.
+    pub(crate) fn release(&self) {
+        #[cfg(feature = "unstable-fs")]
+        self.fs.close_all();
+        #[cfg(feature = "unstable-io_uring")]
+        self.io_uring.lock().unwrap().crash();
+    }
+
     #[cfg(not(feature = "unstable-fs"))]
     pub(crate) fn new(
         nodename: impl Into<String>,
