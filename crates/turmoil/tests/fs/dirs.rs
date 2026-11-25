@@ -483,3 +483,25 @@ fn open_directory_for_writing_fails() -> Result {
     });
     sim.run()
 }
+
+fn create_dir_all_fails_on_existing_file() -> Result {
+    let mut sim = Builder::new().build();
+    sim.client("test", async {
+        write("/file", b"data")?;
+
+        let err = create_dir_all("/file").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        let err = create_dir_all("/file/sub").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::NotADirectory);
+
+        // The file is untouched and still not a directory.
+        assert!(metadata("/file")?.is_file());
+        assert!(read_dir("/file").is_err());
+
+        // Existing directories keep succeeding.
+        create_dir_all("/dir/a")?;
+        create_dir_all("/dir/a")?;
+        Ok(())
+    });
+    sim.run()
+}
