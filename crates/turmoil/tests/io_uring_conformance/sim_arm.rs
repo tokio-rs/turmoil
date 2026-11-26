@@ -195,6 +195,100 @@ fn drain_n_cqes_all_accounted_for() -> Result {
     sim.run()
 }
 
+// The tests below pin when pushed entries become visible to `submit()`.
+// The real crate publishes the userspace tail on `sync()` and on drop of
+// the submission handle, so a handle that is still alive and unsynced
+// contributes nothing to a concurrent `submit()`.
+
+fn fsync_entry(user_data: u64) -> turmoil::io_uring::squeue::Entry {
+    opcode::Fsync::new(types::Fd(-1))
+        .build()
+        .user_data(user_data)
+}
+
+#[test]
+fn unsynced_shared_handle_submits_nothing() -> Result {
+    let mut sim = Builder::new().build();
+    sim.client("c", async {
+        let mut ring = IoUring::new(4).expect("ring");
+        {
+            let mut sq = unsafe { ring.submission_shared() };
+            unsafe { sq.push(&fsync_entry(1)).unwrap() };
+            assert_eq!(sq.len(), 1);
+            assert_eq!(ring.submit().unwrap(), 0, "tail was never published");
+            sq.sync();
+            assert_eq!(ring.submit().unwrap(), 1);
+        }
+        let cqe = drain_one(&mut ring).await;
+        assert_eq!(cqe.user_data(), 1);
+        assert_eq!(cqe.result(), -9, "expected -EBADF");
+        Ok(())
+    });
+    sim.run()
+}
+
+#[test]
+fn dropping_the_handle_publishes_entries() -> Result {
+    let mut sim = Builder::new().build();
+    sim.client("c", async {
+        let mut ring = IoUring::new(4).expect("ring");
+        {
+            let mut sq = unsafe { ring.submission_shared() };
+            unsafe { sq.push(&fsync_entry(7)).unwrap() };
+            assert_eq!(ring.submit().unwrap(), 0);
+        }
+        assert_eq!(ring.submit().unwrap(), 1);
+        let cqe = drain_one(&mut ring).await;
+        assert_eq!(cqe.user_data(), 7);
+        Ok(())
+    });
+    sim.run()
+}
+
+#[test]
+fn staged_entries_count_toward_capacity() -> Result {
+    let mut sim = Builder::new().build();
+    sim.client("c", async {
+        let mut ring = IoUring::new(2).expect("ring");
+        let mut sq = ring.submission();
+        unsafe {
+            sq.push(&fsync_entry(1)).unwrap();
+            assert!(!sq.is_full());
+            sq.push(&fsync_entry(2)).unwrap();
+            assert!(sq.is_full());
+            assert!(sq.push(&fsync_entry(3)).is_err());
+        }
+        assert_eq!(sq.len(), 2);
+        drop(sq);
+        assert_eq!(ring.submit().unwrap(), 2);
+        Ok(())
+    });
+    sim.run()
+}
+
+#[test]
+fn sync_publishes_in_push_order() -> Result {
+    let mut sim = Builder::new().build();
+    sim.client("c", async {
+        let mut ring = IoUring::new(4).expect("ring");
+        let mut sq = unsafe { ring.submission_shared() };
+        unsafe { sq.push(&fsync_entry(1)).unwrap() };
+        sq.sync();
+        unsafe { sq.push(&fsync_entry(2)).unwrap() };
+        assert_eq!(ring.submit().unwrap(), 1, "only the synced entry");
+        drop(sq);
+        assert_eq!(ring.submit().unwrap(), 1, "the entry published on drop");
+        let mut seen = vec![
+            drain_one(&mut ring).await.user_data(),
+            drain_one(&mut ring).await.user_data(),
+        ];
+        seen.sort_unstable();
+        assert_eq!(seen, vec![1, 2]);
+        Ok(())
+    });
+    sim.run()
+}
+
 struct RingFdHandle(std::os::fd::RawFd);
 impl std::os::fd::AsRawFd for RingFdHandle {
     fn as_raw_fd(&self) -> std::os::fd::RawFd {
