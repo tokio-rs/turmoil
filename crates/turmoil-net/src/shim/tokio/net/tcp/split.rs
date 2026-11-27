@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::io::{AsyncRead, AsyncWrite, Interest, ReadBuf, Ready};
 
 use crate::shim::tokio::net::tcp::stream::TcpStream;
 
@@ -29,6 +29,16 @@ pub(crate) fn split(stream: &mut TcpStream) -> (ReadHalf<'_>, WriteHalf<'_>) {
 }
 
 impl ReadHalf<'_> {
+    /// See [`TcpStream::ready`].
+    pub async fn ready(&self, interest: Interest) -> io::Result<Ready> {
+        self.0.ready(interest).await
+    }
+
+    /// See [`TcpStream::readable`].
+    pub async fn readable(&self) -> io::Result<()> {
+        self.0.readable().await
+    }
+
     pub fn try_read(&self, buf: &mut [u8]) -> io::Result<usize> {
         self.0.try_read(buf)
     }
@@ -62,6 +72,16 @@ impl ReadHalf<'_> {
 }
 
 impl WriteHalf<'_> {
+    /// See [`TcpStream::ready`].
+    pub async fn ready(&self, interest: Interest) -> io::Result<Ready> {
+        self.0.ready(interest).await
+    }
+
+    /// See [`TcpStream::writable`].
+    pub async fn writable(&self) -> io::Result<()> {
+        self.0.writable().await
+    }
+
     pub fn try_write(&self, buf: &[u8]) -> io::Result<usize> {
         self.0.try_write(buf)
     }

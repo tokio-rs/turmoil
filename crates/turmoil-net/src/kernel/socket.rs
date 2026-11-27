@@ -247,6 +247,10 @@ pub struct Tcb {
     /// return `ConnectionReset`; distinguishes the error from a clean
     /// `Closed` transition.
     pub reset: bool,
+    /// Error surfaced after `reset`. Linux reports `EPIPE` for a RST
+    /// that lands in `CloseWait` (the peer already finished) and
+    /// `ECONNRESET` otherwise.
+    pub reset_error: std::io::ErrorKind,
     /// Connection was aborted by retransmit exhaustion. Further ops
     /// return `TimedOut`, matching Linux's `ETIMEDOUT` from
     /// `tcp_retries2`. Distinct from `reset` because retx exhaustion

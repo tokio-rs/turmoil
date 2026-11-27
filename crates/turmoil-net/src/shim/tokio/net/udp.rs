@@ -5,22 +5,28 @@ use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::task::{Context, Poll, Waker};
 
-use tokio::io::ReadBuf;
+use tokio::io::{Interest, ReadBuf, Ready};
 
 use crate::kernel::{Addr, Fd, SocketOption, SocketOptionKind, Type};
+use crate::shim::tokio::net::tcp::stream::to_ready;
+use crate::shim::tokio::net::wait::Direction;
 use crate::shim::tokio::net::ToSocketAddrs;
 use crate::sys;
 
 #[derive(Debug)]
 pub struct UdpSocket {
     fd: Fd,
+    read: Direction,
 }
 
 impl UdpSocket {
     pub async fn bind<A: ToSocketAddrs>(addr: A) -> io::Result<Self> {
         let addr = addr.to_socket_addr()?;
         let fd = sys(|k| k.bind(&Addr::Inet(addr), Type::Dgram))?;
-        Ok(Self { fd })
+        Ok(Self {
+            fd,
+            read: Direction::new(),
+        })
     }
 
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
@@ -107,6 +113,53 @@ impl UdpSocket {
             Poll::Ready(Ok(Addr::Unix(_))) => panic!("UdpSocket is Addr::Inet"),
             Poll::Ready(Err(e)) => Err(e),
             Poll::Pending => Err(io::ErrorKind::WouldBlock.into()),
+        }
+    }
+
+    /// Waits for any of the requested ready states. Sends never block,
+    /// so the socket is always writable.
+    pub async fn ready(&self, interest: Interest) -> io::Result<Ready> {
+        let waiter = (interest.is_readable() || interest.is_error()).then(|| self.read.waiter());
+        poll_fn(|cx| {
+            if let Some(waiter) = &waiter {
+                waiter.set(cx.waker());
+            }
+            self.poll_ready(interest)
+        })
+        .await
+    }
+
+    /// Waits until a datagram is queued.
+    pub async fn readable(&self) -> io::Result<()> {
+        self.ready(Interest::READABLE).await.map(|_| ())
+    }
+
+    /// Waits until a send would not block, which is immediately.
+    pub async fn writable(&self) -> io::Result<()> {
+        self.ready(Interest::WRITABLE).await.map(|_| ())
+    }
+
+    pub fn poll_recv_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.read
+            .poll(cx, |_| self.poll_ready(Interest::READABLE))
+            .map_ok(|_| ())
+    }
+
+    pub fn poll_send_ready(&self, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.poll_ready(Interest::WRITABLE).map_ok(|_| ())
+    }
+
+    fn poll_ready(&self, interest: Interest) -> Poll<io::Result<Ready>> {
+        let ready = sys(|k| {
+            let ready = to_ready(k.readiness(self.fd)?, interest);
+            if ready.is_empty() && (interest.is_readable() || interest.is_error()) {
+                k.register_read_waker(self.fd, self.read.waker())?;
+            }
+            Ok(ready)
+        });
+        match ready {
+            Ok(ready) if ready.is_empty() => Poll::Pending,
+            ready => Poll::Ready(ready),
         }
     }
 
