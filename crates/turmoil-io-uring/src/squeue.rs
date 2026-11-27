@@ -134,9 +134,16 @@ unsafe impl Sync for OpKind {}
 /// Submission queue handle. Borrows the ring for the duration of its
 /// existence (or, for `submission_shared`, asserts unique writer
 /// access — see [`crate::IoUring::submission_shared`]).
+///
+/// Like the real crate, pushed entries are not visible to
+/// [`crate::Submitter::submit`] until the handle publishes them, either
+/// through [`SubmissionQueue::sync`] or when the handle is dropped.
 #[cfg(feature = "fs")]
 pub struct SubmissionQueue<'a> {
     ring_fd: RawFd,
+    /// Entries pushed through this handle that have not been published
+    /// to the ring yet.
+    staged: Vec<Entry>,
     _lifetime: std::marker::PhantomData<&'a ()>,
 }
 
@@ -157,6 +164,7 @@ impl<'a> SubmissionQueue<'a> {
     pub(crate) fn new(ring_fd: RawFd) -> Self {
         Self {
             ring_fd,
+            staged: Vec::new(),
             _lifetime: std::marker::PhantomData,
         }
     }
@@ -168,24 +176,31 @@ impl<'a> SubmissionQueue<'a> {
     /// Mirrors the real crate's contract: the caller must be the sole
     /// writer of the SQ. The simulation does not currently enforce
     /// this invariant.
+    ///
+    /// The entry stays private to this handle until [`Self::sync`] runs
+    /// or the handle is dropped.
     pub unsafe fn push(&mut self, entry: &Entry) -> Result<(), PushError> {
+        let staged = self.staged.len();
         IoUringContext::current(|ctx| {
-            let ring = ctx.io_uring.rings.get_mut(&self.ring_fd).ok_or(PushError)?;
-            if ring.sq.len() >= ring.depth as usize {
+            let ring = ctx.io_uring.rings.get(&self.ring_fd).ok_or(PushError)?;
+            if ring.sq.len() + staged >= ring.depth as usize {
                 return Err(PushError);
             }
-            ring.sq.push_back(entry.clone());
             Ok(())
-        })
+        })?;
+        self.staged.push(entry.clone());
+        Ok(())
     }
 
-    /// Number of entries currently queued (not yet submitted).
+    /// Number of entries currently queued (not yet submitted), including
+    /// entries pushed through this handle that are not yet published.
     pub fn len(&self) -> usize {
+        let staged = self.staged.len();
         IoUringContext::current(|ctx| {
             ctx.io_uring
                 .rings
                 .get(&self.ring_fd)
-                .map(|r| r.sq.len())
+                .map(|r| r.sq.len() + staged)
                 .unwrap_or(0)
         })
     }
@@ -197,11 +212,12 @@ impl<'a> SubmissionQueue<'a> {
 
     /// Whether the SQ is at its configured depth.
     pub fn is_full(&self) -> bool {
+        let staged = self.staged.len();
         IoUringContext::current(|ctx| {
             ctx.io_uring
                 .rings
                 .get(&self.ring_fd)
-                .map(|r| r.sq.len() >= r.depth as usize)
+                .map(|r| r.sq.len() + staged >= r.depth as usize)
                 .unwrap_or(true)
         })
     }
@@ -217,9 +233,27 @@ impl<'a> SubmissionQueue<'a> {
         })
     }
 
-    /// No-op in the simulation; mirrors the real crate's interface
-    /// where it synchronizes the userspace tail with the kernel head.
-    pub fn sync(&mut self) {}
+    /// Publish the entries pushed through this handle so the next
+    /// `submit()` sees them. Mirrors the real crate, where this stores
+    /// the userspace tail for the kernel to read.
+    pub fn sync(&mut self) {
+        if self.staged.is_empty() {
+            return;
+        }
+        let staged = std::mem::take(&mut self.staged);
+        IoUringContext::current_if_set(|ctx| {
+            if let Some(ring) = ctx.io_uring.rings.get_mut(&self.ring_fd) {
+                ring.sq.extend(staged);
+            }
+        });
+    }
+}
+
+#[cfg(feature = "fs")]
+impl Drop for SubmissionQueue<'_> {
+    fn drop(&mut self) {
+        self.sync();
+    }
 }
 
 mod private {
