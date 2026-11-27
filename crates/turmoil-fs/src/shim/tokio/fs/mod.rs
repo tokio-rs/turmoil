@@ -26,84 +26,37 @@
 //! ```
 
 use crate::shim::std::fs as sync_fs;
-use crate::FsContext;
-use rand::RngCore;
-use std::io::Result;
-use std::path::Path;
+use crate::shim::std::os::unix::fs as sync_unix_fs;
+use crate::{Access, FsContext, FsState, Written};
+use std::ffi::OsString;
+use std::io::{Read, Result, Seek, SeekFrom, Write};
+use std::os::fd::{AsRawFd, RawFd};
+use std::os::unix::fs::{DirBuilderExt, DirEntryExt};
+use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use std::time::{Duration, SystemTime};
+use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf};
+
+async fn delay(latency: Duration) {
+    if !latency.is_zero() {
+        tokio::time::sleep(latency).await;
+    }
+}
 
 /// Apply I/O latency if configured (assumes cache miss).
-///
-/// This uses tokio's simulated time, so it doesn't slow down tests.
 async fn apply_io_latency() {
-    let latency = FsContext::current(|ctx| ctx.fs.calculate_latency(false));
-    if !latency.is_zero() {
-        tokio::time::sleep(latency).await;
-    }
+    delay(FsContext::current(|ctx| ctx.fs.calculate_latency(false))).await;
 }
 
-/// Apply I/O latency for a file read operation, checking page cache.
-///
-/// - Checks if the page is cached (returns cache hit = fast latency)
-/// - Inserts the page into cache after read (if not direct_io)
-/// - Direct I/O always bypasses cache
-async fn apply_read_latency(path: &Path, offset: u64, direct_io: bool) {
-    let latency = FsContext::current(|ctx| {
-        let cache_hit = if !direct_io {
-            // Split-borrow: cache.access wants `&mut self.rng` but we
-            // already have `&mut self.page_cache`. The two are
-            // disjoint fields on `Fs`; pull rng out via raw pointer.
-            // SAFETY: single-threaded sim; rng and page_cache are
-            // distinct fields, so no aliasing.
-            let rng_ptr: *mut dyn RngCore = &mut *ctx.fs.rng;
-            if let Some(cache) = &mut ctx.fs.page_cache {
-                let rng = unsafe { &mut *rng_ptr };
-                let hit = cache.access(path, offset, rng);
-                // Insert into cache after read (even on hit, to update LRU)
-                cache.insert(path, offset);
-                hit
-            } else {
-                false
-            }
-        } else {
-            false // O_DIRECT always misses cache
-        };
+// The types `tokio::fs` takes from `std::fs`.
+pub use sync_fs::{FileType, Metadata, Permissions};
 
-        ctx.fs.calculate_latency(cache_hit)
-    });
-
-    if !latency.is_zero() {
-        tokio::time::sleep(latency).await;
-    }
-}
-
-/// Apply I/O latency for a file write operation, populating page cache.
-///
-/// - Writes always populate the cache (write-through)
-/// - Direct I/O bypasses cache entirely
-async fn apply_write_latency(path: &Path, offset: u64, direct_io: bool) {
-    let latency = FsContext::current(|ctx| {
-        // Writes are always cache misses (data goes to disk)
-        // but we populate the cache for subsequent reads
-        if !direct_io {
-            if let Some(cache) = &mut ctx.fs.page_cache {
-                cache.insert(path, offset);
-            }
-        }
-
-        // Writes always incur full latency (write-through to disk)
-        ctx.fs.calculate_latency(false)
-    });
-
-    if !latency.is_zero() {
-        tokio::time::sleep(latency).await;
-    }
-}
-
-// Re-export types that are the same
-pub use sync_fs::{DirEntry, FileType, Metadata, Permissions, ReadDir};
+/// Largest read or write one call makes, as with `tokio::fs::File`.
+const DEFAULT_MAX_BUF_SIZE: usize = 2 * 1024 * 1024;
 
 /// Async version of [`std::fs::canonicalize`].
-pub async fn canonicalize<P: AsRef<Path>>(path: P) -> Result<std::path::PathBuf> {
+pub async fn canonicalize<P: AsRef<Path>>(path: P) -> Result<PathBuf> {
     sync_fs::canonicalize(path)
 }
 
@@ -155,13 +108,71 @@ pub async fn read<P: AsRef<Path>>(path: P) -> Result<Vec<u8>> {
 pub async fn read_dir<P: AsRef<Path>>(path: P) -> Result<ReadDir> {
     let result = sync_fs::read_dir(&path);
     apply_io_latency().await;
-    result
+    result.map(ReadDir)
+}
+
+/// Reads the entries in a directory.
+///
+/// Returned by [`read_dir`]. Drop-in replacement for `tokio::fs::ReadDir`.
+#[derive(Debug)]
+pub struct ReadDir(sync_fs::ReadDir);
+
+impl ReadDir {
+    /// Returns the next entry in the directory stream.
+    pub async fn next_entry(&mut self) -> Result<Option<DirEntry>> {
+        let entry = self.0.next().transpose()?;
+        Ok(entry.map(DirEntry))
+    }
+
+    /// Polls for the next directory entry in the stream.
+    pub fn poll_next_entry(&mut self, _cx: &mut Context<'_>) -> Poll<Result<Option<DirEntry>>> {
+        let entry = self.0.next().transpose();
+        Poll::Ready(entry.map(|entry| entry.map(DirEntry)))
+    }
+}
+
+/// Entries returned by the [`ReadDir`] stream.
+///
+/// Drop-in replacement for `tokio::fs::DirEntry`.
+#[derive(Debug)]
+pub struct DirEntry(sync_fs::DirEntry);
+
+impl DirEntry {
+    /// Returns the underlying `d_ino` field in the contained `dirent`.
+    pub fn ino(&self) -> u64 {
+        self.0.ino()
+    }
+
+    /// Returns the full path to the file that this entry represents.
+    pub fn path(&self) -> PathBuf {
+        self.0.path()
+    }
+
+    /// Returns the bare file name of this directory entry.
+    pub fn file_name(&self) -> OsString {
+        self.0.file_name()
+    }
+
+    /// Returns the metadata for the file that this entry points at, without
+    /// following symlinks.
+    ///
+    /// This operation incurs I/O latency if configured.
+    pub async fn metadata(&self) -> Result<Metadata> {
+        let result = self.0.metadata();
+        apply_io_latency().await;
+        result
+    }
+
+    /// Returns the file type for the file that this entry points at.
+    pub async fn file_type(&self) -> Result<FileType> {
+        self.0.file_type()
+    }
 }
 
 /// Async version of [`std::fs::read_link`].
 ///
 /// This operation incurs I/O latency if configured.
-pub async fn read_link<P: AsRef<Path>>(path: P) -> Result<std::path::PathBuf> {
+pub async fn read_link<P: AsRef<Path>>(path: P) -> Result<PathBuf> {
     let result = sync_fs::read_link(&path);
     apply_io_latency().await;
     result
@@ -203,7 +214,7 @@ pub async fn set_permissions<P: AsRef<Path>>(path: P, perm: Permissions) -> Resu
 
 /// Async version of creating a symlink.
 pub async fn symlink<P: AsRef<Path>, Q: AsRef<Path>>(original: P, link: Q) -> Result<()> {
-    sync_fs::symlink(original, link)
+    sync_unix_fs::symlink(original, link)
 }
 
 /// Async version of [`std::fs::symlink_metadata`].
@@ -224,9 +235,10 @@ pub async fn write<P: AsRef<Path>, C: AsRef<[u8]>>(path: P, contents: C) -> Resu
     result
 }
 
-/// Returns `Ok(true)` if the path exists.
+/// Returns `Ok(true)` if the path exists, and `Ok(false)` if it does not.
+/// Whatever else keeps the path from being looked up is an error.
 pub async fn try_exists<P: AsRef<Path>>(path: P) -> Result<bool> {
-    Ok(sync_fs::metadata(path).is_ok())
+    sync_fs::exists(path)
 }
 
 /// Syncs a directory (turmoil-specific, not in tokio::fs).
@@ -240,39 +252,109 @@ pub async fn sync_dir<P: AsRef<Path>>(path: P) -> Result<()> {
     result
 }
 
+/// Timestamps for [`File::set_times`].
+///
+/// Drop-in replacement for `tokio::fs::FileTimes`, a type of its own beside
+/// the one in `std::fs`.
+#[derive(Debug, Clone, Default)]
+#[must_use = "must be applied to a file via `File::set_times` to have any effect"]
+pub struct FileTimes(sync_fs::FileTimes);
+
+impl FileTimes {
+    /// Creates a new empty `FileTimes`. Unset timestamps are left unchanged.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the last access time.
+    pub fn set_accessed(self, t: SystemTime) -> Self {
+        Self(self.0.set_accessed(t))
+    }
+
+    /// Sets the last modification time.
+    pub fn set_modified(self, t: SystemTime) -> Self {
+        Self(self.0.set_modified(t))
+    }
+}
+
 /// An async file handle.
 ///
 /// This is the async equivalent of [`std::fs::File`](crate::shim::std::fs::File).
-/// It implements [`tokio::io::AsyncRead`], [`AsyncWrite`](tokio::io::AsyncWrite),
-/// and [`AsyncSeek`](tokio::io::AsyncSeek).
+/// It implements [`AsyncRead`], [`AsyncWrite`] and [`AsyncSeek`].
 #[derive(Debug)]
 pub struct File {
     inner: sync_fs::File,
+    /// Largest read or write one call makes.
+    max_buf: usize,
+}
+
+impl From<sync_fs::File> for File {
+    fn from(std: sync_fs::File) -> Self {
+        Self::from_std(std)
+    }
 }
 
 impl File {
     /// Opens a file in read-only mode.
     pub async fn open<P: AsRef<Path>>(path: P) -> Result<File> {
-        Ok(File {
-            inner: sync_fs::File::open(path)?,
-        })
+        sync_fs::File::open(path).map(File::from_std)
     }
 
     /// Opens a file in write-only mode, creating it if it doesn't exist.
     pub async fn create<P: AsRef<Path>>(path: P) -> Result<File> {
-        Ok(File {
-            inner: sync_fs::File::create(path)?,
-        })
+        sync_fs::File::create(path).map(File::from_std)
+    }
+
+    /// Opens a file in read-write mode, and fails if it exists.
+    pub async fn create_new<P: AsRef<Path>>(path: P) -> Result<File> {
+        sync_fs::File::create_new(path).map(File::from_std)
+    }
+
+    /// Returns a new [`OpenOptions`] object.
+    pub fn options() -> OpenOptions {
+        OpenOptions::new()
     }
 
     /// Converts a [`std::fs::File`](crate::shim::std::fs::File) to an async `File`.
-    pub fn from_std(std: sync_fs::File) -> File {
-        File { inner: std }
+    pub fn from_std(inner: sync_fs::File) -> File {
+        let max_buf = DEFAULT_MAX_BUF_SIZE;
+        File { inner, max_buf }
     }
 
     /// Converts this async `File` into a sync [`std::fs::File`](crate::shim::std::fs::File).
-    pub fn into_std(self) -> sync_fs::File {
+    pub async fn into_std(self) -> sync_fs::File {
         self.inner
+    }
+
+    /// Tries to convert the file at once, which always works here: no
+    /// operation is ever in flight between two calls.
+    pub fn try_into_std(self) -> std::result::Result<sync_fs::File, File> {
+        Ok(self.inner)
+    }
+
+    /// Sets the largest read or write one call makes.
+    pub fn set_max_buf_size(&mut self, max_buf_size: usize) {
+        self.max_buf = max_buf_size;
+    }
+
+    /// Returns the largest read or write one call makes.
+    pub fn max_buf_size(&self) -> usize {
+        self.max_buf
+    }
+
+    /// Changes the permissions of the file.
+    pub async fn set_permissions(&self, perm: Permissions) -> Result<()> {
+        self.inner.set_permissions(perm)
+    }
+
+    /// Changes the timestamps of the file.
+    pub async fn set_times(&self, times: FileTimes) -> Result<()> {
+        self.inner.set_times(times.0)
+    }
+
+    /// Changes the modification time of the file.
+    pub async fn set_modified(&self, time: SystemTime) -> Result<()> {
+        self.inner.set_modified(time)
     }
 
     /// Attempts to sync all OS-internal metadata and data to disk.
@@ -311,11 +393,10 @@ impl File {
         result
     }
 
-    /// Creates a new independently owned handle to the underlying file.
+    /// Creates a new handle that shares the underlying open file.
     pub async fn try_clone(&self) -> Result<File> {
-        Ok(File {
-            inner: self.inner.try_clone()?,
-        })
+        let (inner, max_buf) = (self.inner.try_clone()?, self.max_buf);
+        Ok(File { inner, max_buf })
     }
 
     /// Reads bytes from the file at the specified offset.
@@ -323,17 +404,11 @@ impl File {
     /// This operation incurs I/O latency if configured. If page cache is enabled,
     /// cache hits result in near-instant reads.
     pub async fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<usize> {
-        use std::os::unix::fs::FileExt;
-        let result = self.inner.read_at(buf, offset);
-
-        // Apply cache-aware latency
-        if let Some(path) = self.inner.path() {
-            apply_read_latency(&path, offset, self.inner.is_direct_io()).await;
-        } else {
-            apply_io_latency().await;
-        }
-
-        result
+        let read = |fs: &mut FsState, fd| {
+            let len = fs.read_at(fd, buf, offset)?;
+            Ok(Written { len, offset })
+        };
+        self.transfer(Access::Read, read).await
     }
 
     /// Writes bytes to the file at the specified offset.
@@ -341,17 +416,33 @@ impl File {
     /// This operation incurs I/O latency if configured. Writes populate
     /// the page cache for subsequent reads.
     pub async fn write_at(&self, buf: &[u8], offset: u64) -> Result<usize> {
-        use std::os::unix::fs::FileExt;
-        let result = self.inner.write_at(buf, offset);
+        let write = |fs: &mut FsState, fd| fs.write_at(fd, buf, offset);
+        self.transfer(Access::Write, write).await
+    }
 
-        // Apply cache-aware latency (writes populate cache)
-        if let Some(path) = self.inner.path() {
-            apply_write_latency(&path, offset, self.inner.is_direct_io()).await;
-        } else {
-            apply_io_latency().await;
-        }
-
-        result
+    /// Runs a transfer, then takes the time that it would on a disk: by
+    /// where in the file the bytes came from or went.
+    async fn transfer(
+        &self,
+        access: Access,
+        op: impl FnOnce(&mut FsState, RawFd) -> Result<Written>,
+    ) -> Result<usize> {
+        let fd = self.as_raw_fd();
+        let (result, latency) = self.inner.context(|ctx| {
+            let result = op(ctx.fs, fd);
+            let latency = match (&result, access) {
+                (Ok(Written { len: 1.., offset }), Access::Read) => {
+                    ctx.fs.read_latency(fd, *offset)
+                }
+                (Ok(Written { len: 1.., offset }), Access::Write) => {
+                    ctx.fs.write_latency(fd, *offset)
+                }
+                _ => ctx.fs.calculate_latency(false),
+            };
+            Ok((result, latency))
+        })?;
+        delay(latency).await;
+        Ok(result?.len)
     }
 }
 
@@ -359,69 +450,51 @@ impl File {
 ///
 /// See [`sync_fs::File`]'s `AsRawFd` impl for details. The fd is the
 /// hand-off point for the [`crate::io_uring`] shim.
-impl std::os::fd::AsRawFd for File {
-    fn as_raw_fd(&self) -> std::os::fd::RawFd {
+impl AsRawFd for File {
+    fn as_raw_fd(&self) -> RawFd {
         self.inner.as_raw_fd()
     }
 }
 
-impl tokio::io::AsyncRead for File {
+impl AsyncRead for File {
     fn poll_read(
-        mut self: std::pin::Pin<&mut Self>,
-        _cx: &mut std::task::Context<'_>,
-        buf: &mut tokio::io::ReadBuf<'_>,
-    ) -> std::task::Poll<Result<()>> {
-        use std::io::Read;
-        let slice = buf.initialize_unfilled();
-        match self.inner.read(slice) {
-            Ok(n) => {
-                buf.advance(n);
-                std::task::Poll::Ready(Ok(()))
-            }
-            Err(e) => std::task::Poll::Ready(Err(e)),
-        }
+        mut self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<Result<()>> {
+        let most = buf.remaining().min(self.max_buf);
+        let read = self.inner.read(buf.initialize_unfilled_to(most));
+        Poll::Ready(read.map(|n| buf.advance(n)))
     }
 }
 
-impl tokio::io::AsyncWrite for File {
+impl AsyncWrite for File {
     fn poll_write(
-        mut self: std::pin::Pin<&mut Self>,
-        _cx: &mut std::task::Context<'_>,
+        mut self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
         buf: &[u8],
-    ) -> std::task::Poll<Result<usize>> {
-        use std::io::Write;
-        std::task::Poll::Ready(self.inner.write(buf))
+    ) -> Poll<Result<usize>> {
+        let most = buf.len().min(self.max_buf);
+        Poll::Ready(self.inner.write(&buf[..most]))
     }
 
-    fn poll_flush(
-        mut self: std::pin::Pin<&mut Self>,
-        _cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Result<()>> {
-        use std::io::Write;
-        std::task::Poll::Ready(self.inner.flush())
+    fn poll_flush(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<()>> {
+        Poll::Ready(self.inner.flush())
     }
 
-    fn poll_shutdown(
-        self: std::pin::Pin<&mut Self>,
-        _cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Result<()>> {
-        std::task::Poll::Ready(Ok(()))
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<()>> {
+        Poll::Ready(Ok(()))
     }
 }
 
-impl tokio::io::AsyncSeek for File {
-    fn start_seek(mut self: std::pin::Pin<&mut Self>, position: std::io::SeekFrom) -> Result<()> {
-        use std::io::Seek;
+impl AsyncSeek for File {
+    fn start_seek(mut self: Pin<&mut Self>, position: SeekFrom) -> Result<()> {
         self.inner.seek(position)?;
         Ok(())
     }
 
-    fn poll_complete(
-        mut self: std::pin::Pin<&mut Self>,
-        _cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Result<u64>> {
-        use std::io::Seek;
-        std::task::Poll::Ready(self.inner.stream_position())
+    fn poll_complete(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<u64>> {
+        Poll::Ready(self.inner.stream_position())
     }
 }
 
@@ -431,6 +504,12 @@ impl tokio::io::AsyncSeek for File {
 #[derive(Debug, Clone, Default)]
 pub struct OpenOptions {
     inner: sync_fs::OpenOptions,
+}
+
+impl From<sync_fs::OpenOptions> for OpenOptions {
+    fn from(inner: sync_fs::OpenOptions) -> Self {
+        Self { inner }
+    }
 }
 
 impl OpenOptions {
@@ -498,24 +577,21 @@ impl OpenOptions {
         self
     }
 
-    /// Opens a file at `path` with the options specified by `self`.
-    pub async fn open<P: AsRef<Path>>(&self, path: P) -> Result<File> {
-        Ok(File {
-            inner: self.inner.open(path)?,
-        })
-    }
-}
-
-#[cfg(unix)]
-impl std::os::unix::fs::OpenOptionsExt for OpenOptions {
-    fn mode(&mut self, mode: u32) -> &mut Self {
+    /// Sets the mode bits that a new file will be created with.
+    pub fn mode(&mut self, mode: u32) -> &mut Self {
         self.inner.set_mode(mode);
         self
     }
 
-    fn custom_flags(&mut self, flags: i32) -> &mut Self {
+    /// Passes custom flags to the `flags` argument of `open`.
+    pub fn custom_flags(&mut self, flags: i32) -> &mut Self {
         self.inner.set_custom_flags(flags);
         self
+    }
+
+    /// Opens a file at `path` with the options specified by `self`.
+    pub async fn open<P: AsRef<Path>>(&self, path: P) -> Result<File> {
+        self.inner.open(path).map(File::from_std)
     }
 }
 
@@ -539,16 +615,14 @@ impl DirBuilder {
         self
     }
 
+    /// Sets the mode to create new directories with.
+    pub fn mode(&mut self, mode: u32) -> &mut Self {
+        self.inner.mode(mode);
+        self
+    }
+
     /// Creates the directory at the given path.
     pub async fn create<P: AsRef<Path>>(&self, path: P) -> Result<()> {
         self.inner.create(path)
-    }
-}
-
-#[cfg(unix)]
-impl std::os::unix::fs::DirBuilderExt for DirBuilder {
-    fn mode(&mut self, mode: u32) -> &mut Self {
-        std::os::unix::fs::DirBuilderExt::mode(&mut self.inner, mode);
-        self
     }
 }

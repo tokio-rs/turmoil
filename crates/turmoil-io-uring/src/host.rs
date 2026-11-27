@@ -1,18 +1,14 @@
-//! Per-host io_uring state and the `enter` thread-local.
-//!
-//! Mirrors `turmoil_fs::enter`: the embedder calls
-//! [`enter`](super::enter) once per host tick, which locks the
-//! supplied `Arc<Mutex<IoUringHostState>>` and sets a thread-local
-//! pointer. While the returned guard is alive, runtime sites
-//! (`Submitter`, `AsyncFd`, `CompletionQueue`, `IoUring::new`/`Drop`)
-//! reach the current ring state via [`IoUringContext::current`].
+//! Per-host io_uring state. The embedder enters the host registry once per
+//! tick, and each ring operation locks it for the duration of the call.
 
 use super::sim::RingState;
 use indexmap::IndexMap;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::io::{Error, ErrorKind, Result};
 use std::os::fd::RawFd;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
+use turmoil_fs::{FsContext, FsState};
 
 /// Base for sim-allocated ring fds. Mirrors `turmoil_fs::SIM_FD_BASE`
 /// so both file fds and ring fds occupy distinct subranges of the
@@ -61,7 +57,8 @@ impl IoUringHostState {
 
     /// Drop every ring on this host and wake any [`super::AsyncFd`]
     /// waiters so they observe an empty registry on their next
-    /// snapshot. Called from the embedder's crash path.
+    /// snapshot. The embedder calls this when the host's software stops,
+    /// whether the host crashed or the software is being restarted.
     pub fn crash(&mut self) {
         for ring in self.rings.values() {
             ring.cq_notify.notify_waiters();
@@ -76,19 +73,10 @@ impl Default for IoUringHostState {
     }
 }
 
-// ─── Enter pattern ──────────────────────────────────────────────────
-//
-// `enter` locks the supplied `Arc<Mutex<IoUringHostState>>` and stores
-// a `*mut IoUringHostState` (plus `now`) in a thread-local. Runtime
-// sites read from there via `IoUringContext::current`. Mirrors
-// `turmoil_fs::enter`.
+type Registry = Arc<Mutex<IoUringHostState>>;
 
 thread_local! {
-    /// `Arc<Mutex<IoUringHostState>>` of the entered ring registry.
-    /// Locked on each `IoUringContext::current` call; not held for
-    /// the lifetime of the guard. See `turmoil_fs::enter` for why.
-    static CURRENT_IOU_ARC: std::cell::RefCell<Option<Arc<Mutex<IoUringHostState>>>> =
-        const { std::cell::RefCell::new(None) };
+    static CURRENT_IOU_ARC: RefCell<Option<Registry>> = const { RefCell::new(None) };
     static CURRENT_NOW: Cell<Duration> = const { Cell::new(Duration::ZERO) };
 }
 
@@ -98,14 +86,7 @@ pub struct EnterCtx {
     pub now: Duration,
 }
 
-/// Guard returned by [`enter`]. While alive, the entered
-/// `IoUringHostState` is the current one for [`IoUringContext::current`]
-/// on this thread.
-///
-/// `enter` does NOT hold the mutex on the entered
-/// `IoUringHostState` — it locks on each call to
-/// `IoUringContext::current`. See `turmoil_fs::enter` for the
-/// rationale.
+/// Restores the previous ring registry and clock on drop.
 #[must_use = "the entered IoUringHostState is only current while the guard is held"]
 pub struct IoUringEnterGuard<'a> {
     prev_arc: Option<Arc<Mutex<IoUringHostState>>>,
@@ -120,8 +101,7 @@ impl<'a> Drop for IoUringEnterGuard<'a> {
     }
 }
 
-/// Mark `arc`'s `IoUringHostState` as the current one for
-/// [`IoUringContext::current`] on this thread.
+/// Enter this host's ring registry on the calling thread.
 ///
 /// `enter` calls nest. The embedder (typically `turmoil`) calls
 /// `io_uring::enter` alongside `turmoil_fs::enter` at the start of
@@ -136,74 +116,76 @@ pub fn enter(arc: &Arc<Mutex<IoUringHostState>>, ctx: EnterCtx) -> IoUringEnterG
     }
 }
 
-/// Borrowed handle to the current host's io_uring state plus the
-/// ambient sim time. Call sites that also need `&mut Fs` use
-/// [`with_fs_and_io_uring`] instead.
-pub(crate) struct IoUringContext<'a> {
-    pub(crate) io_uring: &'a mut IoUringHostState,
-    pub(crate) now: Duration,
+fn current() -> Result<Registry> {
+    CURRENT_IOU_ARC
+        .with_borrow(Clone::clone)
+        .ok_or_else(unregistered)
 }
 
-impl IoUringContext<'_> {
-    /// Run `f` with the current host's io_uring context.
-    ///
-    /// Panics if no `enter` guard is currently held on this thread.
-    pub(crate) fn current<R>(f: impl FnOnce(IoUringContext<'_>) -> R) -> R {
-        let arc = CURRENT_IOU_ARC
-            .with(|c| c.borrow().as_ref().map(Arc::clone))
-            .expect("turmoil-io-uring: no IoUringHostState is current (call enter first)");
-        let mut lock = arc.lock().expect("IoUringHostState mutex poisoned");
-        let now = CURRENT_NOW.with(|c| c.get());
-        f(IoUringContext {
-            io_uring: &mut lock,
-            now,
+fn unregistered() -> Error {
+    Error::new(
+        ErrorKind::NotFound,
+        "ring is not registered on the entered host",
+    )
+}
+
+/// A raw fd identifies a ring only within the registry that allocated it.
+pub(crate) struct RingId {
+    host: Weak<Mutex<IoUringHostState>>,
+    pub(crate) fd: RawFd,
+}
+
+impl RingId {
+    pub(crate) fn register(depth: u32) -> Result<Self> {
+        let host = current()?;
+        let mut state = host.lock().expect("IoUringHostState mutex poisoned");
+        let fd = state.alloc_ring_fd();
+        state.rings.insert(fd, RingState::new(depth));
+        Ok(Self {
+            host: Arc::downgrade(&host),
+            fd,
         })
     }
 
-    /// Run `f` if an `enter` guard is currently held; otherwise no-op.
-    /// Used in drop paths where the simulation may be shutting down.
-    pub(crate) fn current_if_set(f: impl FnOnce(IoUringContext<'_>)) {
-        let Some(arc) = CURRENT_IOU_ARC.with(|c| c.borrow().as_ref().map(Arc::clone)) else {
+    pub(crate) fn from_fd(fd: RawFd) -> Result<Self> {
+        let host = Arc::downgrade(&current()?);
+        Ok(Self { host, fd })
+    }
+
+    fn registry(&self) -> Result<Registry> {
+        let host = current()?;
+        std::ptr::eq(self.host.as_ptr(), Arc::as_ptr(&host))
+            .then_some(host)
+            .ok_or_else(unregistered)
+    }
+
+    fn access<R>(&self, host: &Registry, f: impl FnOnce(&mut RingState) -> R) -> Result<R> {
+        let mut state = host.lock().expect("IoUringHostState mutex poisoned");
+        let ring = state.rings.get_mut(&self.fd).ok_or_else(unregistered)?;
+        Ok(f(ring))
+    }
+
+    pub(crate) fn with<R>(&self, f: impl FnOnce(&mut RingState, Duration) -> R) -> Result<R> {
+        self.access(&self.registry()?, |ring| f(ring, CURRENT_NOW.get()))
+    }
+
+    pub(crate) fn with_fs<R>(
+        &self,
+        f: impl FnOnce(&mut FsState, &mut RingState, Duration) -> R,
+    ) -> Result<R> {
+        let host = self.registry()?;
+        // The filesystem lock comes first. Its context dispatches user hooks
+        // after both this registry guard and the filesystem guard are gone.
+        FsContext::current(|ctx| self.access(&host, |ring| f(ctx.fs, ring, ctx.now)))
+    }
+
+    pub(crate) fn close(&self) {
+        let Some(host) = self.host.upgrade() else {
             return;
         };
-        let mut lock = arc.lock().expect("IoUringHostState mutex poisoned");
-        let now = CURRENT_NOW.with(|c| c.get());
-        f(IoUringContext {
-            io_uring: &mut lock,
-            now,
-        });
+        let Ok(mut state) = host.lock() else { return };
+        if let Some(ring) = state.rings.swap_remove(&self.fd) {
+            ring.cq_notify.notify_waiters();
+        }
     }
-}
-
-// ─── Combined fs+io_uring borrow (only available with `fs` feature) ──
-//
-// Sites in `submit::schedule_pending` and `cqueue::CompletionQueue::next`
-// need to mutate both `Fs` and `IoUringHostState` at once. Both
-// thread-locals are populated by their respective `enter` calls during
-// a host tick, so this just reads from both.
-
-#[cfg(feature = "fs")]
-pub(crate) fn with_fs_and_io_uring<R>(
-    f: impl FnOnce(
-        &mut turmoil_fs::FsState,
-        &mut IoUringHostState,
-        &mut dyn rand::RngCore,
-        Duration,
-    ) -> R,
-) -> R {
-    // Lock fs first (matches lock order documented elsewhere in this
-    // crate). FsContext::current handles the fs lock; we lock
-    // io_uring inline.
-    turmoil_fs::FsContext::current(|ctx| {
-        let arc = CURRENT_IOU_ARC
-            .with(|c| c.borrow().as_ref().map(Arc::clone))
-            .expect("turmoil-io-uring: no IoUringHostState is current (call enter first)");
-        let mut iou_lock = arc.lock().expect("IoUringHostState mutex poisoned");
-        // Split-borrow rng from `&mut Fs` so the closure can take both
-        // `&mut Fs` and `&mut dyn RngCore`. SAFETY: `rng` is a distinct
-        // field from any other Fs field the closure mutates.
-        let rng_ptr: *mut dyn rand::RngCore = &mut *ctx.fs.rng;
-        let rng = unsafe { &mut *rng_ptr };
-        f(ctx.fs, &mut iou_lock, rng, ctx.now)
-    })
 }

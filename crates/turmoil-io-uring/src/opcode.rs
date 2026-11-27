@@ -7,7 +7,7 @@
 //! that need them must either teach this module or stop using the
 //! simulation.
 
-use super::squeue::{Entry, Flags, OpKind};
+use super::squeue::{Buffer, Entry, OpKind, Transfer};
 use super::types::Fd;
 
 /// Read at offset, mirroring [`io_uring::opcode::Read`].
@@ -29,7 +29,11 @@ impl Read {
         }
     }
 
-    /// Set the file offset.
+    /// Set the file offset. As on Linux, `u64::MAX` (an offset of -1) is
+    /// the position the file has when the transfer is submitted. The
+    /// transfer leaves the position where it ended, unless the descriptor
+    /// is open for direct I/O: what a disk completes later leaves the
+    /// position where it was.
     pub fn offset(mut self, off: u64) -> Self {
         self.offset = off;
         self
@@ -37,16 +41,8 @@ impl Read {
 
     /// Finalize into an [`Entry`] ready to push onto the SQ.
     pub fn build(self) -> Entry {
-        Entry {
-            op: OpKind::Read {
-                fd: self.fd.0,
-                ptr: self.ptr,
-                len: self.len,
-                offset: self.offset,
-            },
-            user_data: 0,
-            flags: Flags::default(),
-        }
+        let buffer = Buffer::Read(self.ptr);
+        Transfer::entry(self.fd.0, self.offset, self.len, buffer)
     }
 }
 
@@ -69,7 +65,11 @@ impl Write {
         }
     }
 
-    /// Set the file offset.
+    /// Set the file offset. As on Linux, `u64::MAX` (an offset of -1) is
+    /// the position the file has when the transfer is submitted. The
+    /// transfer leaves the position where it ended, unless the descriptor
+    /// is open for direct I/O: what a disk completes later leaves the
+    /// position where it was.
     pub fn offset(mut self, off: u64) -> Self {
         self.offset = off;
         self
@@ -77,16 +77,8 @@ impl Write {
 
     /// Finalize into an [`Entry`] ready to push onto the SQ.
     pub fn build(self) -> Entry {
-        Entry {
-            op: OpKind::Write {
-                fd: self.fd.0,
-                ptr: self.ptr,
-                len: self.len,
-                offset: self.offset,
-            },
-            user_data: 0,
-            flags: Flags::default(),
-        }
+        let buffer = Buffer::Write(self.ptr);
+        Transfer::entry(self.fd.0, self.offset, self.len, buffer)
     }
 }
 
@@ -108,11 +100,7 @@ impl Fsync {
 
     /// Finalize into an [`Entry`] ready to push onto the SQ.
     pub fn build(self) -> Entry {
-        Entry {
-            op: OpKind::Fsync { fd: self.fd.0 },
-            user_data: 0,
-            flags: Flags::default(),
-        }
+        Entry::new(OpKind::Fsync { fd: self.fd.0 })
     }
 }
 
@@ -132,12 +120,7 @@ impl AsyncCancel {
 
     /// Finalize into an [`Entry`] ready to push onto the SQ.
     pub fn build(self) -> Entry {
-        Entry {
-            op: OpKind::AsyncCancel {
-                target_user_data: self.target,
-            },
-            user_data: 0,
-            flags: Flags::default(),
-        }
+        let target_user_data = self.target;
+        Entry::new(OpKind::AsyncCancel { target_user_data })
     }
 }

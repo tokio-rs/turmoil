@@ -1,9 +1,7 @@
 //! Completion queue types mirroring [`io_uring::cqueue`](https://docs.rs/io-uring/0.7/io_uring/cqueue).
 
 #[cfg(feature = "fs")]
-use crate::host::{with_fs_and_io_uring, IoUringContext};
-#[cfg(feature = "fs")]
-use std::os::fd::RawFd;
+use crate::host::RingId;
 
 /// Sealed trait selecting between [`Entry`] (default) and the larger
 /// `Entry32` shape exposed by the real crate. Only `Entry` is
@@ -64,44 +62,32 @@ impl EntryMarker for Entry {}
 /// the iterator across the full set of expected CQEs.
 #[cfg(feature = "fs")]
 pub struct CompletionQueue<'a> {
-    ring_fd: RawFd,
+    ring: &'a RingId,
     /// Number of CQEs the most recent `sync()` exposed for this
     /// handle. `next()` decrements this on each yield; when it hits
     /// zero, further `next()` calls return `None` until `sync()` is
-    /// called again. `None` means "not yet synced," which behaves
-    /// like zero.
-    visible: Option<usize>,
-    _lifetime: std::marker::PhantomData<&'a ()>,
+    /// called again.
+    visible: usize,
 }
 
 #[cfg(feature = "fs")]
 impl<'a> CompletionQueue<'a> {
-    pub(crate) fn new(ring_fd: RawFd) -> Self {
-        Self {
-            ring_fd,
-            visible: None,
-            _lifetime: std::marker::PhantomData,
-        }
+    pub(crate) fn new(ring: &'a RingId) -> Self {
+        Self { ring, visible: 0 }
     }
 
     /// Snapshot the ring: subsequent `next()` calls may yield up to
     /// the number of CQEs currently matured. Mirrors the real crate's
     /// `sync()` which copies the kernel CQ head into userspace.
     pub fn sync(&mut self) {
-        self.visible = Some(IoUringContext::current(|ctx| {
-            ctx.io_uring
-                .rings
-                .get(&self.ring_fd)
-                .map(|r| r.ready_cq_count(ctx.now))
-                .unwrap_or(0)
-        }));
+        self.visible = self.ring.with(|r, now| r.ready_cq_count(now)).unwrap_or(0);
     }
 
     /// Number of CQEs the last `sync()` exposed and not yet drained.
     /// Returns `0` for a freshly-constructed handle (matches real
     /// Linux: nothing visible until you sync).
     pub fn len(&self) -> usize {
-        self.visible.unwrap_or(0)
+        self.visible
     }
 
     /// Whether [`Self::len`] is zero.
@@ -119,24 +105,20 @@ impl<'a> Iterator for CompletionQueue<'a> {
         // exposed. We enforce the same: a consumer that forgets to
         // call `sync()` before iterating sees an empty CQ even if
         // ops have matured.
-        let remaining = self.visible.as_mut()?;
-        if *remaining == 0 {
+        if self.visible == 0 {
             return None;
         }
-        let ring_fd = self.ring_fd;
-        // We need both the ring (to pop the next scheduled op) and
-        // `&mut Fs` (to execute the op's read/write/fsync side
-        // effect). The combined-borrow helper locks both per host.
-        let entry = with_fs_and_io_uring(|fs, iou, rng, now| {
-            let scheduled = iou.rings.get_mut(&ring_fd)?.pop_ready(now, rng)?;
-            let result = scheduled.apply.execute(fs, rng, now);
+        let ready = self.ring.with_fs(|fs, ring, now| {
+            let scheduled = ring.pop_ready(now, &mut *fs.rng)?;
+            let result = scheduled.apply.execute(fs);
             Some(Entry {
                 user_data: scheduled.user_data,
                 result,
                 flags: 0,
             })
-        })?;
-        *remaining -= 1;
+        });
+        let entry = ready.ok().flatten()?;
+        self.visible -= 1;
         Some(entry)
     }
 }

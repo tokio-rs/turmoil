@@ -342,3 +342,32 @@ fn custom_alignment_rejects_misaligned_offset() -> Result {
     });
     sim.run()
 }
+
+/// The flag for direct I/O is the one of the host, which differs between
+/// architectures: on some, the number that x86 has for it asks for a
+/// directory.
+#[cfg(target_os = "linux")]
+#[test]
+fn custom_flags_take_the_o_direct_of_the_host() -> Result {
+    use std::io::ErrorKind;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let mut sim = Builder::new().build();
+    sim.client("test", async {
+        create_dir_all("/test")?;
+        let open = |flags: i32| {
+            let mut options = OpenOptions::new();
+            options.read(true).write(true).create(true);
+            options.custom_flags(flags).open(TEST_PATH)
+        };
+        let (direct, plain) = (open(libc::O_DIRECT)?, open(libc::O_NOFOLLOW)?);
+        assert!(direct.is_direct_io() && !plain.is_direct_io());
+        plain.write_all_at(b"0123456789", 0)?;
+        let misaligned = direct.read_at(&mut [0; 4], 1).unwrap_err();
+        assert_eq!(misaligned.raw_os_error(), Some(libc::EINVAL));
+        let directory = open(libc::O_DIRECTORY).unwrap_err();
+        assert_eq!(directory.kind(), ErrorKind::InvalidInput);
+        Ok(())
+    });
+    sim.run()
+}

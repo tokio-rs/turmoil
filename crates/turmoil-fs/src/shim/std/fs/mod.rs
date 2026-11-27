@@ -3,13 +3,21 @@
 //! Provides drop-in replacements for:
 //! - [`File`] - Simulated file handle with `std::io::{Read, Write, Seek}` impls
 //! - [`OpenOptions`] - Options for opening files
+//! - [`DirBuilder`] - Options for creating directories
 //! - [`Metadata`] - File metadata
+//! - [`Permissions`] - The permission bits of a file
+//! - [`FileTimes`] - Timestamps to set on a file
 //! - [`ReadDir`] - Iterator over directory entries
 //! - [`DirEntry`] - An entry inside a directory
 //! - [`FileType`] - Representation of a file type
 //! - Free functions: [`canonicalize`], [`copy`], [`create_dir`], [`create_dir_all`],
-//!   [`metadata`], [`read`], [`read_dir`], [`read_to_string`], [`remove_dir`],
-//!   [`remove_dir_all`], [`remove_file`], [`rename`], [`sync_dir`], [`write`]
+//!   [`exists`], [`hard_link`], [`metadata`], [`read`], [`read_dir`], [`read_link`],
+//!   [`read_to_string`], [`remove_dir`], [`remove_dir_all`], [`remove_file`],
+//!   [`rename`], [`set_permissions`], [`symlink_metadata`], [`write`]
+//!
+//! Each has the signature of its counterpart in `std::fs`, and `symlink` is
+//! where std has it, in [`os::unix::fs`](crate::shim::std::os::unix::fs).
+//! [`sync_dir`] is an addition.
 //!
 //! # Durability Model
 //!
@@ -26,7 +34,8 @@
 //! These are stored separately and synced separately:
 //!
 //! - [`File::sync_all`] syncs the file's data and inode
-//! - [`sync_dir`] syncs the directory's entries
+//! - [`sync_dir`], or [`File::sync_all`] on the open directory, syncs the
+//!   directory's entries
 //!
 //! ## Why Both Are Needed
 //!
@@ -48,7 +57,7 @@
 //! sync_dir("/data")?;
 //! ```
 //!
-//! ## Why `sync_dir` Exists
+//! ## Syncing a Directory
 //!
 //! In POSIX C, you sync a directory by opening it and calling `fsync()`:
 //! ```c
@@ -56,37 +65,35 @@
 //! fsync(dir_fd);
 //! ```
 //!
-//! However, Rust's `std::fs::File::open()` does not support opening directories -
-//! it returns an error on most platforms. This means **there is no portable way
-//! to sync a directory using `std::fs`**.
+//! On Unix, `std::fs` spells that the same way for a directory as for a file,
+//! and so does this shim:
+//! ```ignore
+//! File::open("/data")?.sync_all()?;
+//! ```
 //!
-//! The [`sync_dir`] function fills this gap for testing. In production code,
-//! you would need platform-specific code (e.g., `libc::open` + `libc::fsync`
-//! or the `nix` crate) to achieve the same effect.
+//! As on Linux, a directory opens only for reading, and the handle has no
+//! bytes to read: it can be synced and asked for its metadata. [`sync_dir`]
+//! is shorthand for the two calls, which `std::fs` does not have.
 //!
 //! ## Testing Patterns
 //!
-//! For code that needs to be crash-safe, use conditional compilation:
+//! Code that is crash-safe on the real filesystem needs only its imports
+//! switched:
 //!
 //! ```ignore
 //! #[cfg(test)]
-//! use turmoil::fs::shim::std::fs::{File, sync_dir};
+//! use turmoil::fs::shim::std::fs::File;
 //! #[cfg(not(test))]
 //! use std::fs::File;
 //!
-//! fn write_durable(path: &str, data: &[u8]) -> std::io::Result<()> {
-//!     let file = File::create(path)?;
+//! fn write_durable(path: &Path, data: &[u8]) -> std::io::Result<()> {
+//!     let mut file = File::create(path)?;
 //!     file.write_all(data)?;
 //!     file.sync_all()?;
-//!
-//!     // In tests, this calls turmoil's sync_dir
-//!     // In production, implement platform-specific directory sync
-//!     #[cfg(test)]
-//!     if let Some(parent) = std::path::Path::new(path).parent() {
-//!         sync_dir(parent)?;
-//!     }
-//!
-//!     Ok(())
+//!     // The file's name is durable once its directory is synced too. A
+//!     // path that is only a name is in the current directory.
+//!     let dir = path.parent().filter(|dir| !dir.as_os_str().is_empty());
+//!     File::open(dir.unwrap_or(Path::new(".")))?.sync_all()
 //! }
 //! ```
 //!
@@ -102,70 +109,95 @@
 //! - **All paths must be absolute**: Relative paths are treated as absolute from
 //!   root. There is no concept of a current working directory.
 //!
+//! - **The umask is fixed**: Files and directories are created through the
+//!   umask that processes usually start with, 022. There is no way to change it.
+//!
 //! - **No file locking**: `flock()`/`fcntl()` locking is not implemented.
 //!
-//! - **Symlink cycle detection**: [`canonicalize`] detects cycles and returns an
-//!   error, matching POSIX ELOOP behavior.
+//! - **No ownership**: Every file belongs to user and group 0, and there is
+//!   no `chown`.
+//!
+//! - **Reads leave the access time alone**: As on a filesystem mounted with
+//!   `noatime`, only [`File::set_times`] moves it.
+//!
+//! - **No time before the epoch**: Simulated time starts at the epoch. An
+//!   earlier time set on a file becomes the epoch.
+//!
+//! - **Symlink loops**: Resolving a path follows at most 40 symlinks and then
+//!   returns an error, matching POSIX ELOOP behavior.
 
-use crate::FsContext;
-use std::io::{Error, ErrorKind, Result};
+use crate::errno::{EISDIR, ENOTDIR};
+use crate::tree::{FileKind, Ino, Open, Stat, Times, Tree};
+use crate::{FileOwner, Fs, FsContext};
+use libc::{O_ACCMODE, O_APPEND, O_CREAT, O_EXCL, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY};
+use std::ffi::OsString;
+use std::io::{Error, ErrorKind, Read, Result, Seek, SeekFrom, Write};
 use std::os::fd::RawFd;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/// O_DIRECT flag value for bypassing page cache in the simulation.
-///
-/// We use Linux's value (0x4000) as the canonical constant. macOS doesn't have
-/// O_DIRECT (it uses fcntl F_NOCACHE), but since this is a simulation, we just
-/// need a consistent value users can pass to indicate "bypass cache" behavior.
-const O_DIRECT: i32 = 0x4000;
+/// What `std` does with a path before any system call sees it: one with a
+/// NUL in it is no C string, and fails without a call.
+pub(crate) fn c_path<P: AsRef<Path> + ?Sized>(path: &P) -> Result<&Path> {
+    let path = path.as_ref();
+    match path.as_os_str().as_bytes().contains(&0) {
+        true => Err(invalid("file name contained an unexpected NUL byte")),
+        false => Ok(path),
+    }
+}
+
+/// An error that `std` makes itself, before it asks the system for anything.
+fn invalid(reason: &'static str) -> Error {
+    Error::new(ErrorKind::InvalidInput, reason)
+}
 
 /// Creates a new directory at the provided path.
 ///
 /// Like file creation, directory creation is not durable until the parent
 /// directory is synced.
 pub fn create_dir<P: AsRef<Path>>(path: P) -> Result<()> {
-    let path = path.as_ref().to_path_buf();
-    FsContext::current(|ctx| ctx.fs.mkdir(&path, ctx.now).map_err(Error::other))
+    DirBuilder::new().create(path)
 }
 
 /// Creates a directory and all of its parent components if they are missing.
 pub fn create_dir_all<P: AsRef<Path>>(path: P) -> Result<()> {
-    create_dir_all_with_mode(path, 0o755)
+    DirBuilder::new().recursive(true).create(path)
 }
 
 /// Removes an empty directory.
 pub fn remove_dir<P: AsRef<Path>>(path: P) -> Result<()> {
-    let path = path.as_ref().to_path_buf();
-    FsContext::current(|ctx| ctx.fs.rmdir(&path).map_err(Error::other))
+    let path = c_path(&path)?;
+    FsContext::current(|ctx| ctx.fs.tree.rmdir(path, ctx.now))
 }
 
 /// Syncs a directory, making its entries durable.
 ///
-/// # Why This Function Exists
-///
-/// In POSIX, you sync a directory by opening it and calling `fsync()`:
-/// ```c
-/// int dir_fd = open("/data", O_RDONLY);
-/// fsync(dir_fd);
+/// This is shorthand for opening the directory and syncing the handle, which
+/// is how a directory is synced on Unix and works the same with this shim:
+/// ```ignore
+/// File::open("/data")?.sync_all()?;
 /// ```
 ///
-/// However, **Rust's `std::fs::File::open()` does not support opening directories** -
-/// it returns an error on most platforms. This means there is no portable way to
-/// sync a directory using `std::fs`.
-///
-/// This function provides the missing capability for turmoil's crash-consistency
-/// testing. In production code, you would need platform-specific code (e.g.,
-/// `libc::open` + `libc::fsync` or the `nix` crate) to achieve the same effect.
+/// `std::fs` has no function for it, so code that also runs on the real
+/// filesystem syncs its directories that way.
 ///
 /// # What It Does
 ///
 /// Equivalent to calling `fsync()` on a directory file descriptor.
 /// It makes the following operations durable:
 /// - File and directory creations within this directory
-/// - File and directory deletions from this directory
-/// - Renames into or out of this directory
-/// - The directory's own creation (if it was recently created)
+/// - File and directory deletions from this directory. A subdirectory goes
+///   together with the renames that emptied it
+/// - Renames into or out of this directory. A rename is durable as a whole:
+///   the name leaves one directory as it arrives in the other. The
+///   directories above its new place become durable as far as it takes for
+///   a crash that finds the old directory to find the new one, so that the
+///   name is never lost
+/// - The directory's own creation, if it was recently created and its name
+///   does not durably belong to something else
 ///
 /// # POSIX Durability Model
 ///
@@ -192,77 +224,61 @@ pub fn remove_dir<P: AsRef<Path>>(path: P) -> Result<()> {
 /// file.sync_all()?;      // File data is now durable
 /// sync_dir("/data")?;    // File's directory entry is now durable
 /// ```
-///
-/// # Testing Pattern
-///
-/// Use conditional compilation to call `sync_dir` in tests:
-/// ```ignore
-/// #[cfg(test)]
-/// turmoil::fs::shim::std::fs::sync_dir(parent)?;
-///
-/// #[cfg(not(test))]
-/// platform_specific_dir_sync(parent)?;
-/// ```
 pub fn sync_dir<P: AsRef<Path>>(path: P) -> Result<()> {
-    let path = path.as_ref().to_path_buf();
-    FsContext::current(|ctx| ctx.fs.sync_dir(&path, ctx.now).map_err(Error::other))
+    let path = c_path(&path)?;
+    FsContext::current(|ctx| ctx.fs.tree.sync_dir(path))
 }
 
 /// Removes a file from the filesystem.
 ///
 /// Note: The deletion is not durable until the parent directory is synced.
 pub fn remove_file<P: AsRef<Path>>(path: P) -> Result<()> {
-    let path = path.as_ref().to_path_buf();
-    FsContext::current(|ctx| {
-        ctx.fs
-            .unlink(&path)
-            .map_err(|e| Error::new(ErrorKind::NotFound, e))
-    })
+    let path = c_path(&path)?;
+    FsContext::current(|ctx| ctx.fs.tree.unlink(path, ctx.now))
 }
 
 /// Renames a file or directory.
 ///
 /// This is atomic - if the destination exists, it will be replaced.
-/// The rename is not durable until the parent directory is synced.
+/// The rename is not durable until one of the parent directories is synced,
+/// and a crash never leaves it half done.
 pub fn rename<P: AsRef<Path>, Q: AsRef<Path>>(from: P, to: Q) -> Result<()> {
-    let from = from.as_ref().to_path_buf();
-    let to = to.as_ref().to_path_buf();
-    FsContext::current(|ctx| ctx.fs.rename(&from, &to).map_err(Error::other))
+    let (from, to) = (c_path(&from)?, c_path(&to)?);
+    FsContext::current(|ctx| ctx.fs.tree.rename(from, to, ctx.now))
 }
 
-/// Returns `true` if the path points at an existing entity.
+/// Returns `Ok(true)` if the path points at an existing entity, and
+/// `Ok(false)` if it points at none.
 ///
-/// This function follows symbolic links, so if `path` is a symbolic link,
-/// it returns whether the target exists.
+/// This function follows symbolic links, so a symbolic link that leads
+/// nowhere does not exist. As with `std::fs::exists`, a path that cannot be
+/// looked up at all, such as one that leads through a file, is an error.
 ///
 /// # Example
 ///
 /// ```ignore
 /// use turmoil::fs::shim::std::fs::{exists, write, create_dir};
 ///
-/// assert!(!exists("/data"));
+/// assert!(!exists("/data")?);
 /// create_dir("/data")?;
-/// assert!(exists("/data"));
+/// assert!(exists("/data")?);
 ///
 /// write("/data/file.txt", b"hello")?;
-/// assert!(exists("/data/file.txt"));
+/// assert!(exists("/data/file.txt")?);
 /// ```
-pub fn exists<P: AsRef<Path>>(path: P) -> bool {
-    let path = path.as_ref().to_path_buf();
-    FsContext::current(|ctx| {
-        // Follow symlinks
-        let resolved = if ctx.fs.symlink_exists(&path) {
-            match ctx.fs.read_link(&path) {
-                Ok(target) => target,
-                Err(_) => return false,
-            }
-        } else {
-            path.clone()
-        };
+pub fn exists<P: AsRef<Path>>(path: P) -> Result<bool> {
+    match stat(path.as_ref(), true) {
+        Ok(_) => Ok(true),
+        Err(missing) if missing.kind() == ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
 
-        ctx.fs.file_exists(&resolved)
-            || ctx.fs.dir_exists(&resolved)
-            || ctx.fs.symlink_exists(&resolved)
+fn stat(path: &Path, follow: bool) -> Result<Metadata> {
+    let path = c_path(path)?;
+    FsContext::current(|ctx| {
+        let ino = ctx.fs.tree.resolve(path, follow)?;
+        Ok(Metadata(ctx.fs.tree.stat(ino)))
     })
 }
 
@@ -271,66 +287,7 @@ pub fn exists<P: AsRef<Path>>(path: P) -> bool {
 /// This function follows symbolic links. Use [`symlink_metadata`] to get
 /// metadata for the symlink itself.
 pub fn metadata<P: AsRef<Path>>(path: P) -> Result<Metadata> {
-    let path = path.as_ref().to_path_buf();
-    FsContext::current(|ctx| {
-        // Follow symlinks - resolve the target path
-        let resolved = if ctx.fs.symlink_exists(&path) {
-            ctx.fs
-                .read_link(&path)
-                .map_err(|e| Error::new(ErrorKind::NotFound, e))?
-        } else {
-            path.clone()
-        };
-
-        // Check if it's a file
-        if ctx.fs.file_exists(&resolved) {
-            let len = ctx.fs.file_len(&resolved);
-            let (crtime, mtime, ctime) = ctx.fs.file_timestamps(&resolved).unwrap_or((
-                Duration::ZERO,
-                Duration::ZERO,
-                Duration::ZERO,
-            ));
-            let mode = ctx.fs.file_mode(&resolved).unwrap_or(0o644);
-            let nlink = ctx.fs.file_nlink(&resolved);
-
-            return Ok(Metadata {
-                len,
-                is_dir: false,
-                is_symlink: false,
-                crtime,
-                mtime,
-                ctime,
-                mode,
-                nlink,
-            });
-        }
-
-        // Check if it's a directory
-        if ctx.fs.dir_exists(&resolved) {
-            let (crtime, mtime, ctime) = ctx.fs.dir_timestamps(&resolved).unwrap_or((
-                Duration::ZERO,
-                Duration::ZERO,
-                Duration::ZERO,
-            ));
-            let mode = ctx.fs.dir_mode(&resolved).unwrap_or(0o755);
-
-            return Ok(Metadata {
-                len: 0,
-                is_dir: true,
-                is_symlink: false,
-                crtime,
-                mtime,
-                ctime,
-                mode,
-                nlink: 2, // Directories have at least 2 links (. and parent's entry)
-            });
-        }
-
-        Err(Error::new(
-            ErrorKind::NotFound,
-            "file or directory not found",
-        ))
-    })
+    stat(path.as_ref(), true)
 }
 
 /// Returns an iterator over the entries within a directory.
@@ -338,17 +295,10 @@ pub fn metadata<P: AsRef<Path>>(path: P) -> Result<Metadata> {
 /// The iterator yields instances of `Result<DirEntry>`. Each entry can be
 /// inspected for its path, file name, and metadata.
 pub fn read_dir<P: AsRef<Path>>(path: P) -> Result<ReadDir> {
-    let path = path.as_ref().to_path_buf();
-    FsContext::current(|ctx| {
-        if !ctx.fs.dir_exists(&path) {
-            return Err(Error::new(ErrorKind::NotFound, "directory not found"));
-        }
-
-        let entries = ctx.fs.dir_entries(&path);
-        Ok(ReadDir {
-            entries: entries.into_iter(),
-        })
-    })
+    let path = c_path(&path)?;
+    let entries = FsContext::current(|ctx| ctx.fs.tree.read_dir(path))?;
+    let (root, entries) = (path.into(), entries.into_iter());
+    Ok(ReadDir { root, entries })
 }
 
 /// Read the entire contents of a file into a bytes vector.
@@ -356,13 +306,7 @@ pub fn read_dir<P: AsRef<Path>>(path: P) -> Result<ReadDir> {
 /// This is a convenience function for using [`File::open`] and reading the
 /// entire file contents.
 pub fn read<P: AsRef<Path>>(path: P) -> Result<Vec<u8>> {
-    let file = File::open(path)?;
-    let len = file.metadata()?.len() as usize;
-    let mut buf = vec![0u8; len];
-    if len > 0 {
-        file.read_at_internal(&mut buf, 0)?;
-    }
-    Ok(buf)
+    File::open(path)?.read_all()
 }
 
 /// Read the entire contents of a file into a string.
@@ -392,48 +336,71 @@ pub fn write<P: AsRef<Path>, C: AsRef<[u8]>>(path: P, contents: C) -> Result<()>
 /// This function will overwrite the contents of `to`. Returns the number of
 /// bytes copied.
 ///
-/// Note: This does not copy file permissions or other metadata.
+/// As `std::fs::copy` does on Linux, this gives `to` the permissions of
+/// `from`, and empties `to` before it reads `from`: a file that is copied
+/// onto itself ends up empty.
 pub fn copy<P: AsRef<Path>, Q: AsRef<Path>>(from: P, to: Q) -> Result<u64> {
-    let contents = read(from)?;
-    let len = contents.len() as u64;
-    write(to, contents)?;
-    Ok(len)
+    let source = File::open(from)?;
+    let meta = source.metadata()?;
+    // As with `std::fs`, the source has to be a regular file.
+    if !meta.is_file() {
+        let reason = "the source path is neither a regular file nor a symlink to a regular file";
+        return Err(invalid(reason));
+    }
+    let permissions = meta.permissions();
+    let mut options = OpenOptions::new();
+    options.set_mode(permissions.mode());
+    let copy = options.write(true).create(true).truncate(true).open(to)?;
+    // The mode a new file is made with goes through the umask, and a file
+    // that was there keeps its own, so `std::fs` sets it once more.
+    copy.set_permissions(permissions)?;
+    let contents = source.read_all()?;
+    if !contents.is_empty() {
+        copy.write_at_internal(&contents, 0)?;
+    }
+    Ok(contents.len() as u64)
 }
 
 /// Iterator over directory entries.
 ///
 /// Returned by [`read_dir`].
+#[derive(Debug)]
 pub struct ReadDir {
-    entries: std::vec::IntoIter<std::path::PathBuf>,
+    /// The path the directory was listed by, which its entries go under.
+    root: Arc<Path>,
+    entries: std::vec::IntoIter<(OsString, u64)>,
 }
 
 impl Iterator for ReadDir {
     type Item = Result<DirEntry>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.entries.next().map(|path| Ok(DirEntry { path }))
+        let (name, ino) = self.entries.next()?;
+        let root = Arc::clone(&self.root);
+        Some(Ok(DirEntry { root, name, ino }))
     }
 }
 
 /// An entry inside a directory.
 ///
 /// Returned by iterating over [`ReadDir`].
+#[derive(Debug)]
 pub struct DirEntry {
-    path: std::path::PathBuf,
+    root: Arc<Path>,
+    name: OsString,
+    /// The inode the entry named when the directory was listed.
+    ino: u64,
 }
 
 impl DirEntry {
     /// Returns the full path to this entry.
-    pub fn path(&self) -> std::path::PathBuf {
-        self.path.clone()
+    pub fn path(&self) -> PathBuf {
+        self.root.join(&self.name)
     }
 
     /// Returns the file name of this entry.
-    pub fn file_name(&self) -> std::ffi::OsString {
-        self.path
-            .file_name()
-            .map(|s| s.to_owned())
-            .unwrap_or_default()
+    pub fn file_name(&self) -> OsString {
+        self.name.clone()
     }
 
     /// Returns the metadata for this entry.
@@ -441,43 +408,61 @@ impl DirEntry {
     /// This does not follow symlinks - if the entry is a symlink, it returns
     /// metadata for the symlink itself, not the target.
     pub fn metadata(&self) -> Result<Metadata> {
-        symlink_metadata(&self.path)
+        symlink_metadata(self.path())
     }
 
     /// Returns the file type for this entry.
     pub fn file_type(&self) -> Result<FileType> {
         // Use symlink_metadata to not follow symlinks
-        let meta = symlink_metadata(&self.path)?;
-        Ok(FileType {
-            is_dir: meta.is_dir(),
-            is_symlink: meta.is_symlink(),
-        })
+        Ok(self.metadata()?.file_type())
+    }
+}
+
+impl std::os::unix::fs::DirEntryExt for DirEntry {
+    fn ino(&self) -> u64 {
+        self.ino
     }
 }
 
 /// Representation of a file type.
 ///
 /// Returned by [`DirEntry::file_type`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FileType {
-    is_dir: bool,
-    is_symlink: bool,
-}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FileType(FileKind);
 
 impl FileType {
     /// Returns true if this file type is a directory.
     pub fn is_dir(&self) -> bool {
-        self.is_dir
+        self.0 == FileKind::Dir
     }
 
     /// Returns true if this file type is a regular file.
     pub fn is_file(&self) -> bool {
-        !self.is_dir && !self.is_symlink
+        self.0 == FileKind::File
     }
 
     /// Returns true if this file type is a symbolic link.
     pub fn is_symlink(&self) -> bool {
-        self.is_symlink
+        self.0 == FileKind::Symlink
+    }
+}
+
+/// The simulation has files, directories and symlinks, and nothing else.
+impl std::os::unix::fs::FileTypeExt for FileType {
+    fn is_block_device(&self) -> bool {
+        false
+    }
+
+    fn is_char_device(&self) -> bool {
+        false
+    }
+
+    fn is_fifo(&self) -> bool {
+        false
+    }
+
+    fn is_socket(&self) -> bool {
+        false
     }
 }
 
@@ -487,27 +472,25 @@ impl FileType {
 /// per-host simulated filesystem.
 #[derive(Debug)]
 pub struct File {
+    /// The filesystem the file is on. Dropping the file closes its
+    /// descriptor there, whichever filesystem the thread has entered.
+    owner: FileOwner,
     /// File descriptor used to identify this file in the host's Fs.
     ///
     /// Allocated from a high range (see [`crate::SIM_FD_BASE`]) so it
     /// is safe to expose via [`AsRawFd`](std::os::fd::AsRawFd) — the
-    /// io_uring shim resolves these back to paths through the host's
+    /// io_uring shim resolves these back to files through the host's
     /// open-file table.
     fd: RawFd,
-    /// Whether the file is readable
-    readable: bool,
-    /// Whether the file is writable
-    writable: bool,
-    /// Whether the file is in append mode
-    append_mode: bool,
     /// Whether this file bypasses the page cache (O_DIRECT)
     direct_io: bool,
-    /// Current cursor position for read()/write()
-    cursor: std::sync::Mutex<u64>,
 }
 
 impl File {
     /// Attempts to open a file in read-only mode.
+    ///
+    /// As on Linux, this opens a directory too. Such a handle can be synced
+    /// and asked for its metadata, and reading it fails with `IsADirectory`.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<File> {
         OpenOptions::new().read(true).open(path)
     }
@@ -522,66 +505,83 @@ impl File {
             .open(path)
     }
 
+    /// Creates a new file in read-write mode, and fails if it exists.
+    pub fn create_new<P: AsRef<Path>>(path: P) -> Result<File> {
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create_new(true).open(path)
+    }
+
+    /// Returns a new `OpenOptions`.
+    pub fn options() -> OpenOptions {
+        OpenOptions::new()
+    }
+
+    /// Runs `f` on the filesystem the file is on. That has to be the one
+    /// entered, since the descriptor means nothing on any other.
+    pub(crate) fn context<R>(&self, f: impl FnOnce(FsContext<'_>) -> Result<R>) -> Result<R> {
+        self.owner.entered()?.context(f)
+    }
+
+    /// Runs `f` on the filesystem the file is on, with the inode it has open.
+    fn inode<R>(&self, f: impl FnOnce(FsContext<'_>, Ino) -> R) -> Result<R> {
+        self.context(|ctx| {
+            let ino = ctx.fs.descriptor(self.fd)?.ino;
+            Ok(f(ctx, ino))
+        })
+    }
+
+    /// Everything in the file, read the way `std::fs::read` reads: until
+    /// there is no more, however little each read returns.
+    fn read_all(&self) -> Result<Vec<u8>> {
+        let meta = self.metadata()?;
+        // A directory opens, but only a file has bytes to read.
+        if meta.is_dir() {
+            return Err(EISDIR.into());
+        }
+        let len = usize::try_from(meta.len()).map_err(|_| ErrorKind::FileTooLarge)?;
+        let mut buf = Vec::new();
+        let room = buf.try_reserve_exact(len);
+        room.map_err(|_| ErrorKind::OutOfMemory)?;
+        buf.resize(len, 0);
+        let mut filled = 0;
+        while filled < len {
+            match self.read_at_internal(&mut buf[filled..], filled as u64)? {
+                0 => break,
+                n => filled += n,
+            }
+        }
+        buf.truncate(filled);
+        Ok(buf)
+    }
+
     /// Queries metadata about the file.
     pub fn metadata(&self) -> Result<Metadata> {
-        FsContext::current(|ctx| {
-            let path = ctx
-                .fs
-                .open_handles
-                .get(&self.fd)
-                .ok_or_else(|| Error::new(ErrorKind::NotFound, "file handle not found"))?;
-
-            let len = ctx.fs.file_len(path);
-            let (crtime, mtime, ctime) = ctx.fs.file_timestamps(path).unwrap_or((
-                Duration::ZERO,
-                Duration::ZERO,
-                Duration::ZERO,
-            ));
-            let mode = ctx.fs.file_mode(path).unwrap_or(0o644);
-            let nlink = ctx.fs.file_nlink(path);
-
-            Ok(Metadata {
-                len,
-                is_dir: false,     // File handles are always for regular files
-                is_symlink: false, // File handles are never symlinks
-                crtime,
-                mtime,
-                ctime,
-                mode,
-                nlink,
-            })
-        })
+        self.inode(|ctx, ino| Metadata(ctx.fs.tree.stat(ino)))
     }
 
     /// Truncates or extends the file to the specified size.
     pub fn set_len(&self, size: u64) -> Result<()> {
-        if !self.writable {
-            return Err(Error::new(
-                ErrorKind::PermissionDenied,
-                "file not opened for writing",
-            ));
-        }
+        // `std::fs` takes no size that the system call has no number for.
+        let size = i64::try_from(size).map_err(|e| Error::new(ErrorKind::InvalidInput, e))?;
+        self.context(|ctx| ctx.fs.set_len(self.fd, size as u64))
+    }
 
-        FsContext::current(|mut ctx| {
-            let path = ctx
-                .fs
-                .open_handles
-                .get(&self.fd)
-                .ok_or_else(|| Error::new(ErrorKind::NotFound, "file handle not found"))?
-                .clone();
+    /// Changes the permissions of the file.
+    pub fn set_permissions(&self, perm: Permissions) -> Result<()> {
+        self.inode(|ctx, ino| ctx.fs.tree.set_mode(ino, perm.mode, ctx.now))
+    }
 
-            ctx.fs.set_file_len(&path, size, ctx.now);
-            let sync_prob = ctx.fs.sync_probability;
+    /// Changes the timestamps of the file. Those that `times` leaves out
+    /// stay as they are.
+    pub fn set_times(&self, times: FileTimes) -> Result<()> {
+        let (accessed, modified) = (times.accessed, times.modified);
+        let times = Times::new(accessed.map(since_epoch), modified.map(since_epoch));
+        self.inode(|ctx, ino| ctx.fs.tree.set_times(ino, times, ctx.now))
+    }
 
-            // Maybe randomly sync file data (simulates OS/disk flushing pending operations)
-            // Note: This only syncs file data, not directory entries. Real OSes may flush
-            // file data to disk but won't necessarily sync directory entries.
-            if sync_prob > 0.0 && ctx.random_bool(sync_prob) {
-                let _ = ctx.fs.sync_file(&path);
-            }
-
-            Ok(())
-        })
+    /// Changes the modification time of the file.
+    pub fn set_modified(&self, time: SystemTime) -> Result<()> {
+        self.set_times(FileTimes::new().set_modified(time))
     }
 
     /// Attempts to sync all OS-internal metadata and data to disk.
@@ -603,6 +603,11 @@ impl File {
     /// To make a newly created file fully durable, you must also call
     /// [`sync_dir`] on the parent directory.
     ///
+    /// # Directories
+    ///
+    /// On an open directory this is what [`sync_dir`] does: it makes the
+    /// directory's entries durable.
+    ///
     /// # Example
     ///
     /// ```ignore
@@ -623,16 +628,7 @@ impl File {
     /// If overwriting an **existing** file that was previously synced, you only
     /// need `sync_all()` - the directory entry already exists and is durable.
     pub fn sync_all(&self) -> Result<()> {
-        FsContext::current(|ctx| {
-            let path = ctx
-                .fs
-                .open_handles
-                .get(&self.fd)
-                .ok_or_else(|| Error::new(ErrorKind::NotFound, "file handle not found"))?
-                .clone();
-
-            ctx.fs.sync_file(&path).map_err(Error::other)
-        })
+        self.context(|ctx| ctx.fs.sync(self.fd))
     }
 
     /// Attempts to sync file data to disk, but not all metadata.
@@ -640,52 +636,18 @@ impl File {
     /// This is equivalent to calling `fdatasync()` on the file descriptor.
     /// It syncs file contents and size, but may not sync all metadata.
     ///
-    /// In turmoil's implementation, this behaves identically to [`sync_all`]
-    /// for file data. The distinction matters more for the directory entry:
-    /// neither `sync_data` nor `sync_all` syncs the directory entry - you
-    /// need [`sync_dir`] for that.
+    /// This leaves changes to permissions and timestamps pending.
+    /// The directory entry is synced separately with [`sync_dir`].
     pub fn sync_data(&self) -> Result<()> {
-        FsContext::current(|ctx| {
-            let path = ctx
-                .fs
-                .open_handles
-                .get(&self.fd)
-                .ok_or_else(|| Error::new(ErrorKind::NotFound, "file handle not found"))?
-                .clone();
-
-            ctx.fs.sync_file_data(&path).map_err(Error::other)
-        })
+        self.context(|ctx| ctx.fs.sync_data(self.fd))
     }
 
-    /// Creates a new independently owned handle to the underlying file.
-    ///
-    /// The returned `File` is a reference to the same state that this object
-    /// references. Both handles will read and write at independent cursors.
+    /// Creates a new `File` that shares the underlying open file with this
+    /// one, cursor included: reads, writes and seeks through either handle
+    /// move both.
     pub fn try_clone(&self) -> Result<File> {
-        FsContext::current(|ctx| {
-            let path = ctx
-                .fs
-                .open_handles
-                .get(&self.fd)
-                .ok_or_else(|| Error::new(ErrorKind::NotFound, "file handle not found"))?
-                .clone();
-
-            // Allocate new fd and register it
-            let new_fd = ctx.fs.alloc_fd();
-            ctx.fs.open_handles.insert(new_fd, path);
-            if self.direct_io {
-                ctx.fs.direct_io_fds.insert(new_fd);
-            }
-
-            Ok(File {
-                fd: new_fd,
-                readable: self.readable,
-                writable: self.writable,
-                append_mode: self.append_mode,
-                direct_io: self.direct_io,
-                cursor: std::sync::Mutex::new(0),
-            })
-        })
+        let fd = self.context(|ctx| ctx.fs.dup(self.fd))?;
+        Ok(File::from_parts(self.owner.clone(), fd, self.direct_io))
     }
 
     /// Returns whether this file was opened with O_DIRECT (bypasses page cache).
@@ -693,201 +655,45 @@ impl File {
         self.direct_io
     }
 
-    /// Returns the path this file was opened with.
+    /// Returns the path the file was opened by. Renaming or removing the
+    /// file does not change it.
     ///
     /// Returns `None` if the file handle is no longer valid.
     pub fn path(&self) -> Option<PathBuf> {
-        FsContext::current(|ctx| ctx.fs.open_handles.get(&self.fd).cloned())
+        let path = |ctx: FsContext<'_>| Ok(ctx.fs.descriptor(self.fd)?.path.clone());
+        self.context(path).ok()
     }
 
     /// Internal read implementation.
     pub(crate) fn read_at_internal(&self, buf: &mut [u8], offset: u64) -> Result<usize> {
-        if !self.readable {
-            return Err(Error::new(
-                ErrorKind::PermissionDenied,
-                "file not opened for reading",
-            ));
-        }
-
-        FsContext::current(|mut ctx| {
-            // Check O_DIRECT alignment requirements
-            if self.direct_io {
-                let alignment = ctx.fs.direct_io_alignment;
-                let align = alignment as usize;
-                if !(buf.as_ptr() as usize).is_multiple_of(align)
-                    || !offset.is_multiple_of(alignment)
-                    || !buf.len().is_multiple_of(align)
-                {
-                    return Err(Error::new(
-                        ErrorKind::InvalidInput,
-                        format!(
-                            "direct I/O: buffer pointer, offset, and length must be aligned to {alignment} bytes"
-                        ),
-                    ));
-                }
-            }
-
-            // Check for random I/O error
-            let io_err_prob = ctx.fs.io_error_probability;
-            if io_err_prob > 0.0 && ctx.random_bool(io_err_prob) {
-                return Err(Error::other("I/O error"));
-            }
-
-            let path = ctx
-                .fs
-                .open_handles
-                .get(&self.fd)
-                .ok_or_else(|| Error::new(ErrorKind::NotFound, "file handle not found"))?
-                .clone();
-            let corruption_prob = ctx.fs.corruption_probability;
-            let short_read_prob = ctx.fs.short_read_probability;
-
-            let mut n = ctx.fs.read_file(&path, buf, offset);
-
-            // Inject a short read: trim the reported count to something strictly
-            // smaller than what was actually filled, and zero the tail so callers
-            // that incorrectly assume full-read semantics observe garbage instead
-            // of silently-correct data. We only do this when at least 2 bytes
-            // were read, so the returned count is still > 0 (a return of 0 means
-            // EOF, which is a distinct signal we don't want to fake). This
-            // applies to O_DIRECT too — signals (EINTR) can short-circuit any
-            // blocking syscall, including aligned O_DIRECT pread.
-            if n > 1 && short_read_prob > 0.0 && ctx.random_bool(short_read_prob) {
-                let short = ctx.random_range(1..n);
-                buf[short..n].fill(0);
-                n = short;
-            }
-
-            // Check for random silent corruption
-            if n > 0 && corruption_prob > 0.0 && ctx.random_bool(corruption_prob) {
-                // Corrupt a random byte in the buffer by flipping bits
-                let corrupt_offset = ctx.random_range(0..n);
-                let corrupt_byte = ctx.random_u8();
-                buf[corrupt_offset] ^= corrupt_byte.max(1); // Ensure at least one bit flip
-
-                // Fire the installed corruption hook (turmoil's
-                // `unstable-barriers` integration installs this; if
-                // not installed, the call is a no-op).
-                crate::fire_corruption(
-                    ctx.fs,
-                    &crate::FsCorruption {
-                        path: path.clone(),
-                        offset: offset + corrupt_offset as u64,
-                        len: 1,
-                    },
-                );
-            }
-
-            Ok(n)
-        })
+        self.context(|ctx| ctx.fs.read_at(self.fd, buf, offset))
     }
 
     /// Internal write implementation.
     pub(crate) fn write_at_internal(&self, buf: &[u8], offset: u64) -> Result<usize> {
-        if !self.writable {
-            return Err(Error::new(
-                ErrorKind::PermissionDenied,
-                "file not opened for writing",
-            ));
-        }
-
-        FsContext::current(|mut ctx| {
-            // Check O_DIRECT alignment requirements
-            if self.direct_io {
-                let alignment = ctx.fs.direct_io_alignment;
-                let align = alignment as usize;
-                if !(buf.as_ptr() as usize).is_multiple_of(align)
-                    || !offset.is_multiple_of(alignment)
-                    || !buf.len().is_multiple_of(align)
-                {
-                    return Err(Error::new(
-                        ErrorKind::InvalidInput,
-                        format!(
-                            "direct I/O: buffer pointer, offset, and length must be aligned to {alignment} bytes"
-                        ),
-                    ));
-                }
-            }
-
-            // Check for random I/O error
-            let io_err_prob = ctx.fs.io_error_probability;
-            if io_err_prob > 0.0 && ctx.random_bool(io_err_prob) {
-                return Err(Error::other("I/O error"));
-            }
-
-            let path = ctx
-                .fs
-                .open_handles
-                .get(&self.fd)
-                .ok_or_else(|| Error::new(ErrorKind::NotFound, "file handle not found"))?
-                .clone();
-
-            // Check capacity
-            let current_len = ctx.fs.file_len(&path);
-            let write_end = offset + buf.len() as u64;
-            let additional = write_end.saturating_sub(current_len);
-            if additional > 0 {
-                ctx.fs.check_space(additional).map_err(Error::other)?;
-            }
-
-            ctx.fs.write_file(&path, offset, buf, ctx.now);
-            let sync_prob = ctx.fs.sync_probability;
-
-            // Maybe randomly sync file data (simulates OS/disk flushing pending operations)
-            // Note: This only syncs file data, not directory entries. Real OSes may flush
-            // file data to disk but won't necessarily sync directory entries.
-            if sync_prob > 0.0 && ctx.random_bool(sync_prob) {
-                let _ = ctx.fs.sync_file(&path);
-            }
-
-            Ok(buf.len())
-        })
+        let written = self.context(|ctx| ctx.fs.write_at(self.fd, buf, offset))?;
+        Ok(written.len)
     }
 
     /// Create a File from internal state (used by OpenOptions).
-    pub(crate) fn from_parts(
-        fd: RawFd,
-        readable: bool,
-        writable: bool,
-        append_mode: bool,
-        direct_io: bool,
-    ) -> Self {
+    fn from_parts(owner: FileOwner, fd: RawFd, direct_io: bool) -> Self {
         Self {
+            owner,
             fd,
-            readable,
-            writable,
-            append_mode,
             direct_io,
-            cursor: std::sync::Mutex::new(0),
         }
     }
 }
 
-impl std::io::Read for File {
+impl Read for &File {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
-        let mut cursor = self.cursor.lock().unwrap();
-        let n = self.read_at_internal(buf, *cursor)?;
-        *cursor += n as u64;
-        Ok(n)
+        self.context(|ctx| ctx.fs.read(self.fd, buf))
     }
 }
 
-impl std::io::Write for File {
+impl Write for &File {
     fn write(&mut self, buf: &[u8]) -> Result<usize> {
-        let mut cursor = self.cursor.lock().unwrap();
-        let offset = if self.append_mode {
-            // Append mode: always write at end
-            FsContext::current(|ctx| {
-                let path = ctx.fs.open_handles.get(&self.fd)?;
-                Some(ctx.fs.file_len(path))
-            })
-            .unwrap_or(*cursor)
-        } else {
-            *cursor
-        };
-        let n = self.write_at_internal(buf, offset)?;
-        *cursor = offset + n as u64;
-        Ok(n)
+        self.context(|ctx| ctx.fs.write(self.fd, buf))
     }
 
     fn flush(&mut self) -> Result<()> {
@@ -895,41 +701,37 @@ impl std::io::Write for File {
     }
 }
 
-impl std::io::Seek for File {
-    fn seek(&mut self, pos: std::io::SeekFrom) -> Result<u64> {
-        let mut cursor = self.cursor.lock().unwrap();
-        let file_len = FsContext::current(|ctx| {
-            let path = ctx.fs.open_handles.get(&self.fd)?;
-            Some(ctx.fs.file_len(path))
-        });
+impl Seek for &File {
+    fn seek(&mut self, pos: SeekFrom) -> Result<u64> {
+        self.context(|ctx| ctx.fs.seek(self.fd, pos))
+    }
+}
 
-        let new_pos = match pos {
-            std::io::SeekFrom::Start(offset) => offset as i64,
-            std::io::SeekFrom::End(offset) => {
-                file_len.ok_or_else(|| Error::new(ErrorKind::NotFound, "file not found"))? as i64
-                    + offset
-            }
-            std::io::SeekFrom::Current(offset) => *cursor as i64 + offset,
-        };
+impl Read for File {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
+        (&*self).read(buf)
+    }
+}
 
-        if new_pos < 0 {
-            return Err(Error::new(
-                ErrorKind::InvalidInput,
-                "invalid seek to a negative position",
-            ));
-        }
+impl Write for File {
+    fn write(&mut self, buf: &[u8]) -> Result<usize> {
+        (&*self).write(buf)
+    }
 
-        *cursor = new_pos as u64;
-        Ok(*cursor)
+    fn flush(&mut self) -> Result<()> {
+        (&*self).flush()
+    }
+}
+
+impl Seek for File {
+    fn seek(&mut self, pos: SeekFrom) -> Result<u64> {
+        (&*self).seek(pos)
     }
 }
 
 impl Drop for File {
     fn drop(&mut self) {
-        FsContext::current_if_set(|ctx| {
-            ctx.fs.open_handles.swap_remove(&self.fd);
-            ctx.fs.direct_io_fds.swap_remove(&self.fd);
-        });
+        self.owner.close(self.fd);
     }
 }
 
@@ -950,67 +752,48 @@ impl std::os::fd::AsRawFd for File {
 
 /// Metadata information about a file.
 #[derive(Debug, Clone)]
-pub struct Metadata {
-    len: u64,
-    is_dir: bool,
-    is_symlink: bool,
-    /// Creation time (birthtime)
-    crtime: Duration,
-    /// Modification time
-    mtime: Duration,
-    /// Change time (inode change).
-    /// Exposed via MetadataExt::ctime().
-    ctime: Duration,
-    /// Unix permission mode bits
-    mode: u32,
-    /// Number of hard links to this file
-    nlink: u64,
-}
+pub struct Metadata(Stat);
 
 impl Metadata {
     /// Returns the size of the file in bytes.
     #[allow(clippy::len_without_is_empty)] // is_empty() is not part of std::fs::Metadata
     pub fn len(&self) -> u64 {
-        self.len
+        self.0.len
     }
 
     /// Returns true if this metadata is for a regular file.
     pub fn is_file(&self) -> bool {
-        !self.is_dir && !self.is_symlink
+        self.file_type().is_file()
     }
 
     /// Returns true if this metadata is for a directory.
     pub fn is_dir(&self) -> bool {
-        self.is_dir
+        self.file_type().is_dir()
     }
 
     /// Returns true if this metadata is for a symbolic link.
     pub fn is_symlink(&self) -> bool {
-        self.is_symlink
+        self.file_type().is_symlink()
     }
 
     /// Returns the file type for this metadata.
     pub fn file_type(&self) -> FileType {
-        FileType {
-            is_dir: self.is_dir,
-            is_symlink: self.is_symlink,
-        }
+        FileType(self.0.kind)
     }
 
     /// Returns the last modification time.
     ///
     /// This is updated when file contents are modified (writes, truncate).
     pub fn modified(&self) -> Result<SystemTime> {
-        Ok(UNIX_EPOCH + self.mtime)
+        Ok(UNIX_EPOCH + self.0.meta.mtime)
     }
 
     /// Returns the last access time.
     ///
-    /// Note: turmoil simulates noatime behavior, so this always returns
-    /// the creation time (atime is not updated on reads).
+    /// Note: turmoil simulates noatime behavior, so reads leave this alone.
+    /// It is the creation time until [`File::set_times`] sets it.
     pub fn accessed(&self) -> Result<SystemTime> {
-        // noatime: return creation time instead of tracking access time
-        Ok(UNIX_EPOCH + self.crtime)
+        Ok(UNIX_EPOCH + self.0.meta.atime)
     }
 
     /// Returns the creation time (birthtime).
@@ -1019,12 +802,13 @@ impl Metadata {
     /// support it, `std::fs::Metadata::created()` returns an error. Our
     /// simulation always tracks it.
     pub fn created(&self) -> Result<SystemTime> {
-        Ok(UNIX_EPOCH + self.crtime)
+        Ok(UNIX_EPOCH + self.0.meta.crtime)
     }
 
-    /// Returns the permissions of the file.
+    /// Returns the permissions of the file. As with `std::fs`, their mode
+    /// holds the type of the file as well.
     pub fn permissions(&self) -> Permissions {
-        Permissions { mode: self.mode }
+        Permissions::from_mode(self.mode())
     }
 }
 
@@ -1034,23 +818,21 @@ impl std::os::unix::fs::MetadataExt for Metadata {
     }
 
     fn ino(&self) -> u64 {
-        0 // Simulated inode
+        self.0.ino
     }
 
     fn mode(&self) -> u32 {
         // Include file type bits: regular file (0o100000), directory (0o40000), symlink (0o120000)
-        let type_bits = if self.is_symlink {
-            0o120000
-        } else if self.is_dir {
-            0o040000
-        } else {
-            0o100000
+        let type_bits = match self.0.kind {
+            FileKind::Symlink => 0o120000,
+            FileKind::Dir => 0o040000,
+            FileKind::File => 0o100000,
         };
-        type_bits | self.mode
+        type_bits | self.0.meta.mode
     }
 
     fn nlink(&self) -> u64 {
-        self.nlink
+        self.0.nlink
     }
 
     fn uid(&self) -> u32 {
@@ -1066,32 +848,31 @@ impl std::os::unix::fs::MetadataExt for Metadata {
     }
 
     fn size(&self) -> u64 {
-        self.len
+        self.0.len
     }
 
     fn atime(&self) -> i64 {
-        // noatime: return creation time
-        self.crtime.as_secs() as i64
+        self.0.meta.atime.as_secs() as i64
     }
 
     fn atime_nsec(&self) -> i64 {
-        self.crtime.subsec_nanos() as i64
+        self.0.meta.atime.subsec_nanos() as i64
     }
 
     fn mtime(&self) -> i64 {
-        self.mtime.as_secs() as i64
+        self.0.meta.mtime.as_secs() as i64
     }
 
     fn mtime_nsec(&self) -> i64 {
-        self.mtime.subsec_nanos() as i64
+        self.0.meta.mtime.subsec_nanos() as i64
     }
 
     fn ctime(&self) -> i64 {
-        self.ctime.as_secs() as i64
+        self.0.meta.ctime.as_secs() as i64
     }
 
     fn ctime_nsec(&self) -> i64 {
-        self.ctime.subsec_nanos() as i64
+        self.0.meta.ctime.subsec_nanos() as i64
     }
 
     fn blksize(&self) -> u64 {
@@ -1099,14 +880,18 @@ impl std::os::unix::fs::MetadataExt for Metadata {
     }
 
     fn blocks(&self) -> u64 {
-        // Number of 512-byte blocks allocated
-        self.len.div_ceil(512)
+        self.0.blocks
     }
 }
 
 /// Options and flags for opening files.
 ///
 /// Drop-in replacement for `std::fs::OpenOptions`.
+///
+/// The custom flags of `OpenOptionsExt` are the host's flags for `open(2)`.
+/// Those that mean something to the simulation do what they do on Linux:
+/// `O_APPEND`, `O_CREAT`, `O_EXCL`, `O_TRUNC`, `O_NOFOLLOW`, `O_DIRECTORY`,
+/// `O_DIRECT`, `O_SYNC` and `O_DSYNC`. The rest are ignored.
 #[derive(Debug, Clone)]
 pub struct OpenOptions {
     read: bool,
@@ -1115,7 +900,7 @@ pub struct OpenOptions {
     truncate: bool,
     create: bool,
     create_new: bool,
-    /// Unix mode bits for file creation (default: 0o644)
+    /// Unix mode bits for file creation, before the umask (default: 0o666)
     mode: u32,
     /// Custom flags (for OpenOptionsExt compatibility)
     custom_flags: i32,
@@ -1132,7 +917,7 @@ impl Default for OpenOptions {
             truncate: false,
             create: false,
             create_new: false,
-            mode: 0o644,
+            mode: 0o666,
             custom_flags: 0,
             direct_io: false,
         }
@@ -1184,8 +969,9 @@ impl OpenOptions {
     /// Sets the option for direct I/O (bypasses page cache).
     ///
     /// This is a turmoil-specific extension that works on all platforms.
-    /// On real systems, you would use `custom_flags(libc::O_DIRECT)` on Linux
-    /// or `fcntl(F_NOCACHE)` on macOS.
+    /// On real systems, you would use `custom_flags(libc::O_DIRECT)` on
+    /// Linux, which this shim takes to mean the same, or `fcntl(F_NOCACHE)`
+    /// on macOS.
     ///
     /// When enabled, reads and writes bypass the simulated page cache,
     /// always incurring full I/O latency. Additionally, all reads and writes
@@ -1232,84 +1018,55 @@ impl OpenOptions {
     /// Sets custom flags for file opening.
     ///
     /// This is used internally by the OpenOptionsExt trait implementation.
-    /// Note: custom_flags are currently stored but not used in the simulation.
     pub(crate) fn set_custom_flags(&mut self, flags: i32) {
         self.custom_flags = flags;
     }
 
     /// Opens a file at `path` with the options specified by `self`.
+    ///
+    /// As on Linux, a directory opens only for reading. Options that could
+    /// change or create a file fail on one with `IsADirectory`, or with
+    /// `AlreadyExists` if they are to create a new file.
     pub fn open<P: AsRef<Path>>(&self, path: P) -> Result<File> {
-        let path = path.as_ref().to_path_buf();
+        let path = c_path(&path)?;
+        let mut how = Open::from_flags(self.flags()?, self.mode)?;
+        how.direct |= self.direct_io;
+        let fs = Fs::current();
+        let fd = fs.context(|ctx| ctx.fs.open(path, &how))?;
+        Ok(File::from_parts(FileOwner::new(&fs), fd, how.direct))
+    }
 
-        FsContext::current(|ctx| {
-            // Follow symlinks to resolve the actual file path
-            let resolved_path = if ctx.fs.symlink_exists(&path) {
-                ctx.fs
-                    .read_link(&path)
-                    .map_err(|e| Error::new(ErrorKind::NotFound, e))?
-            } else {
-                path.clone()
-            };
+    /// The flags that `std::fs` opens with: the access mode and the
+    /// creation mode it makes of the options, and the custom flags.
+    fn flags(&self) -> Result<i32> {
+        self.validate()?;
+        let flag = |on: bool, flag: i32| [0, flag][on as usize];
+        let access = match (self.read, self.write || self.append) {
+            (true, false) => O_RDONLY,
+            (true, true) => O_RDWR,
+            (false, _) => O_WRONLY,
+        };
+        let creation = match self.create_new {
+            true => O_CREAT | O_EXCL,
+            false => flag(self.create, O_CREAT) | flag(self.truncate, O_TRUNC),
+        };
+        let custom = self.custom_flags & !O_ACCMODE;
+        Ok(access | flag(self.append, O_APPEND) | creation | custom)
+    }
 
-            // A directory cannot be created over or opened for writing.
-            if ctx.fs.dir_exists(&resolved_path) {
-                if self.create_new {
-                    return Err(Error::new(ErrorKind::AlreadyExists, "file already exists"));
-                }
-                if self.create || self.write || self.append || self.truncate {
-                    return Err(Error::new(ErrorKind::IsADirectory, "Is a directory"));
-                }
-            }
-
-            let file_exists = ctx.fs.file_exists(&resolved_path);
-
-            // Handle create_new: fail if file exists
-            if self.create_new && file_exists {
-                return Err(Error::new(ErrorKind::AlreadyExists, "file already exists"));
-            }
-
-            // Handle missing file
-            if !file_exists {
-                if self.create || self.create_new {
-                    // Check parent directory exists
-                    if !ctx.fs.parent_exists(&resolved_path) {
-                        return Err(Error::new(
-                            ErrorKind::NotFound,
-                            "parent directory not found",
-                        ));
-                    }
-                    // Create new file with mode
-                    ctx.fs
-                        .create_file_with_mode(&resolved_path, ctx.now, self.mode);
-                } else {
-                    return Err(Error::new(ErrorKind::NotFound, "file not found"));
-                }
-            }
-
-            // Handle truncate (pending until sync, like other operations)
-            if self.truncate && self.write {
-                ctx.fs.set_file_len(&resolved_path, 0, ctx.now);
-            }
-
-            // Allocate file descriptor - store the resolved path
-            let fd = ctx.fs.alloc_fd();
-            ctx.fs.open_handles.insert(fd, resolved_path);
-
-            // Check for direct I/O (bypasses page cache)
-            // Can be set via direct_io() method or custom_flags(O_DIRECT)
-            let direct_io = self.direct_io || (self.custom_flags & O_DIRECT) != 0;
-            if direct_io {
-                ctx.fs.direct_io_fds.insert(fd);
-            }
-
-            Ok(File::from_parts(
-                fd,
-                self.read,
-                self.write || self.append,
-                self.append,
-                direct_io,
-            ))
-        })
+    /// Refuses the combinations that `std::fs` refuses, which it does
+    /// before it asks the filesystem for anything.
+    fn validate(&self) -> Result<()> {
+        let makes = self.create || self.create_new || self.truncate;
+        let inaccessible = "must specify at least one of read, write, or append access";
+        let unwritable = "creating or truncating a file requires write or append access";
+        let reason = match (self.write, self.append) {
+            (false, false) if makes => unwritable,
+            (false, false) if !self.read => inaccessible,
+            (_, true) if self.truncate && !self.create_new => unwritable,
+            _ => return Ok(()),
+        };
+        Err(invalid(reason))
     }
 }
 
@@ -1328,20 +1085,19 @@ pub struct Permissions {
 }
 
 impl Permissions {
-    /// Returns true if these permissions describe a readonly (unwritable) file.
+    /// Returns true if these permissions describe a readonly (unwritable)
+    /// file: one that nobody may write, as with `std::fs`.
     pub fn readonly(&self) -> bool {
-        // Check if write bits are not set for owner
-        (self.mode & 0o200) == 0
+        self.mode & 0o222 == 0
     }
 
-    /// Modifies the readonly flag for this set of permissions.
+    /// Modifies the readonly flag for this set of permissions. As with
+    /// `std::fs`, this is `chmod a-w` or `chmod a+w`: clearing the flag
+    /// lets everybody write.
     pub fn set_readonly(&mut self, readonly: bool) {
-        if readonly {
-            // Clear write bits for owner, group, others
-            self.mode &= !0o222;
-        } else {
-            // Set write bit for owner
-            self.mode |= 0o200;
+        match readonly {
+            true => self.mode &= !0o222,
+            false => self.mode |= 0o222,
         }
     }
 
@@ -1372,35 +1128,54 @@ impl std::os::unix::fs::PermissionsExt for Permissions {
 
 /// Set the permissions of a file or directory.
 pub fn set_permissions<P: AsRef<Path>>(path: P, perm: Permissions) -> Result<()> {
-    let path = path.as_ref().to_path_buf();
+    let path = c_path(&path)?;
     FsContext::current(|ctx| {
-        ctx.fs
-            .set_permissions(&path, perm.mode, ctx.now)
-            .map_err(Error::other)
+        let ino = ctx.fs.tree.resolve(path, true)?;
+        ctx.fs.tree.set_mode(ino, perm.mode, ctx.now);
+        Ok(())
     })
 }
 
-/// Creates a new symbolic link on the filesystem.
+/// Representation of the various timestamps on a file.
 ///
-/// The `link` path will be a symbolic link pointing to the `original` path.
-pub fn symlink<P: AsRef<Path>, Q: AsRef<Path>>(original: P, link: Q) -> Result<()> {
-    let original = original.as_ref().to_path_buf();
-    let link = link.as_ref().to_path_buf();
-    FsContext::current(|ctx| {
-        ctx.fs
-            .create_symlink(&link, &original, ctx.now)
-            .map_err(Error::other)
-    })
+/// Drop-in replacement for `std::fs::FileTimes`.
+#[derive(Copy, Clone, Debug, Default)]
+#[must_use = "must be applied to a file via `File::set_times` to have any effect"]
+pub struct FileTimes {
+    accessed: Option<SystemTime>,
+    modified: Option<SystemTime>,
+}
+
+impl FileTimes {
+    /// Creates a new `FileTimes` with no times set.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the last access time of a file.
+    pub fn set_accessed(mut self, t: SystemTime) -> Self {
+        self.accessed = Some(t);
+        self
+    }
+
+    /// Sets the last modified time of a file.
+    pub fn set_modified(mut self, t: SystemTime) -> Self {
+        self.modified = Some(t);
+        self
+    }
+}
+
+/// Simulated time starts at the epoch, and the filesystem holds no time
+/// before it. As Linux does with a time a filesystem cannot hold, it keeps
+/// the nearest one it can.
+fn since_epoch(time: SystemTime) -> Duration {
+    time.duration_since(UNIX_EPOCH).unwrap_or_default()
 }
 
 /// Reads the target of a symbolic link.
-pub fn read_link<P: AsRef<Path>>(path: P) -> Result<std::path::PathBuf> {
-    let path = path.as_ref().to_path_buf();
-    FsContext::current(|ctx| {
-        ctx.fs
-            .read_link(&path)
-            .map_err(|e| Error::new(ErrorKind::NotFound, e))
-    })
+pub fn read_link<P: AsRef<Path>>(path: P) -> Result<PathBuf> {
+    let path = c_path(&path)?;
+    FsContext::current(|ctx| ctx.fs.tree.read_link(path))
 }
 
 /// Returns metadata for a path without following symlinks.
@@ -1408,76 +1183,7 @@ pub fn read_link<P: AsRef<Path>>(path: P) -> Result<std::path::PathBuf> {
 /// If `path` is a symlink, this returns metadata for the symlink itself,
 /// not the target.
 pub fn symlink_metadata<P: AsRef<Path>>(path: P) -> Result<Metadata> {
-    let path = path.as_ref().to_path_buf();
-    FsContext::current(|ctx| {
-        // Check if it's a symlink first (don't follow)
-        if ctx.fs.symlink_exists(&path) {
-            let (crtime, mtime, ctime) = ctx.fs.symlink_timestamps(&path).unwrap_or((
-                Duration::ZERO,
-                Duration::ZERO,
-                Duration::ZERO,
-            ));
-            // Symlinks have mode 0o777 (lrwxrwxrwx) on most Unix systems
-            return Ok(Metadata {
-                len: 0,
-                is_dir: false,
-                is_symlink: true,
-                crtime,
-                mtime,
-                ctime,
-                mode: 0o777,
-                nlink: 1, // Symlinks always have nlink=1
-            });
-        }
-
-        // Otherwise, same as metadata()
-        if ctx.fs.file_exists(&path) {
-            let len = ctx.fs.file_len(&path);
-            let (crtime, mtime, ctime) = ctx.fs.file_timestamps(&path).unwrap_or((
-                Duration::ZERO,
-                Duration::ZERO,
-                Duration::ZERO,
-            ));
-            let mode = ctx.fs.file_mode(&path).unwrap_or(0o644);
-            let nlink = ctx.fs.file_nlink(&path);
-
-            return Ok(Metadata {
-                len,
-                is_dir: false,
-                is_symlink: false,
-                crtime,
-                mtime,
-                ctime,
-                mode,
-                nlink,
-            });
-        }
-
-        if ctx.fs.dir_exists(&path) {
-            let (crtime, mtime, ctime) = ctx.fs.dir_timestamps(&path).unwrap_or((
-                Duration::ZERO,
-                Duration::ZERO,
-                Duration::ZERO,
-            ));
-            let mode = ctx.fs.dir_mode(&path).unwrap_or(0o755);
-
-            return Ok(Metadata {
-                len: 0,
-                is_dir: true,
-                is_symlink: false,
-                crtime,
-                mtime,
-                ctime,
-                mode,
-                nlink: 2, // Directories have at least 2 links
-            });
-        }
-
-        Err(Error::new(
-            ErrorKind::NotFound,
-            "file or directory not found",
-        ))
-    })
+    stat(path.as_ref(), false)
 }
 
 /// Creates a hard link on the filesystem.
@@ -1485,22 +1191,24 @@ pub fn symlink_metadata<P: AsRef<Path>>(path: P) -> Result<Metadata> {
 /// The `link` path will be a hard link to the `original` file.
 /// Both paths will refer to the same file content.
 pub fn hard_link<P: AsRef<Path>, Q: AsRef<Path>>(original: P, link: Q) -> Result<()> {
-    let original = original.as_ref().to_path_buf();
-    let link = link.as_ref().to_path_buf();
-    FsContext::current(|ctx| {
-        ctx.fs
-            .create_hard_link(&link, &original, ctx.now)
-            .map_err(Error::other)
-    })
+    let (original, link) = (c_path(&original)?, c_path(&link)?);
+    FsContext::current(|ctx| ctx.fs.tree.hard_link(original, link, ctx.now))
 }
 
 /// A builder for creating directories with options.
 ///
 /// Drop-in replacement for `std::fs::DirBuilder`.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct DirBuilder {
     recursive: bool,
+    /// Unix mode bits for the directories, before the umask (default: 0o777)
     mode: u32,
+}
+
+impl Default for DirBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl DirBuilder {
@@ -1508,7 +1216,7 @@ impl DirBuilder {
     pub fn new() -> Self {
         Self {
             recursive: false,
-            mode: 0o755,
+            mode: 0o777,
         }
     }
 
@@ -1520,11 +1228,32 @@ impl DirBuilder {
 
     /// Creates the directory at the given path.
     pub fn create<P: AsRef<Path>>(&self, path: P) -> Result<()> {
-        if self.recursive {
-            create_dir_all_with_mode(path, self.mode)
-        } else {
-            create_dir_with_mode(path, self.mode)
+        let (path, mode) = (c_path(&path)?, self.mode);
+        FsContext::current(|ctx| match self.recursive {
+            true => mkdir_all(&mut ctx.fs.tree, path, mode, ctx.now),
+            false => ctx.fs.tree.mkdir(path, mode, ctx.now),
+        })
+    }
+}
+
+/// Makes the directory at `path` and those on the way to it that are
+/// missing, the way `std::fs` goes about it: from the path up, and back.
+fn mkdir_all(tree: &mut Tree, path: &Path, mode: u32, now: Duration) -> Result<()> {
+    // As with `std::fs`, there is nothing to create for the empty path.
+    if path.as_os_str().is_empty() {
+        return Ok(());
+    }
+    let made = match (tree.mkdir(path, mode, now), path.parent()) {
+        (Err(missing), Some(parent)) if missing.kind() == ErrorKind::NotFound => {
+            mkdir_all(tree, parent, mode, now)?;
+            tree.mkdir(path, mode, now)
         }
+        (made, _) => made,
+    };
+    // Whatever went wrong, a directory that is there is what was asked for.
+    match made {
+        Err(_) if tree.resolve(path, true).is_ok_and(|ino| tree.is_dir(ino)) => Ok(()),
+        made => made,
     }
 }
 
@@ -1533,57 +1262,6 @@ impl std::os::unix::fs::DirBuilderExt for DirBuilder {
         self.mode = mode;
         self
     }
-}
-
-/// Create a directory with specified mode.
-fn create_dir_with_mode<P: AsRef<Path>>(path: P, mode: u32) -> Result<()> {
-    let path = path.as_ref().to_path_buf();
-    FsContext::current(|ctx| {
-        ctx.fs
-            .mkdir_with_mode(&path, ctx.now, mode)
-            .map_err(Error::other)
-    })
-}
-
-/// Create directories recursively with specified mode.
-fn create_dir_all_with_mode<P: AsRef<Path>>(path: P, mode: u32) -> Result<()> {
-    let path = path.as_ref().to_path_buf();
-    FsContext::current(|ctx| {
-        // Collect all ancestors that need to be created
-        let mut to_create = Vec::new();
-        let mut current = Some(path.as_path());
-
-        while let Some(p) = current {
-            if p.as_os_str().is_empty() {
-                break;
-            }
-            let pb = p.to_path_buf();
-            if ctx.fs.dir_exists(&pb) {
-                break;
-            }
-            to_create.push(pb);
-            current = p.parent();
-        }
-
-        // Create from root down
-        for dir in to_create.into_iter().rev() {
-            if ctx.fs.dir_exists(&dir) {
-                continue;
-            }
-            // A file in the way is an error, as with `std::fs::create_dir_all`.
-            if ctx.fs.file_exists(&dir) {
-                return Err(if dir == path {
-                    Error::new(ErrorKind::AlreadyExists, "File exists")
-                } else {
-                    Error::new(ErrorKind::NotADirectory, "Not a directory")
-                });
-            }
-            ctx.fs
-                .mkdir_with_mode(&dir, ctx.now, mode)
-                .map_err(Error::other)?;
-        }
-        Ok(())
-    })
 }
 
 /// Returns the canonical, absolute form of a path with all intermediate
@@ -1609,92 +1287,9 @@ fn create_dir_all_with_mode<P: AsRef<Path>>(path: P, mode: u32) -> Result<()> {
 /// // Normalizes . and ..
 /// assert_eq!(canonicalize("/data/../data/./file.txt")?, PathBuf::from("/data/file.txt"));
 /// ```
-pub fn canonicalize<P: AsRef<Path>>(path: P) -> Result<std::path::PathBuf> {
-    use std::collections::HashSet;
-
-    /// Maximum number of symlinks to follow before assuming a cycle.
-    /// POSIX typically allows 8-40 symlinks (Linux uses 40, macOS uses 32).
-    const MAX_SYMLINK_FOLLOWS: usize = 40;
-
-    let path = path.as_ref();
-    FsContext::current(|ctx| {
-        // Start with an absolute path
-        let mut result = PathBuf::new();
-
-        // Track symlinks we've followed to detect cycles
-        let mut visited_symlinks: HashSet<PathBuf> = HashSet::new();
-        let mut symlink_count = 0;
-
-        // Handle absolute vs relative paths
-        // In our simulation, all paths should be absolute (start with /)
-        if path.is_absolute() {
-            result.push("/");
-        } else {
-            // For relative paths, we'd need a current working directory
-            // For simplicity, treat as absolute from root
-            result.push("/");
-        }
-
-        // Process each component
-        for component in path.components() {
-            match component {
-                std::path::Component::RootDir => {
-                    // Already handled above
-                }
-                std::path::Component::CurDir => {
-                    // . - skip it
-                }
-                std::path::Component::ParentDir => {
-                    // .. - go up one level
-                    result.pop();
-                }
-                std::path::Component::Normal(name) => {
-                    result.push(name);
-
-                    // Check if this component is a symlink and resolve it
-                    // Keep resolving while the current path is a symlink
-                    while ctx.fs.symlink_exists(&result) {
-                        // Check for too many symlinks (ELOOP)
-                        symlink_count += 1;
-                        if symlink_count > MAX_SYMLINK_FOLLOWS {
-                            return Err(Error::other("too many levels of symbolic links"));
-                        }
-
-                        // Check for cycle: have we visited this exact symlink before?
-                        if !visited_symlinks.insert(result.clone()) {
-                            return Err(Error::other("symbolic link loop detected"));
-                        }
-
-                        let target = ctx
-                            .fs
-                            .read_link(&result)
-                            .map_err(|e| Error::new(ErrorKind::NotFound, e))?;
-
-                        // If target is absolute, replace result; otherwise append
-                        if target.is_absolute() {
-                            result = target;
-                        } else {
-                            result.pop(); // Remove the symlink name
-                            result.push(target);
-                        }
-                    }
-                }
-                std::path::Component::Prefix(_) => {
-                    // Windows-only, ignore in our Unix simulation
-                }
-            }
-        }
-
-        // Verify the final path exists
-        if !ctx.fs.file_exists(&result)
-            && !ctx.fs.dir_exists(&result)
-            && !ctx.fs.symlink_exists(&result)
-        {
-            return Err(Error::new(ErrorKind::NotFound, "path does not exist"));
-        }
-
-        Ok(result)
-    })
+pub fn canonicalize<P: AsRef<Path>>(path: P) -> Result<PathBuf> {
+    let path = c_path(&path)?;
+    FsContext::current(|ctx| ctx.fs.tree.canonicalize(path))
 }
 
 /// Removes a directory and all of its contents.
@@ -1726,37 +1321,24 @@ pub fn canonicalize<P: AsRef<Path>>(path: P) -> Result<std::path::PathBuf> {
 /// assert!(metadata("/data").is_err());
 /// ```
 pub fn remove_dir_all<P: AsRef<Path>>(path: P) -> Result<()> {
-    let path = path.as_ref().to_path_buf();
+    let path = c_path(&path)?;
     FsContext::current(|ctx| {
-        if !ctx.fs.dir_exists(&path) {
-            return Err(Error::new(ErrorKind::NotFound, "directory not found"));
+        let (tree, now) = (&mut ctx.fs.tree, ctx.now);
+        // The way `std::fs` goes about it on Linux: a symlink is removed
+        // rather than followed, unless a slash follows it. A directory is
+        // emptied and then removed by the path, which may fail by then, or
+        // find nothing there.
+        let ino = tree.resolve(path, false)?;
+        match tree.stat(ino).kind {
+            FileKind::Symlink => tree.unlink(path, now),
+            FileKind::File => Err(ENOTDIR.into()),
+            FileKind::Dir => {
+                tree.clear(ino, now);
+                match tree.rmdir(path, now) {
+                    Err(gone) if gone.kind() == ErrorKind::NotFound => Ok(()),
+                    removed => removed,
+                }
+            }
         }
-
-        // Collect all entries to remove (we need to collect first to avoid
-        // modifying while iterating)
-        remove_dir_contents_recursive(ctx.fs, &path)?;
-
-        // Finally remove the directory itself
-        ctx.fs.rmdir(&path).map_err(Error::other)
     })
-}
-
-/// Helper function to recursively remove directory contents.
-fn remove_dir_contents_recursive(fs: &mut crate::FsState, path: &Path) -> Result<()> {
-    // Get all entries in this directory
-    let entries = fs.dir_entries(path);
-
-    for entry_path in entries {
-        if fs.dir_exists(&entry_path) {
-            // Recursively remove subdirectory contents
-            remove_dir_contents_recursive(fs, &entry_path)?;
-            // Remove the now-empty subdirectory
-            fs.rmdir(&entry_path).map_err(Error::other)?;
-        } else if fs.file_exists(&entry_path) || fs.symlink_exists(&entry_path) {
-            // Remove file or symlink
-            fs.unlink(&entry_path).map_err(Error::other)?;
-        }
-    }
-
-    Ok(())
 }

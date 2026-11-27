@@ -19,11 +19,17 @@
 //!
 //! # Durability Model
 //!
-//! - File creation and writes go to a "pending" state
-//! - Pending operations become durable on `sync_all()` or randomly based on [`FsConfig::sync_probability`]
+//! - Writes and truncations are pending until the file is synced with
+//!   `sync_all()`, or randomly based on [`FsConfig::sync_probability`]
+//! - Creations and removals are pending until the directory holding the
+//!   name is synced, with `sync_dir()` or `sync_all()` on the open directory
+//! - A rename is pending until the directory the name was durable in, or
+//!   the one it lives in now, is synced. It then becomes durable as a whole:
+//!   a crash never finds the file under both names, and never loses a file
+//!   it would have found under the old one
 //! - On crash (`sim.crash()`):
-//!   - Files that were never synced are deleted entirely
-//!   - Pending writes to synced files are lost; durable data survives
+//!   - Pending writes and pending names are lost; durable data survives
+//!   - A file that no durable name reaches is gone, synced or not
 //! - Each host has its own isolated filesystem namespace
 //!
 //! # Setup
@@ -38,21 +44,36 @@
 //! `Fs` per host. Before each tick, advance time via [`Fs::set_now`]
 //! and call `fs.enter()`. Cloning an `Fs` is cheap (shared state).
 
+mod errno;
+mod hash;
 pub mod shim;
+mod tree;
 
-use indexmap::{IndexMap, IndexSet};
-use rand::{Rng, RngCore};
+pub use tree::Ino;
+
+use errno::{EBADF, EFBIG, EINVAL, EIO, ENOSPC};
+use hash::{IdMap, IdSet};
+use rand::rngs::SmallRng;
+use rand::{Rng, RngCore, SeedableRng};
 use rand_distr::{Distribution, Exp};
+use scoped_tls::scoped_thread_local;
 use std::cell::RefCell;
-use std::collections::BTreeSet;
-use std::ops::Range;
+use std::fmt;
+use std::io::{self, ErrorKind, SeekFrom};
 use std::os::fd::RawFd;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
+use tree::{Change, Open, Tree, WriteSync};
 
 /// Type alias for the optional corruption hook stored on [`FsState`].
-pub type CorruptionHook = Option<Arc<dyn Fn(&FsCorruption) + Send + Sync>>;
+pub type CorruptionHook = Option<CorruptionCallback>;
+type CorruptionCallback = Arc<dyn Fn(&FsCorruption) + Send + Sync>;
+
+/// The longest a file gets. Offsets and lengths are signed on Linux, so a
+/// greater one is no valid argument.
+const MAX_FILE_LEN: u64 = i64::MAX as u64;
 
 /// Base value for sim-allocated file descriptors.
 ///
@@ -82,6 +103,9 @@ thread_local! {
     /// `FsContext::current` call.
     static CURRENT_FS_ARC: RefCell<Option<Arc<Mutex<FsState>>>> = const { RefCell::new(None) };
 }
+
+// Nested subsystem calls share the outer lock scope's notifications.
+scoped_thread_local!(static CORRUPTIONS: RefCell<Vec<(CorruptionCallback, FsCorruption)>>);
 
 /// Guard returned by [`enter`]. While alive, the entered `Fs` is the
 /// current one for [`FsContext::current`] on this thread.
@@ -123,12 +147,6 @@ pub fn enter(arc: &Arc<Mutex<FsState>>) -> FsEnterGuard {
     FsEnterGuard { prev_arc }
 }
 
-fn fire_corruption(fs: &FsState, event: &FsCorruption) {
-    if let Some(hook) = &fs.on_corruption {
-        hook(event);
-    }
-}
-
 /// Context for filesystem operations, bundling Fs state with time.
 ///
 /// Borrowed handle to the current host's filesystem state. Made `pub`
@@ -154,38 +172,14 @@ impl FsContext<'_> {
     ///
     /// Panics if called without an entered [`Fs`] on this thread.
     pub fn current<R>(f: impl FnOnce(FsContext<'_>) -> R) -> R {
-        let arc = CURRENT_FS_ARC
-            .with(|c| c.borrow().as_ref().map(Arc::clone))
-            .expect("turmoil-fs: no Fs is current (call Fs::enter first)");
-        let mut lock = arc.lock().expect("FsState mutex poisoned");
-        let now = lock.now;
-        f(FsContext { fs: &mut lock, now })
+        Fs::current().context(f)
     }
 
-    /// Run `f` if we're in a simulation context, otherwise no-op.
-    /// Used in drop paths where the simulation may be shutting down.
+    /// Run `f` if a filesystem is entered on this thread.
     pub fn current_if_set(f: impl FnOnce(FsContext<'_>)) {
-        let Some(arc) = CURRENT_FS_ARC.with(|c| c.borrow().as_ref().map(Arc::clone)) else {
-            return;
-        };
-        let mut lock = arc.lock().expect("FsState mutex poisoned");
-        let now = lock.now;
-        f(FsContext { fs: &mut lock, now });
-    }
-
-    /// Returns true with the given probability (0.0 to 1.0).
-    pub fn random_bool(&mut self, probability: f64) -> bool {
-        self.fs.rng.random_bool(probability)
-    }
-
-    /// Returns a random value in the given range.
-    pub fn random_range(&mut self, range: Range<usize>) -> usize {
-        self.fs.rng.random_range(range)
-    }
-
-    /// Returns a random u8 value.
-    pub fn random_u8(&mut self) -> u8 {
-        self.fs.rng.random()
+        if let Some(fs) = Fs::try_current() {
+            fs.context(f);
+        }
     }
 }
 
@@ -208,7 +202,7 @@ impl FsContext<'_> {
 /// ```
 #[derive(Debug, Clone)]
 pub struct FsCorruption {
-    /// Path of the file that was corrupted
+    /// The path the corrupted file was opened by, whatever its name is now
     pub path: PathBuf,
     /// Offset within the file where corruption occurred
     pub offset: u64,
@@ -498,9 +492,9 @@ impl FsConfig {
     ///
     /// Default: true (atime not updated on reads).
     ///
-    /// When true, `Metadata::accessed()` returns the file creation time
-    /// rather than tracking access times on every read. This matches
-    /// common Linux ext3/ext4 configurations.
+    /// When true, reads leave the access time alone: `Metadata::accessed()`
+    /// returns the file creation time until `File::set_times` sets another.
+    /// This matches common Linux ext3/ext4 configurations.
     ///
     /// # Panics
     ///
@@ -634,173 +628,18 @@ impl FsConfig {
     }
 }
 
-/// A pending filesystem operation that hasn't been synced to durable storage.
-#[derive(Debug, Clone)]
-pub(crate) enum PendingOp {
-    /// Create a file (durable when parent dir synced)
-    CreateFile {
-        path: PathBuf,
-        /// Timestamp when file was created
-        time: Duration,
-        /// Unix permission bits
-        mode: u32,
-    },
-    /// Create a directory (durable when parent dir synced)
-    CreateDir {
-        path: PathBuf,
-        /// Timestamp when directory was created
-        time: Duration,
-        /// Unix permission bits
-        mode: u32,
-    },
-    /// Create a symlink (durable when parent dir synced)
-    CreateSymlink {
-        path: PathBuf,
-        target: PathBuf,
-        time: Duration,
-    },
-    /// Create a hard link (durable when parent dir synced)
-    CreateHardLink {
-        path: PathBuf,
-        target: PathBuf,
-        time: Duration,
-    },
-    /// Write data to a file (durable when file synced)
-    Write {
-        path: PathBuf,
-        offset: u64,
-        data: Vec<u8>,
-        /// Timestamp when write occurred
-        time: Duration,
-    },
-    /// Truncate/extend a file (durable when file synced)
-    SetLen {
-        path: PathBuf,
-        len: u64,
-        /// Timestamp when truncate/extend occurred
-        time: Duration,
-    },
-    /// Change file permissions
-    SetPermissions {
-        path: PathBuf,
-        mode: u32,
-        time: Duration,
-    },
-    /// Rename a file or directory (durable when parent dir synced)
-    Rename { from: PathBuf, to: PathBuf },
-    /// Remove a file (durable when parent dir synced)
-    RemoveFile { path: PathBuf },
-    /// Remove a directory (durable when parent dir synced)
-    RemoveDir { path: PathBuf },
-}
-
-/// Stored file data including content and timestamps.
-///
-/// Timestamps use turmoil's simulated time (duration since epoch).
-/// We model noatime behavior: atime is not tracked (returns crtime).
-#[derive(Debug, Clone)]
-pub(crate) struct FileData {
-    /// File content
-    pub(crate) content: Vec<u8>,
-    /// Creation time (set once, never changes)
-    pub(crate) crtime: Duration,
-    /// Modification time (updated on writes)
-    pub(crate) mtime: Duration,
-    /// Change time (updated on any metadata change, including writes)
-    pub(crate) ctime: Duration,
-    /// Unix permission bits (default: 0o644)
-    pub(crate) mode: u32,
-    /// Number of hard links to this file
-    pub(crate) nlink: u64,
-}
-
-impl FileData {
-    /// Create new empty file data with all timestamps set to the given time.
-    #[allow(dead_code)]
-    fn new(now: Duration) -> Self {
-        Self::with_mode(now, 0o644)
-    }
-
-    /// Create new empty file data with specified mode.
-    fn with_mode(now: Duration, mode: u32) -> Self {
-        Self {
-            content: Vec::new(),
-            crtime: now,
-            mtime: now,
-            ctime: now,
-            mode,
-            nlink: 1,
-        }
-    }
-}
-
-/// Stored directory data including timestamps.
-#[derive(Debug, Clone)]
-pub(crate) struct DirData {
-    /// Creation time (set once, never changes)
-    pub(crate) crtime: Duration,
-    /// Modification time (updated when contents change)
-    pub(crate) mtime: Duration,
-    /// Change time (updated on any metadata change)
-    pub(crate) ctime: Duration,
-    /// Unix permission bits (default: 0o755)
-    pub(crate) mode: u32,
-}
-
-impl DirData {
-    /// Create new directory data with all timestamps set to the given time.
-    fn new(now: Duration) -> Self {
-        Self::with_mode(now, 0o755)
-    }
-
-    /// Create new directory data with specified mode.
-    fn with_mode(now: Duration, mode: u32) -> Self {
-        Self {
-            crtime: now,
-            mtime: now,
-            ctime: now,
-            mode,
-        }
-    }
-}
-
-/// Stored symlink data.
-#[derive(Debug, Clone)]
-pub(crate) struct SymlinkData {
-    /// Target path the symlink points to
-    pub(crate) target: PathBuf,
-    /// Creation time
-    pub(crate) crtime: Duration,
-    /// Modification time
-    pub(crate) mtime: Duration,
-    /// Change time
-    pub(crate) ctime: Duration,
-}
-
-impl SymlinkData {
-    fn new(target: PathBuf, now: Duration) -> Self {
-        Self {
-            target,
-            crtime: now,
-            mtime: now,
-            ctime: now,
-        }
-    }
-}
-
-/// Cache key: (file path, page index)
-type PageKey = (PathBuf, u64);
+/// Cache key: (file, page index)
+type PageKey = (Ino, u64);
 
 /// LRU page cache with optional random eviction.
 ///
 /// Tracks which (file, page) pairs are "hot" in memory. Cache hits
 /// result in near-instant I/O, while cache misses incur full I/O latency.
 /// Per-host page cache simulation. Tracks recently-touched offsets to
-/// model cache hits in I/O latency. Public so `turmoil-io-uring` can
-/// probe the cache from `&mut Fs::page_cache`.
+/// model cache hits in I/O latency.
 pub struct PageCache {
     /// Pages currently in cache, ordered by recency (most recent at end)
-    pages: IndexSet<PageKey>,
+    pages: IdSet<PageKey>,
     /// Configuration
     config: PageCacheConfig,
 }
@@ -809,7 +648,7 @@ impl PageCache {
     /// Create a new page cache with the given configuration.
     pub fn new(config: PageCacheConfig) -> Self {
         Self {
-            pages: IndexSet::new(),
+            pages: IdSet::default(),
             config,
         }
     }
@@ -818,74 +657,115 @@ impl PageCache {
     ///
     /// Returns `true` for cache hit, `false` for miss.
     /// Also handles random eviction if configured.
-    pub fn access(&mut self, path: &Path, offset: u64, rng: &mut dyn RngCore) -> bool {
-        let page_idx = offset / self.config.page_size;
-        let key = (path.to_path_buf(), page_idx);
-
-        // Random eviction chaos - evict this page if it exists
-        if self.config.random_eviction_probability > 0.0
-            && rng.random_bool(self.config.random_eviction_probability)
-        {
-            self.pages.swap_remove(&key);
-            return false;
-        }
-
-        // Check if cached (and promote to most recent)
-        if self.pages.swap_remove(&key) {
+    pub fn access(&mut self, ino: Ino, offset: u64, rng: &mut dyn RngCore) -> bool {
+        let key = (ino, offset / self.config.page_size);
+        let hit = self.hit(ino, offset, rng);
+        self.pages.shift_remove(&key);
+        if hit {
             self.pages.insert(key);
-            return true;
         }
+        hit
+    }
 
-        false
+    fn hit(&self, ino: Ino, offset: u64, rng: &mut dyn RngCore) -> bool {
+        let key = (ino, offset / self.config.page_size);
+        let p = self.config.random_eviction_probability;
+        let evicted = p > 0.0 && rng.random_bool(p);
+        !evicted && self.pages.contains(&key)
     }
 
     /// Insert a page into the cache.
     ///
     /// Called after read/write to populate cache. Evicts oldest pages
     /// if cache is at capacity.
-    pub fn insert(&mut self, path: &Path, offset: u64) {
-        let page_idx = offset / self.config.page_size;
-        let key = (path.to_path_buf(), page_idx);
-
-        // Evict oldest if at capacity
-        while self.pages.len() >= self.config.max_pages {
+    pub fn insert(&mut self, ino: Ino, offset: u64) {
+        if self.config.max_pages == 0 {
+            return;
+        }
+        let key = (ino, offset / self.config.page_size);
+        if !self.pages.shift_remove(&key) && self.pages.len() == self.config.max_pages {
             self.pages.shift_remove_index(0);
         }
-
-        // Remove if exists (will re-add at end for LRU)
-        self.pages.swap_remove(&key);
         self.pages.insert(key);
     }
 
     /// Invalidate all pages for a file.
     ///
-    /// Called on truncate, delete, or other operations that
-    /// invalidate cached data.
-    pub fn invalidate_file(&mut self, path: &Path) {
-        self.pages.retain(|(p, _)| p != path);
+    /// Called on truncate, which leaves the file's cached pages stale.
+    pub fn invalidate_file(&mut self, ino: Ino) {
+        self.pages.retain(|(file, _)| *file != ino);
     }
+
+    /// Drops every page of `files`.
+    fn forget(&mut self, files: &IdSet<Ino>) {
+        if !files.is_empty() {
+            self.pages.retain(|(file, _)| !files.contains(file));
+        }
+    }
+}
+
+/// An open file descriptor.
+#[derive(Clone)]
+pub struct OpenFile {
+    /// The file the descriptor refers to, whatever its names are now.
+    pub ino: Ino,
+    /// Whether the file was opened with O_DIRECT semantics.
+    pub direct_io: bool,
+    /// Whether the descriptor allows reads.
+    pub(crate) readable: bool,
+    /// Whether the descriptor allows writes and truncation.
+    pub(crate) writable: bool,
+    /// Whether writes go to the end of the file, wherever they are aimed.
+    pub(crate) append: bool,
+    /// What a write makes durable before it returns.
+    pub(crate) sync: WriteSync,
+    /// Where a read or a write that is given no offset takes place.
+    /// Descriptors duplicated from one another share it.
+    pub(crate) cursor: Arc<AtomicU64>,
+    /// The path the file was opened by.
+    pub(crate) path: PathBuf,
+}
+
+/// Access a transfer needs from its file descriptor.
+#[derive(Clone, Copy)]
+pub enum Access {
+    Read,
+    Write,
+}
+
+/// What a write came to.
+#[derive(Debug, Clone, Copy)]
+pub struct Written {
+    /// The bytes written.
+    pub len: usize,
+    /// Where in the file they went. For a descriptor that appends, that
+    /// is the end the file had, wherever the write was aimed.
+    pub offset: u64,
+}
+
+/// Whether a fault configured with `probability` strikes this time.
+fn strikes(rng: &mut dyn RngCore, probability: f64) -> bool {
+    probability > 0.0 && rng.random_bool(probability)
+}
+
+fn stale_handle() -> io::Error {
+    io::Error::new(ErrorKind::NotFound, "file handle not found")
 }
 
 /// Per-host filesystem state.
 ///
-/// Models POSIX filesystem semantics with separate inode data and directory entries:
+/// Files, directories and symlinks are inodes in a tree that keeps a live
+/// and a durable version of whatever syncs on its own:
 ///
-/// - `persisted_*` maps: Hold inode data (file contents, directory metadata, symlink targets).
-///   This data survives crashes once written.
-/// - `synced_entries`: Tracks which paths have durable directory entries.
-///   Without a synced entry, data exists but is unreachable (orphaned).
-/// - `pending`: Queue of operations not yet synced to durable storage.
-///
-/// Syncing works in two stages:
-/// - `sync_file()`: Makes file data durable (writes to `persisted_files`)
-/// - `sync_dir()`: Makes directory entries durable (adds paths to `synced_entries`)
-///
-/// On crash, orphaned files (in `persisted_files` but not `synced_entries`) are removed
-/// since they have no directory entry pointing to them.
-// TODO: narrow the public surface. turmoil-io-uring currently reaches
-// into individual fields (open_handles, direct_io_fds, page_cache,
-// probability knobs) because its async completion path can't delegate
-// to the synchronous shim.
+/// - `sync()` makes a file's content and attributes durable.
+/// - `sync_dir()` makes a directory's entries durable, as `sync()` does for
+///   a directory that is open.
+/// - `crash()` rolls everything back to its durable version and drops the
+///   inodes no durable name reaches, such as a synced file whose directory
+///   entry never was.
+// TODO: narrow the public surface. turmoil-io-uring reads the probability
+// knobs directly because its async completion path can't delegate to the
+// synchronous shim.
 pub struct FsState {
     /// Simulated time elapsed since unix epoch on this host. The
     /// embedder advances this before each tick (e.g. turmoil sets it
@@ -896,7 +776,6 @@ pub struct FsState {
     /// build time or mutated on the locked `Fs`. Used by `turmoil`'s
     /// `unstable-barriers` integration.
     pub on_corruption: CorruptionHook,
-
     /// Per-host RNG, seeded from the world rng once at `Fs::new` time.
     /// Used for all probabilistic faults (sync_probability,
     /// io_error_probability, corruption_probability, short_read,
@@ -908,31 +787,14 @@ pub struct FsState {
     /// is preserved: same world seed → same per-host fs seed →
     /// same sequence.
     pub rng: Box<dyn RngCore + Send>,
-    /// File inode data (content, timestamps, mode). Data here survives crash,
-    /// but is only reachable if the path is also in `synced_entries`.
-    pub(crate) persisted_files: IndexMap<PathBuf, FileData>,
-    /// Directory inode data. Same reachability rules as files.
-    pub(crate) persisted_dirs: IndexMap<PathBuf, DirData>,
-    /// Symlink inode data. Same reachability rules as files.
-    pub(crate) persisted_symlinks: IndexMap<PathBuf, SymlinkData>,
-    /// Paths with durable directory entries. On crash, only paths in this set
-    /// remain accessible; others are orphaned and cleaned up.
-    synced_entries: IndexSet<PathBuf>,
-    /// Queue of pending operations (lost on crash unless synced)
-    pub(crate) pending: Vec<PendingOp>,
-    /// Open file handles: fd -> path.
+    /// The namespace and the content of every file.
+    pub(crate) tree: Tree,
+    /// Open file descriptors.
     ///
     /// Allocated `RawFd`s start at [`SIM_FD_BASE`] so they can never collide
     /// with a real-OS fd if one accidentally leaks across the simulation
     /// boundary.
-    pub open_handles: IndexMap<RawFd, PathBuf>,
-    /// Subset of [`Self::open_handles`] opened with O_DIRECT semantics.
-    ///
-    /// Tracked separately so the io_uring shim — which only sees a
-    /// bare `RawFd` on the SQE — can enforce alignment requirements
-    /// and bypass the page cache without plumbing the per-`File`
-    /// `direct_io` flag through the kernel-shaped API.
-    pub direct_io_fds: indexmap::IndexSet<RawFd>,
+    open_files: IdMap<RawFd, OpenFile>,
     /// Next file descriptor to assign.
     next_fd: RawFd,
     /// Probability that writes are randomly synced to durable storage (0.0 - 1.0)
@@ -955,101 +817,17 @@ pub struct FsState {
     pub page_cache: Option<PageCache>,
 }
 
-/// Rewrites `path` from below `from` to the same place below `to`.
-/// Returns None when `path` is not at or below `from`.
-fn swap_prefix(path: &Path, from: &Path, to: &Path) -> Option<PathBuf> {
-    let rest = path.strip_prefix(from).ok()?;
-    Some(if rest.as_os_str().is_empty() {
-        to.to_path_buf()
-    } else {
-        to.join(rest)
-    })
-}
-
-/// Re-keys every entry at or below `from` so it sits below `to` instead.
-fn rekey_map<V>(map: &mut IndexMap<PathBuf, V>, from: &Path, to: &Path) {
-    let moved: Vec<PathBuf> = map
-        .keys()
-        .filter(|k| k.starts_with(from))
-        .cloned()
-        .collect();
-    let values: Vec<(PathBuf, V)> = moved
-        .iter()
-        .filter_map(|k| map.swap_remove(k).map(|v| (swap_prefix(k, from, to), v)))
-        .filter_map(|(k, v)| k.map(|k| (k, v)))
-        .collect();
-    map.extend(values);
-}
-
-/// Undoes `renames` (most recent first) on a name issued after them.
-fn undo_renames(renames: &[PendingOp], path: &Path) -> PathBuf {
-    let mut current = path.to_path_buf();
-    for op in renames.iter().rev() {
-        if let PendingOp::Rename { from, to } = op {
-            if let Some(moved) = swap_prefix(&current, to, from) {
-                current = moved;
-            }
-        }
-    }
-    current
-}
-
-/// A copy of `op` with every path it names passed through `f`.
-fn map_paths(op: &PendingOp, f: impl Fn(&Path) -> PathBuf) -> PendingOp {
-    let mut op = op.clone();
-    match &mut op {
-        PendingOp::CreateFile { path, .. }
-        | PendingOp::CreateDir { path, .. }
-        | PendingOp::CreateSymlink { path, .. }
-        | PendingOp::Write { path, .. }
-        | PendingOp::SetLen { path, .. }
-        | PendingOp::SetPermissions { path, .. }
-        | PendingOp::RemoveFile { path }
-        | PendingOp::RemoveDir { path } => *path = f(path),
-        PendingOp::CreateHardLink { path, target, .. } => {
-            *path = f(path);
-            *target = f(target);
-        }
-        PendingOp::Rename { from, to } => {
-            *from = f(from);
-            *to = f(to);
-        }
-    }
-    op
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum EntryKind {
-    File,
-    Directory,
-    Symlink,
-}
-
 impl FsState {
     /// Create a new empty filesystem state with a fresh per-host RNG
     /// seeded from `seed`. Embedders typically derive `seed` by calling
     /// `world_rng.next_u64()` at host construction time.
     pub fn new(config: FsConfig, seed: u64) -> Self {
-        let mut persisted_dirs = IndexMap::new();
-        let mut synced_entries = IndexSet::new();
-        // Root directory exists from the start with epoch timestamp
-        persisted_dirs.insert(PathBuf::from("/"), DirData::new(Duration::ZERO));
-        synced_entries.insert(PathBuf::from("/"));
-
-        use rand::SeedableRng;
-        let rng: Box<dyn RngCore + Send> = Box::new(rand::rngs::SmallRng::seed_from_u64(seed));
-
         Self {
             now: Duration::ZERO,
             on_corruption: None,
-            rng,
-            persisted_files: IndexMap::new(),
-            persisted_dirs,
-            persisted_symlinks: IndexMap::new(),
-            synced_entries,
-            pending: Vec::new(),
-            open_handles: IndexMap::new(),
-            direct_io_fds: indexmap::IndexSet::new(),
+            rng: Box::new(SmallRng::seed_from_u64(seed)),
+            tree: Tree::new(config.capacity.is_some() && config.block_size.is_some()),
+            open_files: IdMap::default(),
             next_fd: SIM_FD_BASE,
             sync_probability: config.sync_probability,
             capacity: config.capacity,
@@ -1088,57 +866,41 @@ impl FsState {
         }
     }
 
-    /// Calculate total bytes used (persisted + pending writes).
-    pub(crate) fn used_bytes(&self) -> u64 {
-        // Start with persisted file sizes
-        let mut total: u64 = self
-            .persisted_files
-            .values()
-            .map(|v| v.content.len() as u64)
-            .sum();
-
-        // Account for pending operations that change size
-        for (i, op) in self.pending.iter().enumerate() {
-            match op {
-                PendingOp::Write {
-                    path, offset, data, ..
-                } => {
-                    let persisted_len = self
-                        .persisted_files
-                        .get(&self.back_path(i, path))
-                        .map(|v| v.content.len() as u64)
-                        .unwrap_or(0);
-                    let write_end = offset + data.len() as u64;
-                    if write_end > persisted_len {
-                        total += write_end - persisted_len;
-                    }
-                }
-                PendingOp::SetLen { path, len, .. } => {
-                    let persisted_len = self
-                        .persisted_files
-                        .get(&self.back_path(i, path))
-                        .map(|v| v.content.len() as u64)
-                        .unwrap_or(0);
-                    if *len > persisted_len {
-                        total += len - persisted_len;
-                    }
-                }
-                _ => {}
-            }
-        }
-        total
+    /// Samples latency at submission. A cold page enters the cache when
+    /// the read completes successfully.
+    pub fn pending_read_latency(&mut self, fd: RawFd, offset: u64) -> Duration {
+        let ino = self.buffered_inode(fd, Access::Read);
+        let hit = match (ino, &self.page_cache) {
+            (Some(ino), Some(cache)) => cache.hit(ino, offset, &mut *self.rng),
+            _ => false,
+        };
+        self.calculate_latency(hit)
     }
 
-    /// Check if writing `additional_bytes` would exceed capacity.
-    /// Returns Ok(()) if there's space, Err with ENOSPC message otherwise.
-    pub fn check_space(&self, additional_bytes: u64) -> Result<(), &'static str> {
-        if let Some(cap) = self.capacity {
-            let used = self.used_bytes();
-            if used.saturating_add(additional_bytes) > cap {
-                return Err("No space left on device");
-            }
+    /// Records a successful buffered transfer at `offset`.
+    pub fn cache_page(&mut self, fd: RawFd, access: Access, offset: u64) {
+        let ino = self.buffered_inode(fd, access);
+        if let (Some(ino), Some(cache)) = (ino, &mut self.page_cache) {
+            cache.insert(ino, offset);
         }
-        Ok(())
+    }
+
+    fn buffered_inode(&self, fd: RawFd, access: Access) -> Option<Ino> {
+        let file = self.file_for(fd, access).ok()?;
+        (!file.direct_io).then_some(file.ino)
+    }
+
+    /// Latency and cache effects of a completed read.
+    pub fn read_latency(&mut self, fd: RawFd, offset: u64) -> Duration {
+        let latency = self.pending_read_latency(fd, offset);
+        self.cache_page(fd, Access::Read, offset);
+        latency
+    }
+
+    /// Latency and cache effects of a completed write.
+    pub fn write_latency(&mut self, fd: RawFd, offset: u64) -> Duration {
+        self.cache_page(fd, Access::Write, offset);
+        self.calculate_latency(false)
     }
 
     /// Allocate a new sim-side file descriptor.
@@ -1159,7 +921,306 @@ impl FsState {
         fd
     }
 
+    /// The open file behind `fd`.
+    pub fn open_file(&self, fd: RawFd) -> Option<&OpenFile> {
+        self.open_files.get(&fd)
+    }
+
+    /// The open file behind `fd`, which a handle on it takes to be there.
+    pub(crate) fn descriptor(&self, fd: RawFd) -> io::Result<&OpenFile> {
+        self.open_file(fd).ok_or_else(stale_handle)
+    }
+
+    /// Opens the file at `path` as `how` says, and returns a descriptor
+    /// on it. Every open ends up here.
+    pub(crate) fn open(&mut self, path: &Path, how: &Open) -> io::Result<RawFd> {
+        let (ino, created) = self.tree.open(path, how, self.now)?;
+        // A file that is new has nothing to truncate.
+        if how.truncate && !created {
+            self.resize(ino, 0)?;
+        }
+        let file = OpenFile {
+            ino,
+            direct_io: how.direct,
+            readable: how.read,
+            writable: how.write,
+            append: how.append,
+            sync: how.sync,
+            cursor: Arc::default(),
+            path: path.to_owned(),
+        };
+        Ok(self.install(file))
+    }
+
+    /// Gives `file` a descriptor.
+    fn install(&mut self, file: OpenFile) -> RawFd {
+        let fd = self.alloc_fd();
+        self.tree.pin(file.ino);
+        self.open_files.insert(fd, file);
+        fd
+    }
+
+    /// Opens another descriptor on the file behind `fd`. The two share
+    /// one cursor.
+    pub(crate) fn dup(&mut self, fd: RawFd) -> io::Result<RawFd> {
+        let file = self.descriptor(fd)?.clone();
+        Ok(self.install(file))
+    }
+
+    pub(crate) fn close(&mut self, fd: RawFd) {
+        if let Some(file) = self.open_files.swap_remove(&fd) {
+            self.tree.unpin(file.ino);
+            self.reclaim();
+        }
+    }
+
+    /// Closes every descriptor, as the OS does for a process that exits.
+    pub fn close_all(&mut self) {
+        for (_, file) in self.open_files.drain(..) {
+            self.tree.unpin(file.ino);
+        }
+        self.reclaim();
+    }
+
+    /// Drops the cached pages of files that can no longer be read.
+    fn reclaim(&mut self) {
+        let unreadable = self.tree.take_unreadable();
+        if let Some(cache) = &mut self.page_cache {
+            cache.forget(&unreadable);
+        }
+    }
+
+    /// Resolves a descriptor before an operation uses its buffer or inode.
+    /// As on Linux, one that is not open for the access is a bad descriptor.
+    pub fn file_for(&self, fd: RawFd, access: Access) -> io::Result<&OpenFile> {
+        let file = self.descriptor(fd)?;
+        let open = match access {
+            Access::Read => file.readable,
+            Access::Write => file.writable,
+        };
+        open.then_some(file).ok_or(EBADF.into())
+    }
+
+    /// O_DIRECT I/O needs the buffer, the offset and the length aligned.
+    fn check_alignment(&self, buf: &[u8], offset: u64) -> io::Result<()> {
+        if buf.is_empty() {
+            return Ok(());
+        }
+        let alignment = self.direct_io_alignment;
+        if (buf.as_ptr() as usize as u64).is_multiple_of(alignment)
+            && offset.is_multiple_of(alignment)
+            && (buf.len() as u64).is_multiple_of(alignment)
+        {
+            return Ok(());
+        }
+        Err(EINVAL.into())
+    }
+
+    /// Reads from the file behind `fd` at `offset`, subject to the faults
+    /// the configuration injects. Every way of reading a file ends up here.
+    pub fn read_at(&mut self, fd: RawFd, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+        let file = self.target(fd, Access::Read, offset, buf.len())?;
+        let (ino, direct_io) = (file.ino, file.direct_io);
+        if direct_io {
+            self.check_alignment(buf, offset)?;
+        }
+        // A directory has no bytes, so the read fails before it gets as far
+        // as the disk and its faults.
+        let content = self.tree.file(ino)?;
+        if strikes(&mut *self.rng, self.io_error_probability) {
+            return Err(EIO.into());
+        }
+        let mut n = content.read(buf, offset);
+
+        // Inject a short read: trim the reported count to something strictly
+        // smaller than what was actually filled, and zero the tail so callers
+        // that incorrectly assume full-read semantics observe garbage instead
+        // of silently-correct data. We only do this when at least 2 bytes
+        // were read, so the returned count is still > 0 (a return of 0 means
+        // EOF, which is a distinct signal we don't want to fake). This
+        // applies to O_DIRECT too — signals (EINTR) can short-circuit any
+        // blocking syscall, including aligned O_DIRECT pread.
+        if n > 1 && strikes(&mut *self.rng, self.short_read_probability) {
+            let short = self.rng.random_range(1..n);
+            buf[short..n].fill(0);
+            n = short;
+        }
+
+        // Silent corruption flips at least one bit of one byte.
+        if n > 0 && strikes(&mut *self.rng, self.corruption_probability) {
+            let at = self.rng.random_range(0..n);
+            buf[at] ^= self.rng.random::<u8>().max(1);
+            self.corrupted(fd, offset + at as u64, 1);
+        }
+
+        Ok(n)
+    }
+
+    /// The open file that a transfer of `len` bytes at `offset` goes
+    /// through. As on Linux, an offset is a signed number and so is the
+    /// end of a transfer, and the descriptor is looked at in between.
+    fn target(&self, fd: RawFd, access: Access, offset: u64, len: usize) -> io::Result<&OpenFile> {
+        if offset > MAX_FILE_LEN {
+            return Err(EINVAL.into());
+        }
+        let file = self.file_for(fd, access)?;
+        match len as u64 > MAX_FILE_LEN - offset {
+            true => Err(EINVAL.into()),
+            false => Ok(file),
+        }
+    }
+
+    /// Writes to the file behind `fd` at `offset`, subject to the faults
+    /// the configuration injects. The write is pending until the file is
+    /// synced. Every way of writing a file ends up here.
+    pub fn write_at(&mut self, fd: RawFd, buf: &[u8], offset: u64) -> io::Result<Written> {
+        let file = self.target(fd, Access::Write, offset, buf.len())?;
+        let (ino, direct_io, sync) = (file.ino, file.direct_io, file.sync);
+        // As on Linux, a descriptor opened to append writes at the end of
+        // the file, wherever the write is aimed. A write of nothing goes
+        // nowhere.
+        let offset = match file.append && !buf.is_empty() {
+            true => self.tree.stat(ino).len,
+            false => offset,
+        };
+        if buf.len() as u64 > MAX_FILE_LEN - offset {
+            return Err(EFBIG.into());
+        }
+        if direct_io {
+            self.check_alignment(buf, offset)?;
+        }
+        if strikes(&mut *self.rng, self.io_error_probability) {
+            return Err(EIO.into());
+        }
+        if let Some(capacity) = self.capacity {
+            let growth = self.tree.growth(ino, offset, buf.len())?;
+            if growth != 0 && growth > capacity.saturating_sub(self.tree.used_bytes()) {
+                return Err(ENOSPC.into());
+            }
+        }
+
+        if !buf.is_empty() {
+            let change = Change::Write(offset, buf.to_vec());
+            self.tree.change(ino, change, self.now)?;
+        }
+        self.settle(ino, sync);
+        let len = buf.len();
+        Ok(Written { len, offset })
+    }
+
+    fn cursor(&self, fd: RawFd) -> io::Result<&AtomicU64> {
+        Ok(&self.descriptor(fd)?.cursor)
+    }
+
+    /// Reads at the cursor of the file behind `fd`, and moves the cursor
+    /// past what was read.
+    pub fn read(&mut self, fd: RawFd, buf: &mut [u8]) -> io::Result<usize> {
+        let at = self.cursor(fd)?.load(Relaxed);
+        let n = self.read_at(fd, buf, at)?;
+        self.cursor(fd)?.store(at + n as u64, Relaxed);
+        Ok(n)
+    }
+
+    /// Writes at the cursor of the file behind `fd`, and moves the cursor
+    /// past what was written.
+    pub fn write(&mut self, fd: RawFd, buf: &[u8]) -> io::Result<usize> {
+        let at = self.cursor(fd)?.load(Relaxed);
+        let written = self.write_at(fd, buf, at)?;
+        let end = written.offset + written.len as u64;
+        self.cursor(fd)?.store(end, Relaxed);
+        Ok(written.len)
+    }
+
+    /// Moves the cursor of the file behind `fd`, and returns where it is.
+    pub fn seek(&mut self, fd: RawFd, to: SeekFrom) -> io::Result<u64> {
+        let file = self.descriptor(fd)?;
+        let at = match to {
+            SeekFrom::Start(offset) => Some(offset),
+            SeekFrom::End(offset) => self.tree.stat(file.ino).len.checked_add_signed(offset),
+            SeekFrom::Current(offset) => file.cursor.load(Relaxed).checked_add_signed(offset),
+        };
+        let at = at.filter(|&at| at <= MAX_FILE_LEN);
+        let at = at.ok_or(EINVAL)?;
+        file.cursor.store(at, Relaxed);
+        Ok(at)
+    }
+
+    /// Truncates or zero-extends the file behind `fd`. Pending until the
+    /// file is synced.
+    pub(crate) fn set_len(&mut self, fd: RawFd, len: u64) -> io::Result<()> {
+        let file = self.descriptor(fd)?;
+        // To truncate through a descriptor that is not open for writing is
+        // an invalid argument on Linux, rather than a bad descriptor.
+        if len > MAX_FILE_LEN || !file.writable {
+            return Err(EINVAL.into());
+        }
+        let (ino, sync) = (file.ino, file.sync);
+        self.resize(ino, len)?;
+        self.settle(ino, sync);
+        Ok(())
+    }
+
+    /// Truncates or zero-extends a file. Pending until the file is synced.
+    fn resize(&mut self, ino: Ino, len: u64) -> io::Result<()> {
+        // Pages past the new length are stale. Dropping every page of the
+        // file is simpler than finding them.
+        if let Some(cache) = &mut self.page_cache {
+            cache.invalidate_file(ino);
+        }
+        self.tree.change(ino, Change::SetLen(len), self.now)
+    }
+
+    /// What becomes of a change to a file on the disk right away. A
+    /// descriptor that syncs what it writes makes it durable. Otherwise
+    /// the OS or the disk may flush the file on its own: only its data
+    /// goes, never the directory entry that names it.
+    fn settle(&mut self, ino: Ino, sync: WriteSync) {
+        match sync {
+            WriteSync::Data => self.tree.sync_data(ino),
+            WriteSync::All => self.tree.sync(ino),
+            WriteSync::Nothing if strikes(&mut *self.rng, self.sync_probability) => {
+                self.tree.sync(ino)
+            }
+            WriteSync::Nothing => {}
+        }
+    }
+
+    /// Makes the content and attributes of the file behind `fd` durable,
+    /// as fsync() does. The content of a directory is its entries.
+    ///
+    /// This does NOT make the file's directory entry durable. A new file
+    /// survives a crash only once its parent directory is synced too.
+    pub fn sync(&mut self, fd: RawFd) -> io::Result<()> {
+        let ino = self.descriptor(fd)?.ino;
+        self.tree.sync(ino);
+        Ok(())
+    }
+
+    pub(crate) fn sync_data(&mut self, fd: RawFd) -> io::Result<()> {
+        let ino = self.descriptor(fd)?.ino;
+        self.tree.sync_data(ino);
+        Ok(())
+    }
+
+    fn corrupted(&self, fd: RawFd, offset: u64, len: usize) {
+        let (Some(hook), Some(file)) = (&self.on_corruption, self.open_files.get(&fd)) else {
+            return;
+        };
+        let path = file.path.clone();
+        let event = FsCorruption { path, offset, len };
+        if CORRUPTIONS.is_set() {
+            CORRUPTIONS.with(|events| events.borrow_mut().push((hook.clone(), event)));
+        } else {
+            hook(&event);
+        }
+    }
+
     /// Crash this host's filesystem.
+    ///
+    /// Everything pending is lost: unsynced writes, and names whose
+    /// directory was not synced. A file whose data was synced but whose
+    /// directory entry was not is gone, since nothing names it. Open file
+    /// descriptors are closed.
     ///
     /// If `block_size` is configured, pending writes may be partially applied
     /// (torn writes) before being discarded. This simulates real disk behavior
@@ -1168,1160 +1229,13 @@ impl FsState {
     /// The `sync_probability` config option handles random flushing during normal
     /// operation; by the time crash() is called, anything still pending is lost
     /// (except for torn write partial data).
-    ///
-    /// This also removes "orphaned" files - files whose data was synced (via
-    /// `sync_file`) but whose directory entry was not synced (via `sync_dir`).
-    /// In POSIX, both are required for a file to survive a crash.
     pub fn crash(&mut self) {
-        // Apply torn writes if block_size is configured.
-        // Split-borrow: `apply_torn_writes` needs `&mut self.pending`
-        // (and others) plus a separate `&mut rng`. Pulling rng out
-        // first lets the helper take everything else as `&mut self`.
-        if let Some(block_size) = self.block_size {
-            // SAFETY: `self.rng` is disjoint from the fields
-            // `apply_torn_writes` mutates (`pending`, `persisted_*`).
-            // Single-threaded simulation; no aliasing.
-            let rng_ptr: *mut dyn RngCore = &mut *self.rng;
-            let rng = unsafe { &mut *rng_ptr };
-            self.apply_torn_writes(block_size, rng);
-        }
-
-        // Clear all pending operations - they're lost on crash
-        self.pending.clear();
-
-        // Remove orphaned files/dirs/symlinks (those whose directory entries weren't synced)
-        // This models POSIX behavior where fsync(file) makes inode durable but
-        // fsync(dir) is needed to make the directory entry durable.
-        self.persisted_files
-            .retain(|path, _| self.synced_entries.contains(path));
-        self.persisted_dirs
-            .retain(|path, _| self.synced_entries.contains(path));
-        self.persisted_symlinks
-            .retain(|path, _| self.synced_entries.contains(path));
-    }
-
-    /// Apply torn writes for pending Write operations.
-    ///
-    /// For each pending write, randomly decide how many blocks survive and
-    /// apply the partial write to persisted state.
-    fn apply_torn_writes(&mut self, block_size: u64, rng: &mut dyn RngCore) {
-        // Collect writes to apply (we need to separate iteration from mutation)
-        let torn_writes: Vec<_> = self
-            .pending
-            .iter()
-            .enumerate()
-            .filter_map(|(i, op)| {
-                if let PendingOp::Write {
-                    path,
-                    offset,
-                    data,
-                    time,
-                } = op
-                {
-                    // Writes are recorded under the name the file had at the
-                    // time, durable state is keyed by the name it has on disk.
-                    let path = &self.back_path(i, path);
-                    // Only process writes to files that exist and have synced directory entries
-                    // (otherwise the file would be orphaned anyway)
-                    if !self.synced_entries.contains(path) {
-                        return None;
-                    }
-
-                    // Calculate how many blocks this write spans
-                    let total_blocks = (data.len() as u64).div_ceil(block_size);
-                    if total_blocks == 0 {
-                        return None;
-                    }
-
-                    // Randomly decide how many blocks survive (0 to total_blocks inclusive)
-                    let surviving_blocks = rng.random_range(0..=total_blocks as usize) as u64;
-                    if surviving_blocks == 0 {
-                        return None;
-                    }
-
-                    // Calculate how many bytes survive
-                    let surviving_bytes =
-                        (surviving_blocks * block_size).min(data.len() as u64) as usize;
-
-                    Some((
-                        path.clone(),
-                        *offset,
-                        data[..surviving_bytes].to_vec(),
-                        *time,
-                    ))
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        // Apply the torn writes to persisted state
-        for (path, offset, data, time) in torn_writes {
-            if let Some(file_data) = self.persisted_files.get_mut(&path) {
-                let end = offset as usize + data.len();
-                if end > file_data.content.len() {
-                    file_data.content.resize(end, 0);
-                }
-                file_data.content[offset as usize..end].copy_from_slice(&data);
-                file_data.mtime = time;
-                file_data.ctime = time;
-            }
-        }
-    }
-
-    /// Apply a single operation to persisted state.
-    fn apply_op_to_persisted(&mut self, op: &PendingOp) {
-        match op {
-            PendingOp::CreateFile { path, time, mode } => {
-                self.persisted_files
-                    .entry(path.clone())
-                    .or_insert_with(|| FileData::with_mode(*time, *mode));
-            }
-            PendingOp::CreateDir { path, time, mode } => {
-                self.persisted_dirs
-                    .entry(path.clone())
-                    .or_insert_with(|| DirData::with_mode(*time, *mode));
-            }
-            PendingOp::CreateSymlink { path, target, time } => {
-                self.persisted_symlinks
-                    .entry(path.clone())
-                    .or_insert_with(|| SymlinkData::new(target.clone(), *time));
-            }
-            PendingOp::CreateHardLink { path, target, time } => {
-                // Hard link: create a new file entry pointing to the same content
-                // In our simple model, we copy the file data and increment nlink on both
-                if let Some(target_data) = self.persisted_files.get(target).cloned() {
-                    let new_nlink = target_data.nlink + 1;
-                    // Increment nlink on the target
-                    if let Some(t) = self.persisted_files.get_mut(target) {
-                        t.nlink = new_nlink;
-                        t.ctime = *time; // ctime updates when nlink changes
-                    }
-                    // Create new entry with same content and same nlink
-                    let mut link_data = target_data;
-                    link_data.nlink = new_nlink;
-                    self.persisted_files.insert(path.clone(), link_data);
-                }
-            }
-            PendingOp::Write {
-                path,
-                offset,
-                data,
-                time,
-            } => {
-                if let Some(file_data) = self.persisted_files.get_mut(path) {
-                    let end = *offset as usize + data.len();
-                    if end > file_data.content.len() {
-                        file_data.content.resize(end, 0);
-                    }
-                    file_data.content[*offset as usize..end].copy_from_slice(data);
-                    // Update mtime and ctime
-                    file_data.mtime = *time;
-                    file_data.ctime = *time;
-                }
-            }
-            PendingOp::SetLen { path, len, time } => {
-                if let Some(file_data) = self.persisted_files.get_mut(path) {
-                    file_data.content.resize(*len as usize, 0);
-                    // Update mtime and ctime
-                    file_data.mtime = *time;
-                    file_data.ctime = *time;
-                }
-            }
-            PendingOp::SetPermissions { path, mode, time } => {
-                if let Some(file_data) = self.persisted_files.get_mut(path) {
-                    file_data.mode = *mode;
-                    file_data.ctime = *time;
-                } else if let Some(dir_data) = self.persisted_dirs.get_mut(path) {
-                    dir_data.mode = *mode;
-                    dir_data.ctime = *time;
-                }
-            }
-            PendingOp::Rename { from, to } => {
-                let exists = self.persisted_files.contains_key(from)
-                    || self.persisted_dirs.contains_key(from)
-                    || self.persisted_symlinks.contains_key(from);
-                if exists {
-                    // Whatever sat at the destination is replaced.
-                    self.persisted_files.swap_remove(to);
-                    self.persisted_dirs.swap_remove(to);
-                    self.persisted_symlinks.swap_remove(to);
-                }
-                // A directory takes everything below it along.
-                rekey_map(&mut self.persisted_files, from, to);
-                rekey_map(&mut self.persisted_dirs, from, to);
-                rekey_map(&mut self.persisted_symlinks, from, to);
-            }
-            PendingOp::RemoveFile { path } => {
-                // Remove from files or symlinks (unlink works on both)
-                self.persisted_files.swap_remove(path);
-                self.persisted_symlinks.swap_remove(path);
-            }
-            PendingOp::RemoveDir { path } => {
-                self.persisted_dirs.swap_remove(path);
-            }
-        }
-    }
-
-    /// Where `path` would have been found before the pending renames that
-    /// precede op `idx` took effect. Renames move everything below them, so
-    /// this is a prefix swap rather than an exact match.
-    fn back_path(&self, idx: usize, path: &Path) -> PathBuf {
-        let mut current = path.to_path_buf();
-        for op in self.pending[..idx].iter().rev() {
-            if let PendingOp::Rename { from, to } = op {
-                if let Some(moved) = swap_prefix(&current, to, from) {
-                    current = moved;
-                }
-            }
-        }
-        current
-    }
-
-    /// The name `path` has after the pending renames from index `start` on.
-    fn forward_path(&self, start: usize, path: &Path) -> PathBuf {
-        let mut current = path.to_path_buf();
-        for op in self.pending.iter().skip(start) {
-            if let PendingOp::Rename { from, to } = op {
-                if let Some(moved) = swap_prefix(&current, from, to) {
-                    current = moved;
-                }
-            }
-        }
-        current
-    }
-
-    /// Resolve the effective persisted path after accounting for pending renames.
-    /// Returns the path where data is currently stored in persisted state.
-    fn resolve_persisted_path(&self, path: &Path) -> PathBuf {
-        self.back_path(self.pending.len(), path)
-    }
-
-    /// Resolve hard link target if path is a pending hard link.
-    /// Returns the target path, under its current name, if this is a hard
-    /// link, otherwise returns None.
-    fn resolve_hardlink_target(&self, path: &Path) -> Option<PathBuf> {
-        for (i, op) in self.pending.iter().enumerate() {
-            if let PendingOp::CreateHardLink {
-                path: p, target, ..
-            } = op
-            {
-                if p == path {
-                    return Some(self.forward_path(i + 1, target));
-                }
-            }
-        }
-        None
-    }
-
-    /// The current name of the file whose content `path` shows. This differs
-    /// from `path` for hard links.
-    fn content_view_path(&self, path: &Path) -> PathBuf {
-        let mut path = path.to_path_buf();
-        // A rename onto a pending hard link of the same file can make the
-        // target resolve back to the link, so stop at a name seen before.
-        let mut seen = vec![path.clone()];
-        while let Some(target) = self.resolve_hardlink_target(&path) {
-            if seen.contains(&target) {
-                break;
-            }
-            seen.push(target.clone());
-            path = target;
-        }
-        path
-    }
-
-    /// Check if a file exists (persisted or pending creation).
-    pub(crate) fn file_exists(&self, path: &Path) -> bool {
-        self.entry_kind(path) == Some(EntryKind::File)
-    }
-
-    /// Check if a directory exists (persisted or pending creation).
-    pub(crate) fn dir_exists(&self, path: &Path) -> bool {
-        self.entry_kind(path) == Some(EntryKind::Directory)
-    }
-
-    /// Check if a symlink exists (persisted or pending creation).
-    pub(crate) fn symlink_exists(&self, path: &Path) -> bool {
-        self.entry_kind(path) == Some(EntryKind::Symlink)
-    }
-
-    /// Resolve the entry type by following its history backwards once.
-    fn entry_kind(&self, path: &Path) -> Option<EntryKind> {
-        let mut path = path.to_path_buf();
-        for op in self.pending.iter().rev() {
-            match op {
-                PendingOp::CreateFile { path: p, .. }
-                | PendingOp::CreateHardLink { path: p, .. }
-                    if *p == path =>
-                {
-                    return Some(EntryKind::File);
-                }
-                PendingOp::CreateDir { path: p, .. } if *p == path => {
-                    return Some(EntryKind::Directory);
-                }
-                PendingOp::CreateSymlink { path: p, .. } if *p == path => {
-                    return Some(EntryKind::Symlink);
-                }
-                PendingOp::RemoveFile { path: p } | PendingOp::RemoveDir { path: p }
-                    if *p == path =>
-                {
-                    return None
-                }
-                PendingOp::Rename { from, to } => {
-                    if let Some(moved) = swap_prefix(&path, to, from) {
-                        path = moved;
-                    } else if path.starts_with(from) {
-                        // The entry, or the directory holding it, moved away.
-                        return None;
-                    }
-                }
-                _ => {}
-            }
-        }
-        if self.persisted_files.contains_key(&path) {
-            Some(EntryKind::File)
-        } else if self.persisted_dirs.contains_key(&path) {
-            Some(EntryKind::Directory)
-        } else if self.persisted_symlinks.contains_key(&path) {
-            Some(EntryKind::Symlink)
-        } else {
-            None
-        }
-    }
-
-    /// Every entry that currently exists, under the name it has now.
-    fn visible_paths(&self) -> BTreeSet<PathBuf> {
-        let persisted = self
-            .persisted_files
-            .keys()
-            .chain(self.persisted_dirs.keys())
-            .chain(self.persisted_symlinks.keys())
-            .map(|p| self.forward_path(0, p));
-        let created = self
-            .pending
-            .iter()
-            .enumerate()
-            .filter_map(|(i, op)| match op {
-                PendingOp::CreateFile { path, .. }
-                | PendingOp::CreateDir { path, .. }
-                | PendingOp::CreateSymlink { path, .. }
-                | PendingOp::CreateHardLink { path, .. } => Some(self.forward_path(i + 1, path)),
-                _ => None,
-            });
-        persisted
-            .chain(created)
-            .filter(|p| self.entry_kind(p).is_some())
-            .collect()
-    }
-
-    /// Get current file length (persisted + pending).
-    pub fn file_len(&self, path: &Path) -> u64 {
-        // Resolve to the content path (handles hard links and renames)
-        let view_path = self.content_view_path(path);
-        let content_path = self.resolve_persisted_path(&view_path);
-        let mut len = self
-            .persisted_files
-            .get(&content_path)
-            .map(|v| v.content.len() as u64)
-            .unwrap_or(0);
-
-        for (i, op) in self.pending.iter().enumerate() {
-            match op {
-                PendingOp::Write {
-                    path: p,
-                    offset,
-                    data,
-                    ..
-                }
-                    // Check if this write applies to the file
-                    if self.forward_path(i + 1, p) == view_path => {
-                        let end = offset + data.len() as u64;
-                        if end > len {
-                            len = end;
-                        }
-                    }
-                PendingOp::SetLen {
-                    path: p,
-                    len: new_len,
-                    ..
-                } if self.forward_path(i + 1, p) == view_path => {
-                    len = *new_len;
-                }
-                _ => {}
-            }
-        }
-        len
-    }
-
-    /// Create a directory. Returns error if parent doesn't exist or dir already exists.
-    pub(crate) fn mkdir(&mut self, path: &Path, time: Duration) -> Result<(), &'static str> {
-        self.mkdir_with_mode(path, time, 0o755)
-    }
-
-    /// Create a directory with specified mode.
-    pub(crate) fn mkdir_with_mode(
-        &mut self,
-        path: &Path,
-        time: Duration,
-        mode: u32,
-    ) -> Result<(), &'static str> {
-        // Check parent exists
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() && !self.dir_exists(parent) {
-                return Err("No such file or directory");
-            }
-        }
-
-        // Check doesn't already exist
-        if self.dir_exists(path) || self.file_exists(path) || self.symlink_exists(path) {
-            return Err("File exists");
-        }
-
-        self.pending.push(PendingOp::CreateDir {
-            path: path.to_path_buf(),
-            time,
-            mode,
-        });
-        Ok(())
-    }
-
-    /// Remove an empty directory.
-    pub(crate) fn rmdir(&mut self, path: &Path) -> Result<(), &'static str> {
-        if !self.dir_exists(path) {
-            return Err("No such file or directory");
-        }
-
-        // Check directory is empty
-        if self.dir_has_children(path) {
-            return Err("Directory not empty");
-        }
-
-        self.pending.push(PendingOp::RemoveDir {
-            path: path.to_path_buf(),
-        });
-        Ok(())
-    }
-
-    /// Check if directory has any children (files, subdirs, or symlinks).
-    fn dir_has_children(&self, path: &Path) -> bool {
-        self.visible_paths()
-            .iter()
-            .any(|p| p.parent() == Some(path))
-    }
-
-    /// Check if parent directory exists for a file path.
-    pub(crate) fn parent_exists(&self, path: &Path) -> bool {
-        match path.parent() {
-            None => true,
-            Some(parent) if parent.as_os_str().is_empty() => true,
-            Some(parent) => self.dir_exists(parent),
-        }
-    }
-
-    /// Remove a file or symlink.
-    pub(crate) fn unlink(&mut self, path: &Path) -> Result<(), &'static str> {
-        if !self.file_exists(path) && !self.symlink_exists(path) {
-            return Err("No such file or directory");
-        }
-
-        // Invalidate page cache for deleted file
+        self.open_files.clear();
+        self.tree.crash(self.block_size, &mut *self.rng);
+        // What the page cache held was in memory, and is gone with it.
         if let Some(cache) = &mut self.page_cache {
-            cache.invalidate_file(path);
+            cache.pages.clear();
         }
-
-        self.pending.push(PendingOp::RemoveFile {
-            path: path.to_path_buf(),
-        });
-        Ok(())
-    }
-
-    /// Rename a file, directory, or symlink.
-    pub(crate) fn rename(&mut self, from: &Path, to: &Path) -> Result<(), &'static str> {
-        // Check destination parent exists
-        if !self.parent_exists(to) {
-            return Err("No such file or directory");
-        }
-
-        // Try renaming a file
-        if self.file_exists(from) {
-            // Can't rename file onto directory
-            if self.dir_exists(to) {
-                return Err("Is a directory");
-            }
-            self.push_rename(from, to);
-            return Ok(());
-        }
-
-        // Try renaming a directory
-        if self.dir_exists(from) {
-            // Can't rename dir onto file or symlink
-            if self.file_exists(to) || self.symlink_exists(to) {
-                return Err("Not a directory");
-            }
-            // A directory cannot be moved into its own subtree
-            if to != from && to.starts_with(from) {
-                return Err("Invalid argument");
-            }
-            // If destination dir exists, it must be empty
-            if self.dir_exists(to) && self.dir_has_children(to) {
-                return Err("Directory not empty");
-            }
-            // One rename covers everything below the directory: lookups
-            // and flushes resolve it by path prefix.
-            self.push_rename(from, to);
-            return Ok(());
-        }
-
-        // Try renaming a symlink
-        if self.symlink_exists(from) {
-            // Can't rename symlink onto directory
-            if self.dir_exists(to) {
-                return Err("Is a directory");
-            }
-            self.push_rename(from, to);
-            return Ok(());
-        }
-
-        Err("No such file or directory")
-    }
-
-    /// Queue a rename and point open handles at the new name, as a real
-    /// descriptor keeps following its inode.
-    fn push_rename(&mut self, from: &Path, to: &Path) {
-        for path in self.open_handles.values_mut() {
-            if let Some(moved) = swap_prefix(path, from, to) {
-                *path = moved;
-            }
-        }
-        self.pending.push(PendingOp::Rename {
-            from: from.to_path_buf(),
-            to: to.to_path_buf(),
-        });
-    }
-
-    /// Sync a file (makes file data and metadata durable).
-    ///
-    /// This is equivalent to fsync() on a file descriptor. It flushes:
-    /// - File data (writes)
-    /// - File size changes (truncate/extend)
-    ///
-    /// Note: This does NOT make the directory entry durable. To ensure
-    /// a newly created file survives a crash, you must also call
-    /// sync_dir() on the parent directory. Without the directory sync,
-    /// the file's data is durable but may be orphaned (inaccessible) after crash.
-    pub fn sync_file(&mut self, path: &Path) -> Result<(), &'static str> {
-        self.flush_file_data(path)
-    }
-
-    /// Sync file data only (not metadata like creation).
-    /// This is equivalent to fdatasync() - flushes data and size, but not creation.
-    /// The file entry won't be durable until the parent directory is synced.
-    pub(crate) fn sync_file_data(&mut self, path: &Path) -> Result<(), &'static str> {
-        self.flush_file_data(path)
-    }
-
-    /// Flush the pending writes and truncates of one file. CreateFile is a
-    /// directory entry op, handled by sync_dir.
-    fn flush_file_data(&mut self, path: &Path) -> Result<(), &'static str> {
-        if !self.file_exists(path) {
-            return Err("No such file or directory");
-        }
-
-        // Ops carry the name the file had when they were issued, while
-        // persisted state is keyed by the name it has on disk.
-        let base = self.resolve_persisted_path(path);
-        let mut flush = vec![false; self.pending.len()];
-        let mut created = None;
-        for (i, op) in self.pending.iter().enumerate() {
-            match op {
-                PendingOp::Write { path: p, .. } | PendingOp::SetLen { path: p, .. } => {
-                    flush[i] = self.forward_path(i + 1, p) == path;
-                }
-                PendingOp::CreateFile {
-                    path: p,
-                    time,
-                    mode,
-                } if self.back_path(i, p) == base => created = Some((*time, *mode)),
-                _ => {}
-            }
-        }
-
-        // Ensure file exists in persisted_files for writes to be applied
-        // (CreateFile may still be pending, but we need somewhere to write data)
-        if !self.persisted_files.contains_key(&base) {
-            let (crtime, mode) = created.unwrap_or((Duration::ZERO, 0o644));
-            self.persisted_files
-                .insert(base.clone(), FileData::with_mode(crtime, mode));
-        }
-
-        let mut to_flush = Vec::new();
-        for (op, flush) in std::mem::take(&mut self.pending).into_iter().zip(flush) {
-            if flush {
-                to_flush.push(map_paths(&op, |_| base.clone()));
-            } else {
-                self.pending.push(op);
-            }
-        }
-        for op in &to_flush {
-            self.apply_op_to_persisted(op);
-        }
-        Ok(())
-    }
-
-    /// Sync a directory (makes directory entries durable).
-    ///
-    /// This flushes pending operations that affect the directory's contents:
-    /// - File/directory creations in this directory
-    /// - File/directory removals from this directory
-    /// - Renames into/out of this directory
-    /// - The directory's own creation (if pending)
-    ///
-    /// Entries are matched by the name they have now, so a directory that
-    /// was renamed still flushes the entries created under its old name.
-    /// Renaming a directory is one op: flushing it moves everything under it,
-    /// but only entries that were already durable stay durable.
-    ///
-    /// Note: This does NOT sync the file data of files in the directory.
-    /// Each file must be synced separately with sync_file().
-    pub(crate) fn sync_dir(&mut self, path: &Path, time: Duration) -> Result<(), &'static str> {
-        if !self.dir_exists(path) {
-            return Err("No such file or directory");
-        }
-
-        let count = self.pending.len();
-        let mut selected = vec![false; count];
-        let mut own = vec![false; count];
-        let mut from_here = vec![false; count];
-        let mut to_here = vec![false; count];
-        for (i, op) in self.pending.iter().enumerate() {
-            let in_dir = |p: &Path| self.forward_path(i + 1, p).parent() == Some(path);
-            match op {
-                PendingOp::CreateDir { path: p, .. } if self.forward_path(i + 1, p) == path => {
-                    own[i] = true;
-                    selected[i] = true;
-                }
-                PendingOp::CreateFile { path: p, .. }
-                | PendingOp::CreateDir { path: p, .. }
-                | PendingOp::CreateSymlink { path: p, .. }
-                | PendingOp::CreateHardLink { path: p, .. }
-                | PendingOp::RemoveFile { path: p }
-                | PendingOp::RemoveDir { path: p } => selected[i] = in_dir(p),
-                PendingOp::Rename { from, to } => {
-                    from_here[i] = from
-                        .parent()
-                        .is_some_and(|dir| self.forward_path(i + 1, dir) == path);
-                    to_here[i] = in_dir(to);
-                    selected[i] = from_here[i] || to_here[i];
-                }
-                _ => {}
-            }
-        }
-
-        // A rename that moves something an earlier rename put in place has
-        // to be flushed after it, or the two would disagree about the name.
-        loop {
-            let needed: Vec<usize> = self
-                .pending
-                .iter()
-                .enumerate()
-                .filter(|(k, _)| selected[*k])
-                .flat_map(|(k, op)| {
-                    let PendingOp::Rename { from, .. } = op else {
-                        return Vec::new();
-                    };
-                    self.pending[..k]
-                        .iter()
-                        .enumerate()
-                        .filter(|(j, earlier)| {
-                            !selected[*j]
-                                && matches!(earlier, PendingOp::Rename { to, .. } if from.starts_with(to))
-                        })
-                        .map(|(j, _)| j)
-                        .collect()
-                })
-                .collect();
-            if needed.is_empty() {
-                break;
-            }
-            for j in needed {
-                selected[j] = true;
-            }
-        }
-
-        let mut kept: Vec<PendingOp> = Vec::new();
-        let mut dir_modified = false;
-
-        for (i, op) in std::mem::take(&mut self.pending).into_iter().enumerate() {
-            if !selected[i] {
-                kept.push(op);
-                continue;
-            }
-
-            // Persisted state is keyed by names from before the renames
-            // that stay pending.
-            let flushed = map_paths(&op, |p| undo_renames(&kept, p));
-            match &flushed {
-                PendingOp::CreateDir { path: p, .. } if own[i] => {
-                    // Directory's own creation - mark it as synced
-                    self.synced_entries.insert(p.clone());
-                }
-                PendingOp::CreateFile { path: p, .. }
-                | PendingOp::CreateDir { path: p, .. }
-                | PendingOp::CreateSymlink { path: p, .. }
-                | PendingOp::CreateHardLink { path: p, .. } => {
-                    dir_modified = true;
-                    self.synced_entries.insert(p.clone());
-                }
-                PendingOp::RemoveFile { path: p } | PendingOp::RemoveDir { path: p } => {
-                    dir_modified = true;
-                    self.synced_entries.swap_remove(p);
-                }
-                PendingOp::Rename { from, to } => {
-                    dir_modified = true;
-                    // The entry leaves its old place whatever directory is
-                    // being synced, and everything below it goes with it.
-                    let below: Vec<PathBuf> = self
-                        .synced_entries
-                        .iter()
-                        .filter(|e| e.starts_with(from))
-                        .cloned()
-                        .collect();
-                    for entry in &below {
-                        self.synced_entries.swap_remove(entry);
-                    }
-                    if to_here[i] {
-                        self.synced_entries.insert(to.clone());
-                        // Only entries that were durable under the old name
-                        // are durable under the new one.
-                        for entry in below.iter().filter(|e| *e != from) {
-                            if let Some(moved) = swap_prefix(entry, from, to) {
-                                self.synced_entries.insert(moved);
-                            }
-                        }
-                    }
-                    // Anything still pending was issued under the old name.
-                    let (old, new) = match &op {
-                        PendingOp::Rename { from, to } => (from, to),
-                        _ => unreachable!(),
-                    };
-                    for earlier in kept.iter_mut() {
-                        *earlier = map_paths(earlier, |p| {
-                            swap_prefix(p, old, new).unwrap_or_else(|| p.to_path_buf())
-                        });
-                    }
-                }
-                _ => {}
-            }
-            self.apply_op_to_persisted(&flushed);
-        }
-        self.pending = kept;
-
-        // Update directory mtime if contents changed
-        if dir_modified {
-            let on_disk = self.resolve_persisted_path(path);
-            if let Some(dir_data) = self.persisted_dirs.get_mut(&on_disk) {
-                dir_data.mtime = time;
-                dir_data.ctime = time;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Read file content at offset, merging persisted + pending.
-    pub fn read_file(&self, path: &Path, buf: &mut [u8], offset: u64) -> usize {
-        if buf.is_empty() {
-            return 0;
-        }
-
-        let file_len = self.file_len(path);
-        if offset >= file_len {
-            return 0;
-        }
-
-        let available = (file_len - offset) as usize;
-        let to_read = buf.len().min(available);
-
-        // Start with zeros
-        buf[..to_read].fill(0);
-
-        // Resolve to the content path (handles hard links and renames)
-        let view_path = self.content_view_path(path);
-        let content_path = self.resolve_persisted_path(&view_path);
-
-        // Copy persisted data in range
-        if let Some(file_data) = self.persisted_files.get(&content_path) {
-            let persisted_end = (file_data.content.len() as u64).min(offset + to_read as u64);
-            if offset < persisted_end {
-                let src_start = offset as usize;
-                let src_end = persisted_end as usize;
-                let dst_len = src_end - src_start;
-                buf[..dst_len].copy_from_slice(&file_data.content[src_start..src_end]);
-            }
-        }
-
-        // Overlay pending writes (need to check the content path)
-        for (i, op) in self.pending.iter().enumerate() {
-            if let PendingOp::Write {
-                path: p,
-                offset: write_off,
-                data,
-                ..
-            } = op
-            {
-                // Check if this write applies to the file
-                if self.forward_path(i + 1, p) == view_path {
-                    let write_end = write_off + data.len() as u64;
-                    let read_end = offset + to_read as u64;
-                    if *write_off < read_end && write_end > offset {
-                        let overlap_start = write_off.max(&offset);
-                        let overlap_end = write_end.min(read_end);
-                        let src_offset = (overlap_start - write_off) as usize;
-                        let dst_offset = (overlap_start - offset) as usize;
-                        let len = (overlap_end - overlap_start) as usize;
-                        buf[dst_offset..dst_offset + len]
-                            .copy_from_slice(&data[src_offset..src_offset + len]);
-                    }
-                }
-            }
-        }
-
-        to_read
-    }
-
-    /// Write to a file (adds to pending queue).
-    pub fn write_file(&mut self, path: &Path, offset: u64, data: &[u8], time: Duration) {
-        if !data.is_empty() {
-            self.pending.push(PendingOp::Write {
-                path: path.to_path_buf(),
-                offset,
-                data: data.to_vec(),
-                time,
-            });
-        }
-    }
-
-    /// Set file length (adds to pending queue).
-    pub(crate) fn set_file_len(&mut self, path: &Path, len: u64, time: Duration) {
-        // Invalidate page cache when truncating (pages beyond new length are stale)
-        // We invalidate all pages for simplicity; a more sophisticated impl could
-        // invalidate only pages >= len / page_size.
-        if let Some(cache) = &mut self.page_cache {
-            cache.invalidate_file(path);
-        }
-
-        self.pending.push(PendingOp::SetLen {
-            path: path.to_path_buf(),
-            len,
-            time,
-        });
-    }
-
-    /// Create a file (adds to pending queue).
-    #[allow(dead_code)]
-    pub(crate) fn create_file(&mut self, path: &Path, time: Duration) {
-        self.create_file_with_mode(path, time, 0o644);
-    }
-
-    /// Create a file with specified mode (adds to pending queue).
-    pub(crate) fn create_file_with_mode(&mut self, path: &Path, time: Duration, mode: u32) {
-        self.pending.push(PendingOp::CreateFile {
-            path: path.to_path_buf(),
-            time,
-            mode,
-        });
-    }
-
-    /// Create a symlink (adds to pending queue).
-    pub(crate) fn create_symlink(
-        &mut self,
-        path: &Path,
-        target: &Path,
-        time: Duration,
-    ) -> Result<(), &'static str> {
-        // Check parent exists
-        if !self.parent_exists(path) {
-            return Err("No such file or directory");
-        }
-
-        // Check nothing exists at path
-        if self.file_exists(path) || self.dir_exists(path) || self.symlink_exists(path) {
-            return Err("File exists");
-        }
-
-        self.pending.push(PendingOp::CreateSymlink {
-            path: path.to_path_buf(),
-            target: target.to_path_buf(),
-            time,
-        });
-        Ok(())
-    }
-
-    /// Create a hard link (adds to pending queue).
-    pub(crate) fn create_hard_link(
-        &mut self,
-        path: &Path,
-        target: &Path,
-        time: Duration,
-    ) -> Result<(), &'static str> {
-        // Check parent exists
-        if !self.parent_exists(path) {
-            return Err("No such file or directory");
-        }
-
-        // Check target exists and is a file
-        if !self.file_exists(target) {
-            return Err("No such file or directory");
-        }
-
-        // Check nothing exists at path
-        if self.file_exists(path) || self.dir_exists(path) || self.symlink_exists(path) {
-            return Err("File exists");
-        }
-
-        self.pending.push(PendingOp::CreateHardLink {
-            path: path.to_path_buf(),
-            target: target.to_path_buf(),
-            time,
-        });
-        Ok(())
-    }
-
-    /// Read symlink target.
-    pub(crate) fn read_link(&self, path: &Path) -> Result<PathBuf, &'static str> {
-        // Resolve path through renames (walk backwards to find original path)
-        let original_path = self.resolve_persisted_path(path);
-
-        // Check pending ops first (most recent) for symlink creation at original path
-        for op in self.pending.iter().rev() {
-            match op {
-                PendingOp::CreateSymlink {
-                    path: p, target, ..
-                } if p == &original_path => {
-                    return Ok(target.clone());
-                }
-                PendingOp::RemoveFile { path: p } if p == &original_path => {
-                    return Err("No such file or directory");
-                }
-                _ => {}
-            }
-        }
-
-        // Check persisted at original path
-        self.persisted_symlinks
-            .get(&original_path)
-            .map(|s| s.target.clone())
-            .ok_or("No such file or directory")
-    }
-
-    /// Set file/directory permissions.
-    pub(crate) fn set_permissions(
-        &mut self,
-        path: &Path,
-        mode: u32,
-        time: Duration,
-    ) -> Result<(), &'static str> {
-        if !self.file_exists(path) && !self.dir_exists(path) {
-            return Err("No such file or directory");
-        }
-        self.pending.push(PendingOp::SetPermissions {
-            path: path.to_path_buf(),
-            mode,
-            time,
-        });
-        Ok(())
-    }
-
-    /// Get file permissions.
-    #[allow(dead_code)]
-    pub(crate) fn file_mode(&self, path: &Path) -> Option<u32> {
-        // Check pending ops first
-        for (i, op) in self.pending.iter().enumerate().rev() {
-            match op {
-                PendingOp::SetPermissions { path: p, mode, .. }
-                | PendingOp::CreateFile { path: p, mode, .. }
-                    if self.forward_path(i + 1, p) == path =>
-                {
-                    return Some(*mode);
-                }
-                _ => {}
-            }
-        }
-        self.persisted_files
-            .get(&self.resolve_persisted_path(path))
-            .map(|f| f.mode)
-    }
-
-    /// Get directory permissions.
-    #[allow(dead_code)]
-    pub(crate) fn dir_mode(&self, path: &Path) -> Option<u32> {
-        // Check pending ops first
-        for (i, op) in self.pending.iter().enumerate().rev() {
-            match op {
-                PendingOp::SetPermissions { path: p, mode, .. }
-                | PendingOp::CreateDir { path: p, mode, .. }
-                    if self.forward_path(i + 1, p) == path =>
-                {
-                    return Some(*mode);
-                }
-                _ => {}
-            }
-        }
-        self.persisted_dirs
-            .get(&self.resolve_persisted_path(path))
-            .map(|d| d.mode)
-    }
-
-    /// Get nlink count for a file, accounting for pending hard links.
-    ///
-    /// For hard links, returns the shared nlink count (target's nlink).
-    pub(crate) fn file_nlink(&self, path: &Path) -> u64 {
-        // If this file is a pending hard link, get its target's nlink
-        let target = self.content_view_path(path);
-        if target != path {
-            return self.file_nlink(&target);
-        }
-
-        let mut nlink = self
-            .persisted_files
-            .get(&self.resolve_persisted_path(path))
-            .map(|f| f.nlink)
-            .unwrap_or(1);
-
-        // Count pending hard links that reference this file as target
-        for (i, op) in self.pending.iter().enumerate() {
-            if let PendingOp::CreateHardLink { target, .. } = op {
-                if self.forward_path(i + 1, target) == path {
-                    nlink += 1;
-                }
-            }
-        }
-        nlink
-    }
-
-    /// Get timestamps for a file.
-    /// Returns (crtime, mtime, ctime) for the file, accounting for pending operations.
-    pub(crate) fn file_timestamps(&self, path: &Path) -> Option<(Duration, Duration, Duration)> {
-        // Start with persisted timestamps
-        let persisted_path = self.resolve_persisted_path(path);
-        let mut timestamps = self
-            .persisted_files
-            .get(&persisted_path)
-            .map(|f| (f.crtime, f.mtime, f.ctime));
-
-        // Apply pending ops that affect timestamps
-        for (i, op) in self.pending.iter().enumerate() {
-            match op {
-                PendingOp::CreateFile { path: p, time, .. }
-                    if self.forward_path(i + 1, p) == path =>
-                {
-                    // New file creation sets all timestamps
-                    timestamps = Some((*time, *time, *time));
-                }
-                PendingOp::Write { path: p, time, .. }
-                | PendingOp::SetLen { path: p, time, .. }
-                    // Writes and truncates update mtime/ctime
-                    if self.forward_path(i + 1, p) == path && timestamps.is_some() => {
-                        let (crtime, _, _) = timestamps.unwrap();
-                        timestamps = Some((crtime, *time, *time));
-                    }
-                _ => {}
-            }
-        }
-
-        timestamps
-    }
-
-    /// Get timestamps for a directory.
-    /// Returns (crtime, mtime, ctime) for the directory, accounting for pending operations.
-    ///
-    /// Directory mtime is updated when:
-    /// - The directory itself is created
-    /// - Files or subdirectories are created in the directory
-    /// - Files or subdirectories are removed from the directory
-    /// - Files or subdirectories are renamed into/out of the directory
-    pub(crate) fn dir_timestamps(&self, path: &Path) -> Option<(Duration, Duration, Duration)> {
-        // Start with persisted timestamps
-        let mut timestamps = self
-            .persisted_dirs
-            .get(&self.resolve_persisted_path(path))
-            .map(|d| (d.crtime, d.mtime, d.ctime));
-
-        // Apply pending ops that affect timestamps
-        for (i, op) in self.pending.iter().enumerate() {
-            let in_dir = |p: &Path| self.forward_path(i + 1, p).parent() == Some(path);
-            match op {
-                PendingOp::CreateDir { path: p, time, .. }
-                    if self.forward_path(i + 1, p) == path =>
-                {
-                    // New dir creation sets all timestamps
-                    timestamps = Some((*time, *time, *time));
-                }
-                PendingOp::CreateFile { path: p, time, .. }
-                | PendingOp::CreateDir { path: p, time, .. }
-                    if in_dir(p) =>
-                {
-                    // File or subdir created in this directory updates mtime
-                    if let Some((crtime, _, _)) = timestamps {
-                        timestamps = Some((crtime, *time, *time));
-                    }
-                }
-                PendingOp::RemoveFile { path: p } | PendingOp::RemoveDir { path: p }
-                    if in_dir(p) =>
-                {
-                    // Removal from this directory updates mtime
-                    // Use current latest mtime as proxy (removal doesn't carry timestamp)
-                    // In real fs, this would use current time
-                    if let Some((crtime, mtime, _)) = timestamps {
-                        timestamps = Some((crtime, mtime, mtime));
-                    }
-                }
-                PendingOp::Rename { from, to }
-                    // Rename affects both source and destination parent directories
-                    if (from
-                        .parent()
-                        .is_some_and(|dir| self.forward_path(i + 1, dir) == path)
-                        || in_dir(to)) => {
-                        if let Some((crtime, mtime, _)) = timestamps {
-                            timestamps = Some((crtime, mtime, mtime));
-                        }
-                    }
-                _ => {}
-            }
-        }
-
-        timestamps
-    }
-
-    /// Get timestamps for a symlink.
-    /// Returns (crtime, mtime, ctime) for the symlink, accounting for pending operations.
-    pub(crate) fn symlink_timestamps(&self, path: &Path) -> Option<(Duration, Duration, Duration)> {
-        // Start with persisted timestamps
-        let mut timestamps = self
-            .persisted_symlinks
-            .get(&self.resolve_persisted_path(path))
-            .map(|s| (s.crtime, s.mtime, s.ctime));
-
-        // Apply pending ops that affect timestamps
-        for (i, op) in self.pending.iter().enumerate() {
-            if let PendingOp::CreateSymlink { path: p, time, .. } = op {
-                if self.forward_path(i + 1, p) == path {
-                    timestamps = Some((*time, *time, *time));
-                }
-            }
-        }
-
-        timestamps
-    }
-
-    /// List entries in a directory.
-    /// Returns paths of files, directories, and symlinks that are direct children of the given path.
-    pub(crate) fn dir_entries(&self, path: &Path) -> Vec<PathBuf> {
-        self.visible_paths()
-            .into_iter()
-            .filter(|p| p.parent() == Some(path))
-            .collect()
     }
 }
 
@@ -2443,6 +1357,12 @@ impl FsBuilder {
 #[derive(Clone)]
 pub struct Fs(Arc<Mutex<FsState>>);
 
+impl fmt::Debug for Fs {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Fs").finish_non_exhaustive()
+    }
+}
+
 impl Fs {
     /// Returns a builder for constructing an `Fs` with custom
     /// configuration.
@@ -2460,14 +1380,11 @@ impl Fs {
     ///
     /// Panics if called without an entered `Fs` on this thread.
     pub fn current() -> Self {
-        let state = CURRENT_FS_ARC.with(|current| {
-            current
-                .borrow()
-                .as_ref()
-                .map(Arc::clone)
-                .expect("turmoil-fs: no Fs is current (call Fs::enter first)")
-        });
-        Self(state)
+        Self::try_current().expect("turmoil-fs: no Fs is current (call Fs::enter first)")
+    }
+
+    fn try_current() -> Option<Self> {
+        CURRENT_FS_ARC.with_borrow(Clone::clone).map(Self)
     }
 
     /// Install this `Fs` as the current filesystem on the calling
@@ -2475,6 +1392,33 @@ impl Fs {
     /// this `Fs`.
     pub fn enter(&self) -> FsEnterGuard {
         enter(&self.0)
+    }
+
+    /// Runs `f` with this filesystem's state locked.
+    pub(crate) fn context<R>(&self, f: impl FnOnce(FsContext<'_>) -> R) -> R {
+        let locked = || {
+            let mut fs = self.0.lock().expect("FsState mutex poisoned");
+            let now = fs.now;
+            let result = f(FsContext { fs: &mut fs, now });
+            fs.reclaim();
+            result
+        };
+        if CORRUPTIONS.is_set() {
+            return locked();
+        }
+        let events = RefCell::new(Vec::new());
+        let result = CORRUPTIONS.set(&events, locked);
+        for (hook, event) in events.into_inner() {
+            hook(&event);
+        }
+        result
+    }
+
+    /// Closes every descriptor on this filesystem, as the OS does when the
+    /// process holding them exits. The embedder calls this when it restarts
+    /// a host's software.
+    pub fn close_all(&self) {
+        self.0.lock().expect("FsState mutex poisoned").close_all();
     }
 
     /// Advance simulated time. The embedder calls this before each
@@ -2489,6 +1433,32 @@ impl Fs {
     /// synced. See [`FsState::crash`] for the full semantics.
     pub fn crash(&self) {
         self.0.lock().expect("FsState mutex poisoned").crash();
+    }
+}
+
+/// A descriptor can close itself on its original filesystem without
+/// keeping that filesystem alive after the host exits.
+#[derive(Clone, Debug)]
+struct FileOwner(Weak<Mutex<FsState>>);
+
+impl FileOwner {
+    fn new(fs: &Fs) -> Self {
+        Self(Arc::downgrade(&fs.0))
+    }
+
+    fn entered(&self) -> io::Result<Fs> {
+        let fs = Fs::current();
+        std::ptr::eq(self.0.as_ptr(), Arc::as_ptr(&fs.0))
+            .then_some(fs)
+            .ok_or_else(stale_handle)
+    }
+
+    fn close(&self, fd: RawFd) {
+        if let Some(fs) = self.0.upgrade() {
+            if let Ok(mut state) = fs.lock() {
+                state.close(fd);
+            }
+        }
     }
 }
 

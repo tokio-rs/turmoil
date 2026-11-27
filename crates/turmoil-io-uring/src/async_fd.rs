@@ -5,7 +5,7 @@
 //! turmoil's simulated time, so consumers get correct wake
 //! semantics without touching real epoll/kqueue/eventfd.
 
-use crate::host::IoUringContext;
+use crate::host::RingId;
 use std::io;
 use std::os::fd::{AsRawFd, RawFd};
 use std::sync::Arc;
@@ -23,6 +23,7 @@ use tokio::time::Instant;
 /// [`io::Error`].
 pub struct AsyncFd<T: AsRawFd> {
     inner: T,
+    ring: RingId,
     notify: Arc<Notify>,
 }
 
@@ -35,20 +36,13 @@ impl<T: AsRawFd> AsyncFd<T> {
     /// New AsyncFd with a specific interest. The simulation only
     /// models READABLE; other interests are accepted but unused.
     pub fn with_interest(inner: T, _interest: Interest) -> io::Result<Self> {
-        let fd = inner.as_raw_fd();
-        let notify = IoUringContext::current(|ctx| {
-            ctx.io_uring
-                .rings
-                .get(&fd)
-                .map(|r| r.cq_notify.clone())
-                .ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::NotFound,
-                        format!("AsyncFd: fd {fd} is not a registered turmoil ring"),
-                    )
-                })
-        })?;
-        Ok(Self { inner, notify })
+        let ring = RingId::from_fd(inner.as_raw_fd())?;
+        let notify = ring.with(|r, _| r.cq_notify.clone())?;
+        Ok(Self {
+            inner,
+            ring,
+            notify,
+        })
     }
 
     /// Reference to the wrapped value.
@@ -69,7 +63,6 @@ impl<T: AsRawFd> AsyncFd<T> {
     /// Resolve when the ring has at least one ready CQE, mirroring
     /// [`tokio::io::unix::AsyncFd::readable`].
     pub async fn readable(&self) -> io::Result<AsyncFdReadyGuard<'_, T>> {
-        let fd = self.inner.as_raw_fd();
         loop {
             // Subscribe BEFORE we sample state, so a `notify_waiters()`
             // call that races between the snapshot and the await is
@@ -83,21 +76,10 @@ impl<T: AsRawFd> AsyncFd<T> {
 
             // Snapshot under the io_uring lock: are we ready right
             // now? If not, what's the next deadline?
-            let snapshot = IoUringContext::current(|ctx| -> io::Result<Snapshot> {
-                let ring = ctx.io_uring.rings.get(&fd).ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::NotFound,
-                        "AsyncFd: ring is no longer registered",
-                    )
-                })?;
-                let now = ctx.now;
-                let ready = ring.ready_cq_count(now) > 0;
-                let deadline = ring.next_deadline();
-                Ok(Snapshot {
-                    ready,
-                    deadline,
-                    now,
-                })
+            let snapshot = self.ring.with(|ring, now| Snapshot {
+                ready: ring.ready_cq_count(now) > 0,
+                deadline: ring.next_deadline(),
+                now,
             })?;
 
             if snapshot.ready {

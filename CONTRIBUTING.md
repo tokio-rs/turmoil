@@ -26,7 +26,9 @@ cargo test --workspace --features regex
 cargo test -p turmoil --features unstable-fs --test fs
 cargo test -p turmoil --features unstable-io_uring --test fs --test io_uring_conformance
 cargo test -p turmoil --features unstable-barriers --test barriers
+cargo test -p turmoil --features real-fs-conformance --test fs_conformance
 RUSTFLAGS=--cfg=parity_io_uring cargo check -p turmoil --features unstable-io_uring --tests
+RUSTFLAGS=--cfg=parity_fs cargo check -p turmoil --features unstable-fs --tests
 ```
 
 Public-API drift on `turmoil` is gated by `cargo-check-external-types` in CI.

@@ -1,8 +1,10 @@
 //! Symlink and hard link tests.
 
+use std::os::unix::fs::{FileExt, MetadataExt};
 use turmoil::fs::shim::std::fs::{
-    canonicalize, create_dir, hard_link, metadata, read, symlink, write,
+    canonicalize, create_dir, hard_link, metadata, read, remove_file, write, OpenOptions,
 };
+use turmoil::fs::shim::std::os::unix::fs::symlink;
 use turmoil::{Builder, Result};
 
 #[test]
@@ -111,7 +113,7 @@ fn remove_symlink() -> Result {
         assert!(symlink_metadata("/link").is_err());
 
         // But target still exists
-        assert!(exists("/data/target.txt"));
+        assert!(exists("/data/target.txt")?);
 
         Ok(())
     });
@@ -235,6 +237,53 @@ fn symlink_cycle_detected() -> Result {
     sim.run()
 }
 
+/// A path follows forty symlinks and no more, and fails past that with
+/// the error Linux has for it. Its kind has no stable name.
+#[test]
+fn symlinks_are_followed_forty_deep() -> Result {
+    let mut sim = Builder::new().build();
+    sim.client("test", async {
+        write("/0", b"end")?;
+        for hop in 1..=41 {
+            symlink(format!("/{}", hop - 1), format!("/{hop}"))?;
+        }
+        symlink("/self", "/self")?;
+        assert_eq!(read("/40")?, b"end");
+        for path in ["/41", "/self", "/self/below"] {
+            let lost = read(path).unwrap_err();
+            assert_eq!(lost.raw_os_error(), Some(libc::ELOOP), "{path}");
+        }
+        Ok(())
+    });
+    sim.run()
+}
+
+/// A symlink is as long as its target, and a directory has a link for its
+/// name, one for its `.`, and one for the `..` of each directory in it.
+#[test]
+fn links_and_lengths_are_those_of_linux() -> Result {
+    use turmoil::fs::shim::std::fs::{create_dir_all, remove_dir, rename, symlink_metadata};
+
+    let mut sim = Builder::new().build();
+    sim.client("test", async {
+        create_dir_all("/dir/one")?;
+        create_dir("/dir/two")?;
+        write("/dir/file", b"abc")?;
+        symlink("/dir/file", "/dir/link")?;
+        let link = symlink_metadata("/dir/link")?;
+        assert_eq!(link.len(), "/dir/file".len() as u64);
+        assert_eq!(metadata("/dir/link")?.len(), 3);
+
+        let links = |path: &str| metadata(path).map(|meta| meta.nlink());
+        assert_eq!((links("/")?, links("/dir")?, links("/dir/one")?), (3, 4, 2));
+        rename("/dir/two", "/two")?;
+        remove_dir("/dir/one")?;
+        assert_eq!((links("/")?, links("/dir")?, links("/two")?), (4, 2, 2));
+        Ok(())
+    });
+    sim.run()
+}
+
 /// Test that long symlink chains are handled correctly.
 #[test]
 fn symlink_chain_limit() -> Result {
@@ -253,6 +302,26 @@ fn symlink_chain_limit() -> Result {
         let result = canonicalize("/chain3")?;
         assert_eq!(result, std::path::PathBuf::from("/data/file.txt"));
 
+        Ok(())
+    });
+    sim.run()
+}
+
+#[test]
+fn hard_links_share_one_file() -> Result {
+    let mut sim = Builder::new().build();
+    sim.client("test", async {
+        write("/a", b"AAAA")?;
+        hard_link("/a", "/b")?;
+        assert_eq!(metadata("/a")?.ino(), metadata("/b")?.ino());
+
+        let file = OpenOptions::new().write(true).open("/b")?;
+        file.write_all_at(b"ZZ", 0)?;
+        assert_eq!(read("/a")?, b"ZZAA");
+
+        remove_file("/a")?;
+        assert_eq!(read("/b")?, b"ZZAA");
+        assert_eq!(metadata("/b")?.nlink(), 1);
         Ok(())
     });
     sim.run()

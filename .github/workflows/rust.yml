@@ -36,12 +36,18 @@ jobs:
         run: cargo test -p turmoil --features unstable-io_uring --test fs --test io_uring_conformance
       - name: unstable-io_uring (real Linux ring)
         run: cargo test -p turmoil --features unstable-io_uring,real-uring-conformance --test io_uring_conformance
+      - name: unstable-fs (real Linux filesystem)
+        run: cargo test -p turmoil --features real-fs-conformance --test fs_conformance
       - name: unstable-barriers
         run: cargo test -p turmoil --features unstable-barriers --test barriers
       - name: parity check vs real io-uring crate
         run: cargo check -p turmoil --features unstable-io_uring --tests
         env:
           RUSTFLAGS: --cfg=parity_io_uring
+      - name: parity check vs real std::fs and tokio::fs
+        run: cargo check -p turmoil --features unstable-fs --tests
+        env:
+          RUSTFLAGS: --cfg=parity_fs
       - name: turmoil-io-uring without fs feature compiles
         run: cargo check -p turmoil-io-uring
 

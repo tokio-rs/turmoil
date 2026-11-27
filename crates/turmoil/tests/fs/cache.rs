@@ -4,6 +4,47 @@ use std::time::Duration;
 use turmoil::fs::shim::tokio::fs as tokio_fs;
 use turmoil::{Builder, Result};
 
+#[test]
+fn foreign_descriptor_leaves_local_pages_cold() -> Result {
+    use std::io::ErrorKind;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::FileExt;
+    use turmoil::fs::shim::std::fs::OpenOptions;
+    use turmoil::fs::Fs;
+
+    let mut builder = Builder::new();
+    let latency = Duration::from_millis(10);
+    let timing = builder.fs().io_latency();
+    timing.min_latency(latency).max_latency(latency);
+    builder.fs().page_cache();
+    let mut sim = builder.build();
+    sim.client("local", async move {
+        let mut options = OpenOptions::new();
+        options.create(true).read(true).write(true);
+        let other = Fs::default();
+        let foreign = {
+            let _guard = other.enter();
+            tokio_fs::File::from_std(options.open("/foreign")?)
+        };
+        let local = options.open("/local")?;
+        assert_eq!(local.as_raw_fd(), foreign.as_raw_fd());
+        local.write_all_at(b"local", 0)?;
+        let local = tokio_fs::File::from_std(local);
+        let mut buf = [0; 5];
+        let rejected = foreign.read_at(&mut buf, 0).await.unwrap_err();
+        assert_eq!(rejected.kind(), ErrorKind::NotFound);
+        let rejected = foreign.write_at(b"wrong", 0).await.unwrap_err();
+        assert_eq!(rejected.kind(), ErrorKind::NotFound);
+
+        let start = tokio::time::Instant::now();
+        local.read_at(&mut buf, 0).await?;
+        assert!(start.elapsed() >= latency);
+        assert_eq!(&buf, b"local");
+        Ok(())
+    });
+    sim.run()
+}
+
 /// Test that writes populate the cache and subsequent reads are fast.
 #[test]
 fn cache_hit_reduces_latency() -> Result {
@@ -284,6 +325,111 @@ fn cache_multiple_files() -> Result {
             elapsed
         );
 
+        Ok(())
+    });
+    sim.run()
+}
+
+/// A removed file gives its pages back, so they cannot push out the pages
+/// of files that are still there.
+#[test]
+fn removed_file_leaves_the_cache() -> Result {
+    let mut builder = Builder::new();
+    builder
+        .fs()
+        .io_latency()
+        .min_latency(Duration::from_millis(10))
+        .max_latency(Duration::from_millis(10));
+    builder.fs().page_cache().max_pages(2);
+
+    let mut sim = builder.build();
+    sim.client("test", async {
+        let mut options = tokio_fs::OpenOptions::new();
+        options.read(true).write(true).create(true);
+
+        let kept = options.open("/kept").await?;
+        kept.write_at(b"kept", 0).await?;
+        let removed = options.open("/removed").await?;
+        removed.write_at(b"removed", 0).await?;
+        drop(removed);
+        tokio_fs::remove_file("/removed").await?;
+
+        // Fills the slot the removed file gave up, not the kept file's.
+        let new = options.open("/new").await?;
+        new.write_at(b"new", 0).await?;
+
+        let start = tokio::time::Instant::now();
+        kept.read_at(&mut [0u8; 4], 0).await?;
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(5),
+            "kept page should still be cached, got {elapsed:?}"
+        );
+        Ok(())
+    });
+    sim.run()
+}
+
+/// A crash empties the page cache along with the rest of memory.
+#[test]
+fn crash_empties_the_cache() -> Result {
+    let mut builder = Builder::new();
+    builder
+        .fs()
+        .io_latency()
+        .min_latency(Duration::from_millis(10))
+        .max_latency(Duration::from_millis(10));
+    builder.fs().page_cache();
+
+    let mut sim = builder.build();
+    sim.client("test", async {
+        let file = tokio_fs::File::create("/file").await?;
+        file.write_at(b"data", 0).await?;
+        file.sync_all().await?;
+        tokio_fs::sync_dir("/").await?;
+        drop(file);
+
+        turmoil::fs::Fs::current().crash();
+
+        let file = tokio_fs::File::open("/file").await?;
+        let start = tokio::time::Instant::now();
+        file.read_at(&mut [0u8; 4], 0).await?;
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(10),
+            "read after a crash should miss the cache, got {elapsed:?}"
+        );
+        Ok(())
+    });
+    sim.run()
+}
+
+/// A write through a descriptor that appends lands at the end of the
+/// file, wherever it is aimed, and that is the page it leaves in the cache.
+#[test]
+fn appended_write_caches_the_page_it_lands_on() -> Result {
+    use turmoil::fs::shim::std::fs::{write, OpenOptions};
+
+    let mut builder = Builder::new();
+    let latency = Duration::from_millis(10);
+    let timing = builder.fs().io_latency();
+    timing.min_latency(latency).max_latency(latency);
+    builder.fs().page_cache();
+    let mut sim = builder.build();
+    sim.client("test", async move {
+        const END: u64 = 3 * 4096;
+        write("/log", vec![0; END as usize])?;
+        let mut options = OpenOptions::new();
+        let log = options.read(true).append(true).open("/log")?;
+        let log = tokio_fs::File::from_std(log);
+        log.write_at(b"tail", 0).await?;
+
+        let mut buf = [0; 4];
+        let start = tokio::time::Instant::now();
+        log.read_at(&mut buf, END).await?;
+        let (hit, start) = (start.elapsed(), tokio::time::Instant::now());
+        log.read_at(&mut buf, 0).await?;
+        assert!(hit < latency && start.elapsed() >= latency, "{hit:?}");
         Ok(())
     });
     sim.run()
