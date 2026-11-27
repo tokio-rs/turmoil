@@ -18,15 +18,17 @@ fn host_addresses_are_aliases_on_one_inspectable_interface() {
         "fd00::1".parse().unwrap(),
     ];
     let host = net.add_host(addresses);
-    let interfaces = net.interfaces(host);
-    assert_eq!(interfaces.len(), 2);
-    assert_eq!(interfaces[0].id, InterfaceId::Loopback);
-    assert_eq!(interfaces[0].id.index(), 1);
-    assert_eq!(interfaces[0].mtu, 32000);
-    assert_eq!(interfaces[1].id, InterfaceId::Link);
-    assert_eq!(interfaces[1].id.index(), 2);
-    assert_eq!(interfaces[1].addresses, addresses);
-    assert_eq!(interfaces[1].mtu, 1400);
+    let mut interfaces = net.interfaces(host);
+    let loopback = interfaces.next().unwrap();
+    assert_eq!(loopback.id, InterfaceId::Loopback);
+    assert_eq!(loopback.id as u32, 1);
+    assert_eq!(loopback.mtu, 32000);
+    let link = interfaces.next().unwrap();
+    assert_eq!(link.id, InterfaceId::Link);
+    assert_eq!(link.id as u32, 2);
+    assert_eq!(link.addresses, addresses);
+    assert_eq!(link.mtu, 1400);
+    assert!(interfaces.next().is_none());
 }
 
 fn join(socket: &UdpSocket, group: IpAddr) {

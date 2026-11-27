@@ -303,7 +303,7 @@ pub(super) fn deliver(k: &mut Kernel, pkt: &Packet, d: &UdpDatagram, scope: Inte
 fn source_endpoint(ip: IpAddr, port: u16, interface: InterfaceId) -> Addr {
     let addr = match ip {
         IpAddr::V6(ip) if ip.is_unicast_link_local() => {
-            SocketAddrV6::new(ip, port, 0, interface.index()).into()
+            SocketAddrV6::new(ip, port, 0, interface as u32).into()
         }
         _ => SocketAddr::new(ip, port),
     };

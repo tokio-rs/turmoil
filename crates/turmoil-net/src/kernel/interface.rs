@@ -4,18 +4,13 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 /// An interface identity local to a host. Addresses on an interface are
 /// aliases, not separate interfaces. Indices are stable within the simulation.
+/// Discriminants match socket interface indices; zero is reserved for default
+/// selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u32)]
 pub enum InterfaceId {
-    Loopback = 0,
-    Link = 1,
-}
-
-impl InterfaceId {
-    /// The socket interface index; zero is reserved for the default interface.
-    pub fn index(self) -> u32 {
-        self as u32 + 1
-    }
+    Loopback = 1,
+    Link = 2,
 }
 
 /// A host interface. Every host has `lo` and a shared-link interface `eth0`;
@@ -29,41 +24,46 @@ pub struct Interface {
 }
 
 #[derive(Debug)]
-pub(super) struct Interfaces([Interface; 2]);
+pub(super) struct Interfaces {
+    loopback: Interface,
+    link: Interface,
+}
 
 impl Interfaces {
     pub fn new(mtu: u32, loopback_mtu: u32) -> Self {
-        Self([
-            Interface {
+        Self {
+            loopback: Interface {
                 id: InterfaceId::Loopback,
                 name: "lo",
                 addresses: vec![Ipv4Addr::LOCALHOST.into(), Ipv6Addr::LOCALHOST.into()],
                 mtu: loopback_mtu,
             },
-            Interface {
+            link: Interface {
                 id: InterfaceId::Link,
                 name: "eth0",
                 addresses: Vec::new(),
                 mtu,
             },
-        ])
+        }
     }
 
-    pub fn all(&self) -> &[Interface] {
-        &self.0
+    pub fn iter(&self) -> impl Iterator<Item = &Interface> {
+        [&self.loopback, &self.link].into_iter()
     }
 
     pub fn get(&self, id: InterfaceId) -> &Interface {
-        &self.0[id as usize]
+        match id {
+            InterfaceId::Loopback => &self.loopback,
+            InterfaceId::Link => &self.link,
+        }
     }
 
     pub fn add_address(&mut self, addr: IpAddr) {
-        let id = if addr.is_loopback() {
-            InterfaceId::Loopback
+        let interface = if addr.is_loopback() {
+            &mut self.loopback
         } else {
-            InterfaceId::Link
+            &mut self.link
         };
-        let interface = &mut self.0[id as usize];
         if !interface.addresses.contains(&addr) {
             interface.addresses.push(addr);
         }
@@ -73,11 +73,11 @@ impl Interfaces {
         if addr.is_loopback() {
             return Some(self.get(InterfaceId::Loopback));
         }
-        self.0.iter().find(|i| i.addresses.contains(&addr))
+        self.iter().find(|i| i.addresses.contains(&addr))
     }
 
     pub fn by_index(&self, index: u32) -> Option<&Interface> {
-        self.0.iter().find(|i| i.id.index() == index)
+        self.iter().find(|i| i.id as u32 == index)
     }
 
     pub fn source(&self, id: InterfaceId, dst: IpAddr) -> Option<IpAddr> {
